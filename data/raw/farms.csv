@@ -1,0 +1,9 @@
+farm_id,farm_name,region,primary_crop,greenhouse_acres,production_system,climate_zone
+F01,BC Harvest 1,Chilliwack,Tomato,4.6,Mixed,Coastal
+F02,BC Harvest 2,Maple Ridge,Pepper,7.6,Greenhouse,Interior
+F03,BC Harvest 3,Langley,Strawberry,6.3,Mixed,Interior
+F04,BC Harvest 4,Maple Ridge,Cucumber,10.8,Mixed,Fraser Valley
+F05,BC Harvest 5,Abbotsford,Strawberry,13.9,Greenhouse,Fraser Valley
+F06,BC Harvest 6,Maple Ridge,Strawberry,2.8,Greenhouse,Interior
+F07,BC Harvest 7,Abbotsford,Strawberry,5.9,Mixed,Interior
+F08,BC Harvest 8,Langley,Strawberry,8.4,Mixed,Coastal

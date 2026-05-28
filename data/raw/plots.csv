@@ -1,0 +1,121 @@
+plot_id,greenhouse_id,farm_id,crop,treatment_block,treatment,plot_area_m2,plant_density_plants_m2,row_orientation
+P0001,GH003,F08,Strawberry,A,Low N,11.78,12.1,East
+P0002,GH013,F08,Strawberry,A,Shade,14.84,8.41,North
+P0003,GH003,F08,Strawberry,C,Shade,22.33,15.61,North
+P0004,GH002,F01,Tomato,D,Integrated Pest,22.52,11.99,North
+P0005,GH004,F01,Tomato,C,High N,11.25,23.09,East
+P0006,GH008,F05,Strawberry,C,High N,10.58,22.88,North
+P0007,GH008,F05,Strawberry,B,Control,9.69,15.3,West
+P0008,GH009,F06,Strawberry,D,Integrated Pest,22.28,16.63,South
+P0009,GH018,F06,Strawberry,C,Integrated Pest,13.7,22.51,North
+P0010,GH013,F08,Strawberry,A,High N,14.83,21.09,North
+P0011,GH009,F06,Strawberry,C,Shade,10.63,16.55,South
+P0012,GH017,F08,Strawberry,A,Control,9.92,13.4,East
+P0013,GH008,F05,Strawberry,C,High Light,11.5,16.93,West
+P0014,GH019,F08,Strawberry,A,High Light,23.55,23.4,South
+P0015,GH001,F02,Pepper,C,Low N,19.4,10.37,West
+P0016,GH019,F08,Strawberry,A,High N,17.75,16.04,South
+P0017,GH004,F01,Tomato,C,Reduced Pest,13.52,18.15,South
+P0018,GH013,F08,Strawberry,B,Reduced Pest,15.83,23.77,West
+P0019,GH002,F01,Tomato,C,Integrated Pest,9.29,13.91,North
+P0020,GH015,F02,Pepper,C,High Light,13.88,18.12,South
+P0021,GH004,F01,Tomato,B,High N,21.06,20.77,North
+P0022,GH017,F08,Strawberry,D,High N,10.98,8.65,West
+P0023,GH016,F05,Strawberry,D,High N,11.52,19.38,East
+P0024,GH017,F08,Strawberry,C,Integrated Pest,18.32,10.79,North
+P0025,GH001,F02,Pepper,D,Shade,22.99,10.2,West
+P0026,GH007,F04,Cucumber,A,Control,11.35,16.66,South
+P0027,GH003,F08,Strawberry,C,Shade,18.56,21.08,North
+P0028,GH017,F08,Strawberry,D,Integrated Pest,12.17,23.94,South
+P0029,GH014,F02,Pepper,D,Reduced Pest,22.41,18.13,North
+P0030,GH012,F04,Cucumber,A,High N,19.21,21.55,West
+P0031,GH019,F08,Strawberry,D,High Light,20.48,18.27,East
+P0032,GH020,F01,Tomato,A,Integrated Pest,22.38,17.7,East
+P0033,GH008,F05,Strawberry,D,High Light,23.04,23.58,South
+P0034,GH016,F05,Strawberry,D,High Light,16.78,19.07,West
+P0035,GH016,F05,Strawberry,A,Control,10.81,8.29,South
+P0036,GH007,F04,Cucumber,A,Integrated Pest,13.86,19.91,East
+P0037,GH020,F01,Tomato,A,Control,16.68,16.14,South
+P0038,GH018,F06,Strawberry,C,High Light,11.9,23.57,North
+P0039,GH020,F01,Tomato,C,High Light,22.5,14.95,North
+P0040,GH005,F01,Tomato,B,Control,17.23,15.88,North
+P0041,GH004,F01,Tomato,D,Reduced Pest,15.99,17.15,West
+P0042,GH002,F01,Tomato,A,Control,23.91,15.52,South
+P0043,GH009,F06,Strawberry,A,High Light,13.92,8.25,West
+P0044,GH017,F08,Strawberry,A,Control,16.84,17.16,West
+P0045,GH005,F01,Tomato,A,Integrated Pest,12.71,14.16,East
+P0046,GH020,F01,Tomato,A,High N,10.71,16.91,East
+P0047,GH014,F02,Pepper,B,Low N,22.88,9.13,South
+P0048,GH007,F04,Cucumber,D,Shade,23.84,10.24,East
+P0049,GH001,F02,Pepper,B,Low N,13.16,21.58,North
+P0050,GH018,F06,Strawberry,C,High Light,13.75,12.7,East
+P0051,GH002,F01,Tomato,B,High N,12.1,17.78,West
+P0052,GH016,F05,Strawberry,B,Shade,16.02,20.77,North
+P0053,GH010,F03,Strawberry,D,High Light,20.73,22.24,East
+P0054,GH004,F01,Tomato,C,Integrated Pest,17.26,15.02,East
+P0055,GH012,F04,Cucumber,B,High N,15.45,16.68,North
+P0056,GH004,F01,Tomato,B,Low N,21.77,12,South
+P0057,GH018,F06,Strawberry,B,Shade,13.76,10.03,North
+P0058,GH008,F05,Strawberry,D,Reduced Pest,12.34,23.44,East
+P0059,GH013,F08,Strawberry,D,High Light,8.83,16.5,East
+P0060,GH004,F01,Tomato,C,Shade,10.21,10.12,South
+P0061,GH017,F08,Strawberry,D,Low N,13.17,20.72,East
+P0062,GH013,F08,Strawberry,C,Integrated Pest,19.9,12.01,South
+P0063,GH019,F08,Strawberry,A,High Light,21.38,19.14,North
+P0064,GH011,F05,Strawberry,A,Low N,22.64,15.08,West
+P0065,GH020,F01,Tomato,B,High Light,19.43,18.56,North
+P0066,GH019,F08,Strawberry,A,Reduced Pest,19.81,16.87,South
+P0067,GH017,F08,Strawberry,A,Shade,8.76,17.06,East
+P0068,GH013,F08,Strawberry,A,High Light,8.23,9.86,North
+P0069,GH020,F01,Tomato,C,Control,12.98,23.67,North
+P0070,GH002,F01,Tomato,D,Low N,20.21,20.91,West
+P0071,GH017,F08,Strawberry,A,High Light,14.94,14.38,South
+P0072,GH013,F08,Strawberry,B,Reduced Pest,22.19,12.17,South
+P0073,GH014,F02,Pepper,B,High N,16.05,21.7,North
+P0074,GH005,F01,Tomato,A,Integrated Pest,17.85,23.1,South
+P0075,GH002,F01,Tomato,A,Integrated Pest,17.37,23.04,West
+P0076,GH019,F08,Strawberry,D,Low N,17.17,10.06,North
+P0077,GH019,F08,Strawberry,C,High N,23.06,14.18,North
+P0078,GH009,F06,Strawberry,D,Low N,11.31,12.38,West
+P0079,GH017,F08,Strawberry,C,High Light,8.29,9.51,East
+P0080,GH016,F05,Strawberry,C,Control,18.49,14.17,South
+P0081,GH003,F08,Strawberry,B,High Light,21.03,12.51,West
+P0082,GH003,F08,Strawberry,B,Reduced Pest,13.57,22.99,West
+P0083,GH004,F01,Tomato,D,Control,20.86,12.51,South
+P0084,GH011,F05,Strawberry,A,Control,17.1,17.21,East
+P0085,GH007,F04,Cucumber,D,Integrated Pest,13.95,20.42,West
+P0086,GH018,F06,Strawberry,C,High Light,16.99,11.82,East
+P0087,GH010,F03,Strawberry,A,Shade,20.07,9.65,North
+P0088,GH010,F03,Strawberry,A,High Light,15.94,14.23,North
+P0089,GH012,F04,Cucumber,C,High N,14.23,8.17,North
+P0090,GH013,F08,Strawberry,C,Integrated Pest,13.68,23.31,East
+P0091,GH018,F06,Strawberry,D,Integrated Pest,17.18,18.11,North
+P0092,GH020,F01,Tomato,A,High N,17.64,16.86,North
+P0093,GH012,F04,Cucumber,D,Reduced Pest,20.67,20.63,North
+P0094,GH009,F06,Strawberry,A,Low N,23.59,23.93,South
+P0095,GH006,F07,Strawberry,A,High N,22.2,13.61,South
+P0096,GH004,F01,Tomato,C,Integrated Pest,19.01,21.39,North
+P0097,GH018,F06,Strawberry,A,High Light,9.35,19.22,South
+P0098,GH013,F08,Strawberry,A,Low N,22.27,10.35,North
+P0099,GH016,F05,Strawberry,A,High Light,23.79,13.99,North
+P0100,GH001,F02,Pepper,B,Integrated Pest,11.79,22.52,North
+P0101,GH019,F08,Strawberry,D,Integrated Pest,14.02,9.34,North
+P0102,GH002,F01,Tomato,D,High Light,19.28,11.98,East
+P0103,GH007,F04,Cucumber,C,High Light,15.88,8.18,West
+P0104,GH015,F02,Pepper,B,Low N,19.86,20.28,East
+P0105,GH006,F07,Strawberry,A,Shade,19.94,17.33,South
+P0106,GH016,F05,Strawberry,A,Shade,15.64,9.33,North
+P0107,GH012,F04,Cucumber,B,Reduced Pest,23.41,8.19,West
+P0108,GH020,F01,Tomato,A,Reduced Pest,13.16,8.69,North
+P0109,GH012,F04,Cucumber,C,Integrated Pest,9.18,16.86,West
+P0110,GH007,F04,Cucumber,A,Low N,10.66,11.47,East
+P0111,GH016,F05,Strawberry,C,Control,18.04,17.35,West
+P0112,GH009,F06,Strawberry,C,Control,22.64,23.34,West
+P0113,GH013,F08,Strawberry,D,High Light,15.29,17.92,West
+P0114,GH005,F01,Tomato,B,Integrated Pest,18.35,14.21,West
+P0115,GH013,F08,Strawberry,B,Integrated Pest,9.24,23.59,West
+P0116,GH007,F04,Cucumber,C,High Light,8.52,12.48,North
+P0117,GH020,F01,Tomato,D,Reduced Pest,18.96,10.6,South
+P0118,GH018,F06,Strawberry,C,Reduced Pest,23.05,14.67,North
+P0119,GH013,F08,Strawberry,C,Control,14.69,22.92,South
+P0120,GH009,F06,Strawberry,C,Reduced Pest,10.64,14.58,South

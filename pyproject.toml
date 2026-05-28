@@ -1,0 +1,25 @@
+[project]
+name = "greenleaf-dashboard"
+version = "0.1.0"
+description = "Dashboard for the RBC x BCCAI x SFU Beedie Agribusiness Analytics Hackathon 2026 — GreenLeaf CEA"
+requires-python = ">=3.10"
+dependencies = [
+    "pandas==2.2.3",
+    "numpy==2.2.1",
+    "scikit-learn==1.6.0",
+    "scipy==1.15.0",
+    "streamlit==1.41.1",
+    "plotly==5.24.1",
+    "pyarrow==18.1.0",
+    "anthropic==0.42.0",
+    "sentence-transformers==3.3.1",
+    "pytest==8.3.4",
+    "pyyaml==6.0.2",
+]
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+py-modules = []

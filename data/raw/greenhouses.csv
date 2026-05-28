@@ -1,0 +1,21 @@
+greenhouse_id,farm_id,crop,structure_type,heating_system,irrigation_system,capacity_plants,sensor_density_per_100m2
+GH001,F02,Pepper,Glass,Hydronic,Fertigation,174,1
+GH002,F01,Tomato,Glass,Heat Pump,EBB-Flow,171,1
+GH003,F08,Strawberry,Polyfilm,Natural Gas,EBB-Flow,48,2
+GH004,F01,Tomato,Glass,Natural Gas,Fertigation,211,1
+GH005,F01,Tomato,Polyfilm,Heat Pump,Fertigation,120,4
+GH006,F07,Strawberry,Polyfilm,Natural Gas,EBB-Flow,173,2
+GH007,F04,Cucumber,Polyfilm,Natural Gas,Drip,185,2
+GH008,F05,Strawberry,Polyfilm,Natural Gas,EBB-Flow,53,3
+GH009,F06,Strawberry,Polyfilm,Heat Pump,EBB-Flow,79,1
+GH010,F03,Strawberry,Polyfilm,Hydronic,EBB-Flow,150,1
+GH011,F05,Strawberry,Polyfilm,Natural Gas,Drip,163,1
+GH012,F04,Cucumber,Glass,Hydronic,Fertigation,84,1
+GH013,F08,Strawberry,Glass,Heat Pump,Drip,127,1
+GH014,F02,Pepper,Polyfilm,Heat Pump,Fertigation,120,4
+GH015,F02,Pepper,Glass,Heat Pump,Drip,162,1
+GH016,F05,Strawberry,Polyfilm,Heat Pump,EBB-Flow,80,4
+GH017,F08,Strawberry,Glass,Hydronic,EBB-Flow,72,4
+GH018,F06,Strawberry,Glass,Heat Pump,EBB-Flow,76,3
+GH019,F08,Strawberry,Polyfilm,Natural Gas,Fertigation,74,1
+GH020,F01,Tomato,Glass,Hydronic,Fertigation,170,1
