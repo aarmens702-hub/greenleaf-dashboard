@@ -1,9 +1,16 @@
 /data/derived/
+/data/derived_csv/
 /models/*.pkl
+/app/rag/index_data/
 .venv/
+.env
+*.env
+*.egg-info/
 __pycache__/
 *.pyc
 .DS_Store
 .pytest_cache/
 /docs/corpus/*
 !/docs/corpus/.gitkeep
+.env
+*.env
