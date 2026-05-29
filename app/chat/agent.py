@@ -118,14 +118,14 @@ def _add_per_plot(result_df, group_by, df, target_cols):
 
 
 def query_data(table, filters=None, group_by=None, aggregate=None,
-               sort_by=None, ascending=False, limit=20):
+               sort_by=None, ascending=False, limit=20, time_bucket=None):
     """Flexible filtered/grouped aggregation over a whitelisted GreenLeaf table.
 
     Safe by construction: only parameterized pandas, whitelisted tables and
-    aggregate functions, and column-name validation. Unknown columns are skipped
-    with a note rather than raising. crop/treatment are auto-joined from plot_meta
-    when referenced but absent. Returns {table, n_rows_matched, result,
-    columns_used, notes}.
+    aggregate functions, and column-name validation. crop/treatment are auto-joined
+    from plot_meta when referenced but absent. time_bucket ('week'|'month') resamples
+    by date for trend questions and disables the row cap so the whole season is
+    returned. Returns {table, n_rows_matched, result, columns_used, notes}.
     """
     if table not in _TABLES:
         raise ValueError(
@@ -139,6 +139,23 @@ def query_data(table, filters=None, group_by=None, aggregate=None,
         group_by = [group_by]
     group_by = list(group_by or [])
     aggregate = dict(aggregate or {})
+
+    # Time bucketing: resample by date into week/month periods so 'over the season'
+    # questions see the full range (the prior bug truncated to the first 20 dates).
+    if time_bucket:
+        if time_bucket not in ("week", "month"):
+            raise ValueError("time_bucket must be 'week' or 'month'.")
+        if "date" not in df.columns:
+            raise ValueError(
+                f"time_bucket needs a 'date' column; table '{table}' has none. "
+                f"Use 'daily', 'actions', or 'scouting'."
+            )
+        freq = "W" if time_bucket == "week" else "M"
+        df["period"] = df["date"].dt.to_period(freq).dt.start_time
+        if "period" not in group_by:
+            group_by = ["period", *group_by]
+        if not sort_by:
+            sort_by, ascending = "period", True  # chronological by default
 
     # Auto-join plot_meta for crop/treatment if referenced anywhere but missing.
     referenced = set(filters) | set(group_by) | set(aggregate)
@@ -203,13 +220,23 @@ def query_data(table, filters=None, group_by=None, aggregate=None,
     else:
         result_df = df
 
-    # Sort + limit.
+    # Sort.
     if sort_by and sort_by in result_df.columns:
         result_df = result_df.sort_values(sort_by, ascending=bool(ascending))
     elif sort_by:
         notes.append(f"skipped sort on unknown column '{sort_by}'")
-    limit = max(1, min(int(limit), 200))
-    result_df = result_df.head(limit)
+
+    # Limit — but NEVER silently truncate a time-series: a time-bucketed result, or
+    # one ordered by date/period, returns the full ordered series so trends are whole.
+    n_result = len(result_df)
+    is_timeseries = bool(time_bucket) or sort_by in ("date", "period")
+    if is_timeseries:
+        notes.append(f"time-series: returned all {n_result} buckets (no row cap)")
+    else:
+        eff_limit = max(1, min(int(limit), 200))
+        if n_result > eff_limit:
+            notes.append(f"rows_returned={eff_limit} of rows_matched-groups={n_result} (truncated)")
+        result_df = result_df.head(eff_limit)
 
     return {
         "table": table,
@@ -230,9 +257,16 @@ _FIXED_TOOLS = {
     "treatment_summary": dq.treatment_summary,
     "top_at_risk_plots": dq.top_at_risk_plots,
     "greenleaf_vs_benchmark": dq.greenleaf_vs_benchmark,
+    # P0: previously-unexposed but tested functions, now first-class tools.
+    "season_overview": dq.season_overview,
+    "avg_profit_by_crop": dq.avg_profit_by_crop,
+    "plot_status": dq.plot_status,
+    "cost_breakdown": dq.cost_breakdown,
+    "alert_response_summary": dq.alert_response_summary,
 }
 
-_QUERY_DATA_KEYS = {"table", "filters", "group_by", "aggregate", "sort_by", "ascending", "limit"}
+_QUERY_DATA_KEYS = {"table", "filters", "group_by", "aggregate", "sort_by",
+                    "ascending", "limit", "time_bucket"}
 
 TOOL_SCHEMAS = [
     {
@@ -316,6 +350,64 @@ TOOL_SCHEMAS = [
     {
         "type": "function",
         "function": {
+            "name": "season_overview",
+            "description": "Whole-operation summary: farm/greenhouse/plot/crop counts and season totals (revenue, cost, profit, overall ROI, mean marketable ratio, mean yield). Use for 'overview', 'how is the whole operation doing', totals/ROI.",
+            "parameters": {"type": "object", "properties": {}},
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "avg_profit_by_crop",
+            "description": "Mean season profit per plot for each crop. Use for 'which crop is most/least profitable', per-crop profit comparisons.",
+            "parameters": {"type": "object", "properties": {}},
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "plot_status",
+            "description": "Single plot snapshot: metadata, season financials, and recent daily readings (stress, alerts, actions). Use for 'how is plot P0001 doing', any question about ONE specific plot id.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "plot_id": {"type": "string", "description": "Plot id, e.g. 'P0001'."},
+                    "last_n_days": {"type": "integer", "description": "How many recent daily rows to include (default 14)."},
+                },
+                "required": ["plot_id"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "cost_breakdown",
+            "description": "Mean daily input-cost components (energy, fertilizer, labor, pesticide, water, total) per plot-day, optionally filtered by crop/treatment. This is the CANONICAL source for cost-mix / 'biggest cost driver' questions — do NOT derive cost breakdowns from the actions table.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "crop": {"type": "string", "description": "Optional crop filter."},
+                    "treatment": {"type": "string", "description": "Optional treatment filter."},
+                },
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "alert_response_summary",
+            "description": "How alerts were handled: alert volume, action rate, mean response delay (days), and mean 3-day stress recovery, optionally filtered by crop. Use for alert/response/recovery questions.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "crop": {"type": "string", "description": "Optional crop filter."},
+                },
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "query_data",
             "description": (
                 "Run a flexible filtered/grouped aggregation over GreenLeaf's raw data "
@@ -337,7 +429,11 @@ TOOL_SCHEMAS = [
                 "{column: [v1,v2]} (in), or {column: {\">=\": x, \"<=\": y}} / {\">\": n} / "
                 "{\"contains\": \"text\"}. group_by: list of columns. aggregate: "
                 "{column: func} where func in mean,sum,count,min,max,median. sort_by + "
-                "ascending + limit control ordering."
+                "ascending + limit control ordering.\n"
+                "time_bucket ('week' or 'month'): for ANY 'over time / over the season / "
+                "trend' question, set this (on daily/actions/scouting) to resample by date "
+                "so you get the WHOLE season, not the first 20 days. It returns one row per "
+                "bucket (a 'period' column), chronologically, with no truncation."
             ),
             "parameters": {
                 "type": "object",
@@ -349,6 +445,8 @@ TOOL_SCHEMAS = [
                     "sort_by": {"type": "string"},
                     "ascending": {"type": "boolean"},
                     "limit": {"type": "integer"},
+                    "time_bucket": {"type": "string", "enum": ["week", "month"],
+                                    "description": "Resample by date for trend/over-season questions."},
                 },
                 "required": ["table"],
             },
@@ -405,19 +503,37 @@ How to work:
 4. Once you have enough to answer, give a clear, specific answer with numbers.
 
 Tool selection priority:
-1. PREFER the specific analytics tools (precision_benefit_summary, response_time_payoff, treatment_summary, top_at_risk_plots, greenleaf_vs_benchmark) whenever they directly answer the question. They are authoritative and pre-computed correctly.
-2. Use query_data ONLY for specific filtered/grouped questions that the fixed tools do NOT cover (e.g. 'profit for strawberry shade plots specifically', 'which crop has highest stress'). Do not use query_data to re-derive something a fixed tool already returns.
+1. PREFER the specific analytics tools whenever they directly answer the question — they are authoritative and pre-computed correctly. Which tool owns which domain:
+   - whole-operation totals / ROI / counts -> season_overview
+   - per-crop profit ('which crop is most profitable') -> avg_profit_by_crop
+   - a single specific plot (e.g. P0001) -> plot_status
+   - cost mix / 'biggest cost driver' / cost components -> cost_breakdown
+   - alert volume / response speed / recovery -> alert_response_summary
+   - per-treatment yield/profit/ROI -> treatment_summary
+   - precision benefit ($ / share of profit) -> precision_benefit_summary
+   - response speed vs stress recovery -> response_time_payoff
+   - riskiest week / at-risk plots -> top_at_risk_plots
+   - GreenLeaf vs external benchmark -> greenleaf_vs_benchmark
+2. Use query_data ONLY for slices no fixed tool covers (e.g. 'profit for strawberry shade plots specifically', 'which crop-treatment combo has highest stress'). Do not use query_data to re-derive something a fixed tool already returns.
 3. Use search_documents for research, benchmarks, and background context.
 Reach for the fewest tools that answer the question. Most questions need 1-2 tool calls.
 
+For any 'over time / over the season / trend' question, use query_data with time_bucket ('week' or 'month') so you see the WHOLE season, not the first 20 days.
+
+For cost questions, use cost_breakdown. The daily cost columns are the cost MIX; season total_cost_cad is the P&L total. Do not derive cost breakdowns from the actions table.
+
+Before saying you cannot answer, you MUST try other tools. If one tool's output lacks what you need, call a different tool — query_data on the season table has revenue, cost, profit, and precision_benefit per plot. Only refuse after genuinely exhausting the tools.
+
 When answering 'riskiest', 'most', 'highest', or any ranking/comparison across groups (crops, treatments, etc.), use NORMALIZED measures — means, rates, or per-plot/per-day figures — NOT raw totals. Raw counts are biased toward groups that simply have more plots or more observations. If you compute a total, also compute the per-plot or mean version and rank on that. State which basis you used.
+
+When asked about 'financial gain' relative to performance, the most defensible figure we have is precision_benefit (the measured dollar benefit of precision management, from precision_benefit_summary). Prefer reporting that as the concrete financial gain, and treat benchmark-yield-to-dollars as a clearly-flagged estimate (greenleaf_vs_benchmark returns a 'financial_gain' block for the tomato yield metric).
 
 Rules for the final answer:
 - Your FINAL answer must begin directly with the answer. Never open with process narration ("I notice", "Now I have", "Based on my analysis", "Let me", "Here's", "Looking at"). Just answer.
 - Example of a BAD opener: "Here's the comparison of High Light vs Shade: High Light wins...". Example of a GOOD opener: "High Light outperforms Shade on profit ($839 vs $379)...". Start with the finding itself, never a framing phrase.
 - LEAD WITH THE ANSWER and the numbers. Caveats come after, briefly.
 - DO THE MATH yourself — comparisons, rankings, normalizations, percentages.
-- NEVER suggest follow-up questions ("consider asking...", "you could rephrase...", "please provide..."). If you truly cannot answer after genuinely trying multiple tools, say "I can't answer that from GreenLeaf's data" in one sentence.
+- NEVER suggest follow-up questions ("consider asking...", "you could rephrase...", "please provide..."). NEVER output a "What you can ask instead" section, a list of suggested questions, or "you would need to ask about X". This is strictly forbidden. If you truly cannot answer after trying multiple tools, say so in ONE sentence and stop — no suggestions, no bullet list of alternatives.
 - Respect sample sizes: if a crop/treatment group has few plots (n<5), answer but note the small sample.
 - Cite sources inline: documents by source_url, data by tool name in brackets e.g. [treatment_summary] or [query_data: season].
 - Under 200 words unless asked for more. Plain language for farmers and lenders."""

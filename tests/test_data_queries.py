@@ -75,6 +75,28 @@ def test_greenleaf_vs_benchmark_bad():
         dq.greenleaf_vs_benchmark("does_not_exist")
 
 
+def test_greenleaf_vs_benchmark_financial_gain():
+    """The tomato yield metric returns a fully-labeled, internally-consistent
+    financial-gain block (yield-gap monetized at GreenLeaf's own price)."""
+    r = dq.greenleaf_vs_benchmark("greenhouse_tomato_annual_yield")
+    fg = r["financial_gain"]
+    # All labeled components present.
+    for key in ("per_cycle_yield_kg_m2", "cycles_per_year_assumed",
+                "annualized_yield_kg_m2", "yield_gap_kg_m2_year",
+                "revenue_per_kg_cad", "financial_gap_cad_per_m2_year",
+                "assumptions", "interpretation"):
+        assert key in fg
+    assert fg["cycles_per_year_assumed"] == 3
+    assert fg["revenue_per_kg_cad"] > 0
+    # Internally consistent: annualized = per-cycle * cycles.
+    assert abs(fg["annualized_yield_kg_m2"] - fg["per_cycle_yield_kg_m2"] * 3) < 1e-2
+    # Gap = annualized - benchmark midpoint.
+    assert abs(fg["yield_gap_kg_m2_year"] - (fg["annualized_yield_kg_m2"] - r["benchmark_value"])) < 1e-2
+    # Financial gap = yield gap * revenue per kg.
+    assert abs(fg["financial_gap_cad_per_m2_year"]
+               - fg["yield_gap_kg_m2_year"] * fg["revenue_per_kg_cad"]) < 1e-1
+
+
 def test_cost_breakdown():
     c = dq.cost_breakdown()
     for key in (

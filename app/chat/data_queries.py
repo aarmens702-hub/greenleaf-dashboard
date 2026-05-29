@@ -235,6 +235,47 @@ _GREENLEAF_METRICS = {
 }
 
 
+def _tomato_financial_gain(benchmark_midpoint, cycles_per_year):
+    """Translate the tomato yield gap vs the BC benchmark into a $/m²/year estimate.
+
+    Method (every assumption stated so the number is defensible, not magic):
+    - GreenLeaf's measured yield is per partial-season microplot cycle; we annualize
+      it by multiplying by cycles_per_year (assumed, default 3 cycles/year).
+    - The yield gap is annualized GreenLeaf yield minus the benchmark midpoint.
+    - We monetize the gap at GreenLeaf's OWN realized tomato revenue per kg
+      (sum tomato revenue / sum tomato kg), not an external price.
+    A negative financial gap means GreenLeaf is below the commercial benchmark.
+    """
+    tom = SEASON[SEASON["crop"] == "Tomato"]
+    per_cycle = tom["season_yield_kg_m2"].mean()
+    annualized = per_cycle * cycles_per_year
+    yield_gap = annualized - benchmark_midpoint
+    tom_kg = (tom["season_yield_kg_m2"] * tom["plot_area_m2"]).sum()
+    revenue_per_kg = tom["season_revenue_cad"].sum() / tom_kg
+    financial_gap = yield_gap * revenue_per_kg
+    direction = "above" if yield_gap >= 0 else "below"
+    return {
+        "per_cycle_yield_kg_m2": _ratio(per_cycle),
+        "cycles_per_year_assumed": int(cycles_per_year),
+        "annualized_yield_kg_m2": _ratio(annualized),
+        "benchmark_midpoint_kg_m2_year": _ratio(benchmark_midpoint),
+        "yield_gap_kg_m2_year": _ratio(yield_gap),
+        "revenue_per_kg_cad": _money(revenue_per_kg),
+        "financial_gap_cad_per_m2_year": _money(financial_gap),
+        "assumptions": (
+            f"Annualized at {int(cycles_per_year)} cycles/year (assumed); gap monetized "
+            "at GreenLeaf's own realized tomato revenue per kg; benchmark is the 50-70 "
+            "kg/m²/year midpoint for commercial operations, not microplot trials."
+        ),
+        "interpretation": (
+            f"Annualized GreenLeaf tomato yield (~{_ratio(annualized)} kg/m²/yr) is "
+            f"{direction} the benchmark midpoint ({_ratio(benchmark_midpoint)}), implying "
+            f"about {_money(financial_gap)} CAD/m²/yr in revenue terms at GreenLeaf's own "
+            "price — an estimate sensitive to the cycles-per-year assumption."
+        ),
+    }
+
+
 def greenleaf_vs_benchmark(metric_name):
     """Compare a GreenLeaf metric against an external BC/industry benchmark.
 
@@ -249,6 +290,7 @@ def greenleaf_vs_benchmark(metric_name):
             f"Benchmark '{metric_name}' not found. Available: {sorted(BENCHMARKS['metric_name'].tolist())}"
         )
     b = row.iloc[0]
+    financial_gain = None
     if metric_name in _GREENLEAF_METRICS:
         greenleaf_value = _ratio(_GREENLEAF_METRICS[metric_name]())
         notes = (
@@ -256,10 +298,18 @@ def greenleaf_vs_benchmark(metric_name):
             "benchmark is annual commercial yield while GreenLeaf is partial-season "
             "microplot yield — not directly comparable without normalization."
         )
+        if metric_name == "greenhouse_tomato_annual_yield":
+            # cycles_per_year is read from the benchmark if present, else defaults to 3.
+            cycles = (
+                int(b["cycles_per_year"])
+                if "cycles_per_year" in b.index and pd.notna(b["cycles_per_year"])
+                else 3
+            )
+            financial_gain = _tomato_financial_gain(float(b["value"]), cycles)
     else:
         greenleaf_value = None
         notes = "No GreenLeaf-side calculation defined yet for this metric."
-    return {
+    out = {
         "metric_name": str(b["metric_name"]),
         "benchmark_value": _ratio(b["value"]),
         "benchmark_unit": str(b["unit"]),
@@ -268,6 +318,9 @@ def greenleaf_vs_benchmark(metric_name):
         "greenleaf_value": greenleaf_value,
         "notes": notes,
     }
+    if financial_gain is not None:
+        out["financial_gain"] = financial_gain
+    return out
 
 
 def cost_breakdown(crop=None, treatment=None):

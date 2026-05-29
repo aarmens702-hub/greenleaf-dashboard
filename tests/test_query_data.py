@@ -90,6 +90,29 @@ def test_mean_aggregate_not_normalized():
     assert not any(c.endswith("_per_plot") for c in out["columns_used"])
 
 
+def test_time_bucket_covers_whole_season():
+    """FIX P1: time_bucket resamples by date so trends span the full season."""
+    out = agent.query_data("daily", aggregate={"plant_stress_index": "mean"}, time_bucket="month")
+    assert "period" in out["columns_used"]
+    periods = [r["period"] for r in out["result"]]
+    # Season runs Feb-Sep 2025: expect ~8 monthly buckets, first Feb, last Sep.
+    assert len(periods) >= 7
+    assert periods[0].startswith("2025-02")
+    assert periods[-1].startswith("2025-09")
+
+
+def test_time_series_not_truncated_to_20():
+    """Weekly buckets exceed the old default limit of 20 and must NOT be truncated."""
+    out = agent.query_data("daily", aggregate={"plant_stress_index": "mean"}, time_bucket="week")
+    assert len(out["result"]) > 20            # ~30 weeks, not capped at 20
+    assert "no row cap" in out["notes"]
+
+
+def test_time_bucket_requires_date_column():
+    with pytest.raises(ValueError):
+        agent.query_data("season", aggregate={"season_profit_cad": "mean"}, time_bucket="month")
+
+
 def test_invalid_table_raises_actionable():
     with pytest.raises(ValueError) as e:
         agent.query_data("not_a_table")

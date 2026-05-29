@@ -27,6 +27,23 @@ def _final_msg(text):
     return {"role": "assistant", "content": text}
 
 
+def test_p0_tools_are_wired_and_execute():
+    """P0: the 5 newly-exposed functions are real tools and execute cleanly."""
+    new_tools = ["season_overview", "avg_profit_by_crop", "plot_status",
+                 "cost_breakdown", "alert_response_summary"]
+    schema_names = {t["function"]["name"] for t in agent.TOOL_SCHEMAS}
+    for name in new_tools:
+        assert name in schema_names, f"{name} missing from TOOL_SCHEMAS"
+        assert name in agent._FIXED_TOOLS
+    # No-arg / optional-arg tools run; plot_status takes a plot_id.
+    assert agent._execute_tool("season_overview", {})[1] == "ok"
+    assert agent._execute_tool("avg_profit_by_crop", {})[1] == "ok"
+    assert agent._execute_tool("cost_breakdown", {})[1] == "ok"
+    assert agent._execute_tool("alert_response_summary", {})[1] == "ok"
+    result, status = agent._execute_tool("plot_status", {"plot_id": "P0001"})
+    assert status == "ok" and result["crop"] == "Strawberry"
+
+
 def test_single_tool():
     """Model requests one tool, then answers."""
     script = [
