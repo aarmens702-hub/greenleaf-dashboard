@@ -1,0 +1,8 @@
+# GreenLeaf dashboard theme — Lululemon-inspired editorial/lifestyle aesthetic.
+# Warm cream page, deep-forest text, single forest-sage accent (#3D5A3D).
+# base="light" gives dark-on-light defaults; chat_page.py CSS forces the exact
+# cream (#F5F2EC). primaryColor colors native widgets (send button, focus rings).
+[theme]
+base = "light"
+primaryColor = "#3D5A3D"
+font = "sans serif"
