@@ -19,6 +19,7 @@ import traceback
 import streamlit as st
 
 from app.chat.answer import answer
+from app.streamlit_app import theme as T
 
 # Brand accent — forest sage. Match across other tabs.
 ACCENT = "#3D5A3D"
@@ -219,7 +220,7 @@ def _handle_question(question):
 
 def render_chat() -> None:
     """Render the GreenLeaf chat UI into the current Streamlit page/tab."""
-    st.markdown(_CSS, unsafe_allow_html=True)
+    T.inject_css()  # shared design system (supersedes the legacy local _CSS below)
 
     # Top brand bar: leaf mark + uppercase wordmark on the left, CLEAR link on the right.
     bar_l, bar_r = st.columns([6, 1])
