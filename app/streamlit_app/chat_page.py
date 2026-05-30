@@ -24,13 +24,19 @@ from app.streamlit_app import theme as T
 # Brand accent — forest sage. Match across other tabs.
 ACCENT = "#3D5A3D"
 
-# Sample questions, each tagged with an *illustrative* route label + meaning-coded
-# color (display-only; the real route is decided at runtime by answer()/classify()).
+# Suggested questions for the right-hand rail, each tagged with an *illustrative* route label +
+# meaning-coded color (display-only; the real route is decided at runtime by answer()/classify()).
+# The original four lead; the rest are a curated spread across profitability, cost, trend and a
+# single-plot lookup so the rail showcases the agent's range.
 SAMPLE_QUESTIONS = [
     {"q": "What's our overall precision benefit?", "label": "DATA", "color": "#3D5A3D"},
     {"q": "How do same-day responses compare to delayed ones?", "label": "DATA", "color": "#3D5A3D"},
     {"q": "Is our tomato yield above the BC benchmark?", "label": "DATA + RESEARCH", "color": "#8A5A3D"},
     {"q": "What does research say about strawberry fertigation?", "label": "RESEARCH", "color": "#5A5A8A"},
+    {"q": "Which crop is most profitable?", "label": "DATA", "color": "#3D5A3D"},
+    {"q": "What's our biggest cost driver?", "label": "DATA", "color": "#3D5A3D"},
+    {"q": "How did plant stress change over the season?", "label": "DATA", "color": "#3D5A3D"},
+    {"q": "How is plot P0001 doing?", "label": "DATA", "color": "#3D5A3D"},
 ]
 
 # Single bounded CSS block — editorial light aesthetic on Streamlit's light theme.
@@ -225,11 +231,7 @@ def render_chat() -> None:
     # Top brand bar: leaf mark + uppercase wordmark on the left, CLEAR link on the right.
     bar_l, bar_r = st.columns([6, 1])
     with bar_l:
-        st.markdown(
-            '<div class="gl-brand"><span class="gl-leaf">🌿</span>'
-            '<span class="gl-eyebrow">GREENLEAF · ANALYST</span></div>',
-            unsafe_allow_html=True,
-        )
+        T.brand_bar("ANALYST")  # shared masthead (leaf + serif wordmark + eyebrow) — matches other tabs
     with bar_r:
         # type="primary" tags this as the page's only `primary` button so CSS can
         # style it as a link without touching the `secondary` sample tiles.
@@ -237,66 +239,65 @@ def render_chat() -> None:
             st.session_state.messages = []
             st.rerun()
 
-    # Serif headline + muted serif accent line, then a single hairline divider.
-    st.markdown(
-        '<div class="gl-headline">Ask GreenLeaf</div>'
-        '<div class="gl-subline">Ask about GreenLeaf\'s data or BC agriculture context.</div>',
-        unsafe_allow_html=True,
-    )
-    st.markdown('<hr class="gl-hair">', unsafe_allow_html=True)
-
     if "messages" not in st.session_state:
         st.session_state.messages = []
 
-    # Empty state: a calm editorial welcome line.
-    if not st.session_state.messages:
+    # Two-column body: the conversation (left) and a persistent suggested-prompt rail (right).
+    # A button returns True only on the rerun where it was clicked, so a rail prompt is captured
+    # exactly like typed input.
+    question = None
+    body, rail = st.columns([5, 2], gap="large")
+
+    with body:
+        # Serif headline + muted serif accent line, then a single hairline divider.
         st.markdown(
-            '<div class="gl-empty">Welcome. Ask about yields, costs, pest response, or BC '
-            'agriculture research — every answer cites where it came from.</div>',
+            '<div class="gl-headline">Ask GreenLeaf</div>'
+            '<div class="gl-subline">Ask about GreenLeaf\'s data or BC agriculture context.</div>',
+            unsafe_allow_html=True,
+        )
+        st.markdown('<hr class="gl-hair">', unsafe_allow_html=True)
+
+        # Empty state: a calm editorial welcome line.
+        if not st.session_state.messages:
+            st.markdown(
+                '<div class="gl-empty">Welcome. Ask about yields, costs, pest response, or BC '
+                'agriculture research — every answer cites where it came from.</div>',
+                unsafe_allow_html=True,
+            )
+
+        # Conversation history.
+        for msg in st.session_state.messages:
+            with st.chat_message(msg["role"]):
+                if msg["role"] == "user":
+                    st.write(msg["content"])
+                else:
+                    _render_assistant(msg)
+
+        typed = st.chat_input("Ask about GreenLeaf — try data, research, or both")
+        if typed:
+            question = typed
+
+        # Footer line: provenance on the left, live indicator on the right.
+        st.markdown(
+            '<div class="gl-footer">'
+            '<span class="gl-foot-l">SOURCED · RETRIEVAL OVER 9 DOCS + 10 DATA FUNCTIONS</span>'
+            '<span class="gl-foot-r">● LIVE</span></div>',
             unsafe_allow_html=True,
         )
 
-    # Conversation history.
-    for msg in st.session_state.messages:
-        with st.chat_message(msg["role"]):
-            if msg["role"] == "user":
-                st.write(msg["content"])
-            else:
-                _render_assistant(msg)
-
-    # Sample-question grid: 2×2 product tiles. A button returns True only on the
-    # rerun where it was clicked, so we capture the seeded question like typed input.
-    question = None
-    st.markdown('<div class="gl-eyebrow" style="margin-bottom:12px;">SUGGESTED · 4 PROMPTS</div>',
-                unsafe_allow_html=True)
-    for row_start in (0, 2):
-        cols = st.columns(2, gap="medium")
-        for j, col in enumerate(cols):
-            s = SAMPLE_QUESTIONS[row_start + j]
-            with col:
-                # Route label + arrow sit just above the bordered question tile
-                # (the `secondary` button). One bordered element per tile — no
-                # container wrappers — so nothing doubles.
-                st.markdown(
-                    f'<div class="gl-tilehead">'
-                    f'<span class="gl-tilelabel" style="color:{s["color"]};">{s["label"]}</span>'
-                    f'<span class="gl-arrow">↗</span></div>',
-                    unsafe_allow_html=True,
-                )
-                if st.button(s["q"], key=f"sample_{row_start + j}", use_container_width=True):
-                    question = s["q"]
-
-    typed = st.chat_input("Ask about GreenLeaf — try data, research, or both")
-    if typed:
-        question = typed
-
-    # Footer line: provenance on the left, live indicator on the right.
-    st.markdown(
-        '<div class="gl-footer">'
-        '<span class="gl-foot-l">SOURCED · RETRIEVAL OVER 9 DOCS + 10 DATA FUNCTIONS</span>'
-        '<span class="gl-foot-r">● LIVE</span></div>',
-        unsafe_allow_html=True,
-    )
+    with rail:
+        # Suggested prompts as a vertical rail: route label + bordered serif tile per prompt.
+        st.markdown(f'<div class="gl-eyebrow" style="margin-bottom:12px;">SUGGESTED · '
+                    f'{len(SAMPLE_QUESTIONS)} PROMPTS</div>', unsafe_allow_html=True)
+        for i, s in enumerate(SAMPLE_QUESTIONS):
+            st.markdown(
+                f'<div class="gl-tilehead">'
+                f'<span class="gl-tilelabel" style="color:{s["color"]};">{s["label"]}</span>'
+                f'<span class="gl-arrow">↗</span></div>',
+                unsafe_allow_html=True,
+            )
+            if st.button(s["q"], key=f"sample_{i}", use_container_width=True):
+                question = s["q"]
 
     if question:
         _handle_question(question)

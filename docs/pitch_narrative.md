@@ -32,7 +32,7 @@ Spoken: "We were asked whether precision agriculture pays. Our answer is honest 
 
 **Slide 3 — ACT 2 · PROBLEM (45s).** Message: **"Stress is overwhelmingly pest-burden, and that burden is where the money is lost."**
 - **Live:** Operations → **06 · Alert-burden exposure** (treatment-clustered), then Financials → **01 · loss tail** (6 named loss plots, worst-5% = −$123/plot).
-- Numbers: alert-days↔stress r=0.99; 6/120 plots unprofitable; 5 of 6 in high-pest treatments (Shade / Reduced Pest).
+- Numbers: alert-days↔stress r=0.99; 6/120 plots unprofitable; 4 of 6 in high-pest treatments (Shade / Reduced Pest).
 - Spoken: "The plots that lose money are the high-pest ones — a *risk* problem, not a yield problem." → *Transition:* "Now, the tempting move is to claim precision fixes the P&L. We won't — and that's the point."
 
 **Slide 4 — ACT 3 · HONEST CEILING (60s — the trust-builder).** Message: **"We refuse three claims the data can't support."**

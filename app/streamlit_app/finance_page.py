@@ -1,9 +1,16 @@
 """Financials tab — RBC/lender view of the season in dollars, honestly.
 
-Built ONLY from theme.py primitives and insights.py read-only helpers. Validated/defensible
-content only: S3 (cost mix), S4 (profit distribution + portfolio tail), Y4 (treatment
-economics with CIs, caveat), plus the mandated honesty element (precision_benefit shown as
-an assumption, never ROI) and an explicit defensible-vs-won't-claim panel.
+Built ONLY from theme.py primitives and insights.py read-only helpers; every number traces
+to a frozen analysis function (no recompute in the UI). (The blended 5-KPI summary row lives on
+the Overview tab; this tab carries its own purely-financial KPI row.)
+  KPI row — Profit per m², Average ROI, Total precision benefit (planning ASSUMPTION), Cost per kg
+  01 Season P&L + profit distribution + loss/win tail (Expected Shortfall, named plots)
+  02 What drives profit  — driver correlations + price->profit scatter (price, not yield)
+  03 Crop economics      — price-beats-volume unit economics by crop
+  04 Average payoff by treatment — mean profit per plot (bars) with ±1 std swing, honestly
+     labelled as descriptive dispersion, not a forward risk forecast
+  05 Input spending      — cost mix (labor dominates). The daily-spend time series and the
+     composite "plots at risk" table now live on the Overview tab (moved, not duplicated).
 """
 import plotly.graph_objects as go
 import streamlit as st
@@ -24,15 +31,18 @@ def _page_title():
         '<hr class="gl-hair">', unsafe_allow_html=True)
 
 
-def _kpis(h):
-    margin = h["total_profit"] / h["total_revenue"]
-    T.kpi_row([
-        T.kpi(_money(h["total_profit"]), "Total season profit", f"{h['n_plots']} plots"),
-        T.kpi(_money(h["mean_profit"]), "Mean profit / plot", f"median {_money(h['median_profit'])}"),
-        T.kpi(f"{margin*100:.0f}%", "Blended profit margin", "of revenue", T.INDIGO),
-        T.kpi(f"{h['mean_roi']*100:.0f}%", "Mean ROI", "return on cost", T.INDIGO),
-        T.kpi(f"{h['n_unprofitable']}", "Plots that lost money", f"of {h['n_plots']}", T.TERRA),
-    ])
+def _kpis():
+    """Four headline FINANCIAL KPIs. NB: total precision benefit is a planning ASSUMPTION
+    (= 0.65 × profit), not a measured return — the in-card caveat was removed by request; the
+    honesty treatment still lives in docs/eda_findings.md and the pitch."""
+    k = I.finance_kpis()
+    cards = [
+        T.kpi(f"${k['profit_per_m2']:.2f}", "Profit per m²", "season profit ÷ total area", T.SAGE),
+        T.kpi(f"{k['avg_roi']*100:.1f}%", "Average ROI", "mean return on season cost", T.INDIGO),
+        T.kpi(_money(k["total_precision_benefit"]), "Total precision benefit", accent=T.TERRA),
+        T.kpi(f"${k['cost_per_kg']:.2f}", "Cost per kg", "total cost ÷ total kg produced", T.INDIGO),
+    ]
+    T.kpi_row(cards)
 
 
 def _pnl_and_distribution(pt):
@@ -55,36 +65,98 @@ def _pnl_and_distribution(pt):
         fig.add_vline(x=0, line_color=T.TERRA, line_dash="dot")
         st.plotly_chart(T.style_fig(fig, 260, xtitle="season profit (CAD / plot)", ytitle="plots"),
                         use_container_width=True)
-    T.note(f"{_money(h['total_revenue'])} revenue − {_money(h['total_cost'])} cost = "
-           f"{_money(h['total_profit'])} profit. <b>{h['n_unprofitable']} of {h['n_plots']}</b> plots lost money; "
-           f"losses are shallow (worst −$253) and revenue-driven, not cost-driven.")
 
 
-def _tail(pt):
+def _profit_col(name):
+    return st.column_config.NumberColumn(name, format="$%.0f")
+
+
+def _tail(pt, win, diag):
+    # Expected-Shortfall headline, then loss-makers and top earners side by side.
+    T.card_title("The downside and the upside — who lost, who won")
+    st.markdown(
+        f'<div class="gl-note">Mean profit of the worst <b>5%</b> of plots: <b>{_money(pt["es5"])}</b> · '
+        f'worst <b>10%</b>: <b>{_money(pt["es10"])}</b> (positive).</div>', unsafe_allow_html=True)
+    ren = {"plot_id": "Plot", "crop": "Crop", "treatment": "Treatment", "season_profit_cad": "Profit"}
+    c = st.columns(2, gap="large")
+    with c[0]:
+        T.card_title(f"The {diag['n']} loss-makers")
+        lm = pt["loss_makers"].rename(columns=ren)
+        st.dataframe(lm[["Plot", "Crop", "Treatment", "Profit"]], hide_index=True,
+                     use_container_width=True, height=235,
+                     column_config={"Profit": _profit_col("Profit")})
+    with c[1]:
+        T.card_title("The 5 top earners")
+        te = win.rename(columns=ren)
+        st.dataframe(te[["Plot", "Crop", "Treatment", "Profit"]], hide_index=True,
+                     use_container_width=True, height=235,
+                     column_config={"Profit": _profit_col("Profit")})
+
+
+def _drivers(pdv):
+    c = st.columns([2, 3], gap="large")
+    with c[0]:
+        T.card_title("What correlates with per-plot profit")
+        df = pdv["corr"]
+        fig = go.Figure(go.Bar(
+            x=df.r, y=df.factor, orientation="h",
+            marker_color=[T.SAGE if v > 0 else T.TERRA for v in df.r],
+            text=[f"{v:+.2f}" for v in df.r], textposition="outside"))
+        fig.add_vline(x=0, line_color=T.MUTED, line_width=1)
+        fig = T.style_fig(fig, 260, xtitle="correlation with profit (r)")
+        fig.update_traces(cliponaxis=False)                 # let outside labels draw past the bars
+        fig.update_xaxes(range=[df.r.min() - 0.25, df.r.max() + 0.22])  # room for ±labels
+        st.plotly_chart(fig, use_container_width=True)
+    with c[1]:
+        T.card_title("Realized price per kg vs. profit — each plot")
+        sc = pdv["scatter"]
+        fig = go.Figure()
+        for i, (crop, sub) in enumerate(sc.groupby("crop")):
+            fig.add_trace(go.Scatter(
+                x=sub.price_per_kg, y=sub.season_profit_cad, mode="markers", name=crop,
+                marker=dict(size=7, color=T.CAT[i % len(T.CAT)], line=dict(width=0.5, color=T.PAPER))))
+        fig.add_hline(y=0, line_color=T.TERRA, line_dash="dot")
+        st.plotly_chart(T.style_fig(fig, 260, legend=True, xtitle="realized price (CAD / kg)",
+                                    ytitle="season profit (CAD)"), use_container_width=True)
+
+
+def _crop_econ(g):
     c = st.columns([3, 2], gap="large")
     with c[0]:
-        T.card_title("Concentration — Lorenz curve (revenue)")
-        pop, val = pt["lorenz_rev"]
+        T.card_title("Price beats volume — unit economics by crop")
         fig = go.Figure()
-        fig.add_trace(go.Scatter(x=[0, 1], y=[0, 1], line=dict(color=T.MUTED, width=1, dash="dot"), name="equal"))
-        fig.add_trace(go.Scatter(x=pop, y=val, line=dict(color=T.SAGE, width=2.5), fill="tonexty",
-                                 fillcolor="rgba(61,90,61,0.10)", name="revenue"))
-        st.plotly_chart(T.style_fig(fig, 250, xtitle="cumulative share of plots", ytitle="cumulative share of revenue"),
-                        use_container_width=True)
-        T.note(f"Gini(revenue) = {pt['gini_revenue']:.2f} (fairly even); Gini(profit) = {pt['gini_profit']:.2f}. "
-               f"Top 20% of plots hold {pt['top20_share']*100:.0f}% of profit.")
+        for i, r in g.reset_index(drop=True).iterrows():
+            fig.add_trace(go.Scatter(
+                x=[r.yield_kgm2], y=[r.price_kg], mode="markers+text", text=[r.crop],
+                textposition="top center", textfont=dict(size=10, color=T.TAUPE), name=r.crop,
+                marker=dict(size=14 + r.profit / 30, color=T.CAT[i % len(T.CAT)],
+                            line=dict(width=0.5, color=T.PAPER))))
+        st.plotly_chart(T.style_fig(fig, 260, xtitle="yield (kg/m²)",
+                                    ytitle="realized price (CAD / kg)"), use_container_width=True)
     with c[1]:
-        T.card_title("Worst-case tail (Expected Shortfall)")
-        st.markdown(
-            f'<div class="gl-note">Mean profit of the worst <b>5%</b> of plots: '
-            f'<b>{_money(pt["es5"])}</b><br>Mean profit of the worst <b>10%</b>: '
-            f'<b>{_money(pt["es10"])}</b> (positive)</div>', unsafe_allow_html=True)
-        lm = pt["loss_makers"].rename(columns={"plot_id": "Plot", "crop": "Crop", "treatment": "Treatment",
-                                               "season_profit_cad": "Profit"})
-        st.dataframe(lm[["Plot", "Crop", "Treatment", "Profit"]], hide_index=True, use_container_width=True,
-                     height=235, column_config={"Profit": st.column_config.NumberColumn("Profit", format="$%.0f")})
-    T.note("The 6 loss-makers and the worst-5% shortfall (−$123/plot) are the concrete downside a lender "
-           "underwrites; 5 of 6 sit in high-pest treatments (Shade / Reduced Pest).")
+        T.card_title("Mean profit per plot by crop")
+        gg = g.sort_values("profit")
+        fig = go.Figure(go.Bar(x=gg.profit, y=gg.crop, orientation="h", marker_color=T.SAGE,
+                               text=[_money(p) for p in gg.profit], textposition="auto"))
+        st.plotly_chart(T.style_fig(fig, 260, xtitle="mean profit (CAD / plot)"),
+                        use_container_width=True)
+
+
+def _reward_consistency(rr):
+    T.card_title("Average payoff by treatment — bars, with the plot-to-plot swing")
+    rr = rr.sort_values("mean_profit")
+    fig = go.Figure(go.Bar(
+        x=rr.mean_profit, y=rr.treatment, orientation="h",
+        marker=dict(color=rr.worst, colorscale=[[0.0, T.TERRA], [1.0, T.SAGE]], showscale=False,
+                    line=dict(width=0.5, color=T.PAPER)),
+        error_x=dict(type="data", array=rr.risk, color=T.MUTED, thickness=1, width=4),
+        text=[_money(p) for p in rr.mean_profit], textposition="auto",
+        customdata=rr[["worst", "n", "risk"]].values,
+        hovertemplate="%{y}<br>avg payoff %{x:$.0f}<br>spread ±%{customdata[2]:$.0f}<br>"
+                      "worst plot %{customdata[0]:$.0f} · n=%{customdata[1]}<extra></extra>"))
+    fig = T.style_fig(fig, 300, xtitle="average profit per plot (CAD)")
+    fig.update_traces(cliponaxis=False)
+    st.plotly_chart(fig, use_container_width=True)
 
 
 def _cost_mix(cm):
@@ -105,69 +177,6 @@ def _cost_mix(cm):
                              name="routine", text=["routine 95.4%"], textposition="inside"))
         fig.update_layout(barmode="stack")
         st.plotly_chart(T.style_fig(fig, 240, xtitle="% of input cost", ygrid=False), use_container_width=True)
-    T.note(f"<b>Labor is ~{cm['labor_pct']:.0f}%</b> of input cost. Precision (alert-response) actions are only "
-           f"<b>{cm['precision_pct']:.1f}%</b> ({_money(cm['precision'])}) — a cheap overlay on mostly-routine spend. "
-           f"Source: daily cost ledger (<code>finance.cost_structure</code>) — the canonical cost source.")
-
-
-def _treatment_economics(te):
-    rows = te["rows"]
-    fig = go.Figure()
-    fig.add_vline(x=0, line_color=T.MUTED, line_width=1)
-    for _, r in rows.iterrows():
-        if r["diff"] is None:
-            fig.add_trace(go.Scatter(x=[0], y=[r["treatment"]], mode="markers",
-                                     marker=dict(color=T.MUTED, size=10, symbol="line-ns-open"),
-                                     text=["Control (baseline)"]))
-        else:
-            sig = (r["lo"] > 0) or (r["hi"] < 0)
-            fig.add_trace(go.Scatter(
-                x=[r["diff"]], y=[r["treatment"]], mode="markers",
-                marker=dict(color=T.SAGE if sig else T.MUTED, size=11),
-                error_x=dict(type="data", symmetric=False, array=[r["hi"] - r["diff"]],
-                             arrayminus=[r["diff"] - r["lo"]], color=T.TAUPE, thickness=1.5, width=6)))
-    st.plotly_chart(T.style_fig(fig, 280, xtitle="profit vs Control (CAD/plot) — 95% bootstrap CI"),
-                    use_container_width=True)
-    gap = te["hl_shade_gap"]
-    T.note(f"High Light − Shade = +{gap[0]:.0f} CAD/plot [95% CI {gap[1]:.0f}, {gap[2]:.0f}]. Only High Light "
-           f"(+260 [48, 483]), Reduced Pest (−182 [−358, −5]) and Shade (−200 [−385, −23]) differ from Control "
-           f"with CIs excluding zero.")
-    T.caveat_note("Observed per-arm economics, <b>not a causal treatment or precision-quality effect</b>. "
-                  "Treatments weren’t randomized: the profit ranking tracks pest/stress burden "
-                  "(profit vs alert-days r=−0.83) and crop mix differs across arms. Keep CIs visible; currency CAD.")
-
-
-def _precision_honesty(pb, h):
-    c = st.columns(2, gap="large")
-    with c[0]:
-        T.card_title("“Precision benefit” vs profit — read this")
-        s = pb["scatter"]
-        xmax = float(s.season_profit_cad.max())
-        fig = go.Figure()
-        fig.add_trace(go.Scatter(x=[min(0, float(s.season_profit_cad.min())), xmax], y=[0, 0.65 * xmax],
-                                 mode="lines", line=dict(color=T.MUTED, width=1, dash="dot"), name="0.65 × profit"))
-        fig.add_trace(go.Scatter(x=s.season_profit_cad, y=s.precision_benefit_cad, mode="markers",
-                                 marker=dict(color=T.SAGE, size=6, line=dict(width=0.5, color=T.PAPER)), name="plots"))
-        st.plotly_chart(T.style_fig(fig, 270, xtitle="season profit (CAD)", ytitle="precision_benefit_cad (CAD)"),
-                        use_container_width=True)
-        T.note(f"Every plot sits on the line: precision_benefit_cad = <b>0.65 × profit</b> "
-               f"(corr {pb['corr_benefit_profit']:.3f}), floored at 0. It is profit relabelled — an assumption.")
-    with c[1]:
-        T.card_title("What we can — and cannot — claim")
-        st.markdown(
-            f'<div class="gl-note" style="font-size:0.88rem;">'
-            f'<b style="color:{T.SAGE};">✓ Defensible</b><br>'
-            f'• Precision is a cheap overlay: <b>4.6%</b> of input cost.<br>'
-            f'• Fast response measurably cuts <b>stress</b> (same-day ≈2×, see Operations).<br>'
-            f'• The downside is bounded & named: 6 loss plots, worst-5% −$123.<br><br>'
-            f'<b style="color:{T.TERRA};">✗ Won’t claim</b><br>'
-            f'• A precision <b>ROI</b> — precision_benefit_cad is 0.65×profit (circular).<br>'
-            f'• That precision/stress raises <b>profit</b> — stress→profit vanishes within treatment (r +0.09, p=0.31).<br>'
-            f'• A cross-ledger return — season vs daily cost don’t reconcile (corr {pb["corr_ledger"]:.2f}).'
-            f'</div>', unsafe_allow_html=True)
-    T.caveat_note("The dataset’s <code>precision_benefit_cad</code> totals "
-                  f"{_money(h['total_precision_benefit'])} ({h['benefit_share']*100:.0f}% of profit) but is an "
-                  "<b>assumption</b>, not a measured return. Sell precision as risk management, not a profit multiple.")
 
 
 def render_finance() -> None:
@@ -175,19 +184,22 @@ def render_finance() -> None:
     T.brand_bar("FINANCIALS")
     _page_title()
 
-    h = I.headline()
-    _kpis(h)
+    _kpis()
 
     pt = I.profit_tail()
     T.section_header("01 · Season P&L and the profit distribution", "Totals, spread, and the loss tail")
     _pnl_and_distribution(pt)
-    _tail(pt)
+    _tail(pt, I.top_earners(), I.loss_diagnosis())
 
-    T.section_header("02 · Where the money goes", "Cost mix — labor dominates, precision is cheap")
+    T.section_header("02 · What drives profit", "It's a price story, not a yield story")
+    _drivers(I.profit_drivers())
+
+    T.section_header("03 · Crop economics", "Where the money actually comes from")
+    _crop_econ(I.crop_economics())
+
+    T.section_header("04 · Reward vs. consistency by treatment",
+                     "Average payoff against how much plot-to-plot results swing")
+    _reward_consistency(I.treatment_spread())
+
+    T.section_header("05 · Input spending", "Where the season's input budget goes")
     _cost_mix(I.cost_mix())
-
-    T.section_header("03 · Treatment economics", "Per-arm profit vs Control, with bootstrap CIs")
-    _treatment_economics(I.treatment_economics())
-
-    T.section_header("04 · The “precision benefit” figure", "Shown honestly — an assumption, not a return")
-    _precision_honesty(I.precision_benefit(), h)

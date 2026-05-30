@@ -38,11 +38,27 @@ def test_render_finance_runs_without_exception():
     at = AppTest.from_string(script).run(timeout=120)
     assert not at.exception, at.exception
     md = " ".join(b.value for b in at.markdown)
-    assert "Where the money goes" in md
-    assert "Treatment economics" in md
-    assert "precision benefit" in md.lower()
-    assert "Total season profit" in md           # KPI card
-    # honesty must be visible, not buried:
-    assert "assumption" in md.lower()
-    assert "Won’t claim" in md or "Defensible" in md
-    assert len(at.dataframe) >= 1                 # loss-maker table
+    # narrative sections
+    assert "Season P&L" in md
+    assert "What drives profit" in md
+    assert "Crop economics" in md
+    assert "Reward vs. consistency" in md
+    assert "Average payoff by treatment" in md     # §04 is now a bar chart (was a scatter)
+    assert "Where the money goes" in md           # cost-mix card (now under '05 Input spending')
+    # the tab's own four FINANCIAL KPIs (the blended 5-KPI row stays on Overview)
+    for card in ["Profit per m", "Average ROI", "Total precision benefit", "Cost per kg"]:
+        assert card in md, card
+    assert "Avg plot performance" not in md        # the Overview blended-KPI labels stay on Overview
+    assert "profit-free score" not in md
+    # previously deleted sections stay gone
+    assert "Treatment economics" not in md
+    assert "Lorenz" not in md
+    # loss + win tail (card titles; the price-not-spending note caption was removed by request)
+    assert "loss-makers" in md.lower()
+    assert "top earners" in md.lower()
+    # The daily-spend time series and the composite "plots at risk" table were MOVED to the
+    # Overview tab — they must no longer render on Financials (moved, not duplicated).
+    assert "Daily total input spend" not in md
+    assert "Plots at risk today" not in md
+    assert "composite health-score risk" not in md
+    assert len(at.dataframe) == 2                 # only loss-makers + top-earners remain

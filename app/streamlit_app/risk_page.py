@@ -27,22 +27,27 @@ def _page_title():
         '<hr class="gl-hair">', unsafe_allow_html=True)
 
 
-def _kpis(base_rate):
+def _kpis(wl):
+    """Single consolidated operational KPI row — six cards rendered as 2×3 (one visual
+    group, no header between) so they stay legible at full width. Every value traces to a
+    source helper; nothing is recomputed here."""
     dose = I.response_dose()
     by = dose["by"].set_index("delay")
     delayed = float((by.loc[[1, 2], "mean"] * by.loc[[1, 2], "count"]).sum() / by.loc[[1, 2], "count"].sum())
     adv = by.loc[0, "mean"] / delayed
-    metrics, _cal, _b = I.model_metrics()
-    hit20 = float(metrics.set_index("model").loc["Logistic (dashboard)", "Prec@top20%"])
-    wl = I.watchlist(st.session_state.get("ops_date", "2025-08-15"))
-    elevated = int((wl.spike_prob >= 0.25).sum())
-    T.kpi_row([
-        T.kpi("120", "Plots monitored", "daily sensor + alert data"),
-        T.kpi(f"{base_rate*100:.0f}%", "3-day spike base rate", "share of plot-days"),
-        T.kpi(f"{adv:.1f}×", "Same-day response advantage", f"{by.loc[0,'mean']:.3f} vs {delayed:.3f} delayed", T.TERRA),
-        T.kpi(f"{hit20*100:.0f}%", "Watch-list hit rate · top 20%", f"vs {base_rate*100:.0f}% at random", T.INDIGO),
+    k = I.operational_kpis()
+    elevated = int((wl.spike_prob >= 0.25).sum()) if not wl.empty else 0
+    cards = [
         T.kpi(f"{elevated}", "High-risk plots today", "≥25% spike probability"),
-    ])
+        T.kpi(f"{adv:.1f}×", "Same-day response advantage",
+              f"speed payoff · {by.loc[0,'mean']:.3f} vs {delayed:.3f} delayed", T.TERRA),
+        T.kpi(f"{k['healthy_rate']*100:.1f}%", "Healthy plot-day rate", "stress &lt; 0.50"),
+        T.kpi(f"{k['performance_score']*100:.1f}%", "Avg plot performance", "5-factor blend score", T.INDIGO),
+        T.kpi(f"{k['alert_rate']*100:.1f}%", "Alert rate", "plot-days with an alert", T.INDIGO),
+        T.kpi(f"{k['alert_response_rate']*100:.1f}%", "Alert response rate", "of alerts, share acted on"),
+    ]
+    T.kpi_row(cards[:3])
+    T.kpi_row(cards[3:])
 
 
 def _watchlist_panel(wl, top_n):
@@ -62,7 +67,6 @@ def _today_dist(wl, base):
                                  marker_line_color=T.PAPER, marker_line_width=1))
     fig.add_vline(x=base * 100, line_color=T.TERRA, line_dash="dot")
     st.plotly_chart(T.style_fig(fig, 200, xtitle="spike probability (%)", ytitle="plots"), use_container_width=True)
-    T.note(f"Dotted line = base rate {base*100:.1f}%. Plots to the right are elevated today.")
 
 
 def _drilldown(wl, date_iso):
@@ -92,30 +96,40 @@ def _drilldown(wl, date_iso):
                                      marker=dict(color=T.MUTED, size=5), name="moisture"))
             fig.add_trace(go.Scatter(x=md.date, y=md.ewma, line=dict(color=T.SAGE, width=2), name="EWMA"))
         st.plotly_chart(T.style_fig(fig, 280, ytitle="substrate moisture"), use_container_width=True)
-    T.note("Left: each named factor's push on this plot's risk (transparent logistic; current + 7-day "
-           "moisture merged into one trend driver). Right: EWMA drift of substrate moisture vs a ±3σ baseline band.")
     T.caveat_note("The drift monitor is operational triage only — it flags <b>recurring</b> drift, but does NOT "
                   "pre-empt a plot's first hard alert. No profit/ROI claim.")
 
 
 def _response_proof():
-    dose = I.response_dose()
-    by = dose["by"].set_index("delay")
-    lab = {0: "same day", 1: "1-day delay", 2: "2-day delay"}
-    fig = go.Figure(go.Scatter(
-        x=by["mean"], y=[lab[d] for d in by.index], mode="markers",
-        marker=dict(size=12, color=T.SAGE),
-        error_x=dict(type="data", symmetric=False, array=by.hi - by["mean"],
-                     arrayminus=by["mean"] - by.lo, color=T.TAUPE, thickness=1.5, width=6),
-        text=[f"  n={int(n):,}" for n in by["count"]], textposition="middle right",
-        textfont=dict(size=10, color=T.MUTED)))
-    fig.add_vline(x=0, line_color=T.MUTED, line_width=1)
-    st.plotly_chart(T.style_fig(fig, 240, xtitle="3-day stress change after acting (← more relief)"),
-                    use_container_width=True)
-    ci = dose["diff_ci"]
-    T.note(f"Same-day relief −0.049 vs −0.024 delayed (each day of delay ≈ halves it). Same-day − delayed "
-           f"= {ci[0]:.4f} [95% CI {ci[1]:.4f}, {ci[2]:.4f}], p≈2×10⁻⁹⁸, n={dose['n']:,} action-days. "
-           f"Source: <code>eda.mechanism_delay_stress</code>.")
+    # Heat map: rows = response delay, cols = treatment, colour = mean post-action relief.
+    mean, cnt = I.delay_treatment_relief()
+    ylab = {0: "same day", 1: "1-day delay", 2: "2-day delay"}
+    treatments = list(mean.columns)
+    z = mean.values
+    z_shown = np.where(cnt.values < 30, np.nan, z)   # de-emphasize small-n cells (NaN -> blank)
+    fig = go.Figure(go.Heatmap(
+        z=z_shown, x=treatments, y=[ylab[i] for i in mean.index],
+        colorscale=[[0.0, "#EFE9DC"], [1.0, T.SAGE_SOFT]], reversescale=True,
+        xgap=3, ygap=3, hoverongaps=False,
+        colorbar=dict(title=dict(text="relief", font=dict(size=9)), thickness=9,
+                      outlinewidth=0, tickfont=dict(size=9)),
+        hovertemplate="%{y} · %{x}<br>mean relief %{z:.3f}<extra></extra>"))
+    for i, ridx in enumerate(mean.index):
+        for j, t in enumerate(treatments):
+            n = int(cnt.values[i, j])
+            small = n < 30
+            fig.add_annotation(
+                x=t, y=ylab[ridx], showarrow=False,
+                text=f"{z[i, j]:.3f}<br><span style='font-size:8px'>n={n}{' ⚠' if small else ''}</span>",
+                font=dict(size=11, color=T.MUTED if small else T.INK))
+    fig = T.style_fig(fig, 300, xgrid=False, ygrid=False)
+    fig.update_yaxes(autorange="reversed")   # same-day at top
+    st.plotly_chart(fig, use_container_width=True)
+    T.caveat_note("<b>Descriptive only.</b> Cells show observed relief by delay×treatment — <b>not</b> a causal "
+                  "claim that any treatment 'responds better'. Treatments weren’t randomized and differ in pest "
+                  "burden and crop mix; small-n cells (n &lt; 30, de-emphasized) would be unreliable (none here — "
+                  "all cells n ≥ 86). The confounder-safe result is the overall same-day ≈ 2× relief; the "
+                  "per-treatment cells are exploratory.")
 
 
 def _early_warning():
@@ -129,10 +143,6 @@ def _early_warning():
                                  textfont=dict(size=10, color=T.INK)))
     st.plotly_chart(T.style_fig(fig, 260, xtitle="% of plot-days inspected", ytitle="% of upcoming spikes caught"),
                     use_container_width=True)
-    T.note(f"Inspect the top 20% of plot-days → catch <b>{g['top20']*100:.0f}%</b> of spikes "
-           f"(2.2× base rate). At the 0.18 alarm: catches {g['tp']}/{g['tp']+g['fn']} spikes "
-           f"({g['recall']*100:.0f}% recall) with {g['fp']:,} false alarms (precision {g['precision']*100:.0f}%). "
-           f"Source: train-only logistic on the held-out test ({g['n_test']:,} plot-days).")
     T.caveat_note("Operational early-warning triage only — <b>NOT profit prediction</b>; target is up to 3 days "
                   "forward. Top-20% catches ~44% of spikes (you miss ~56%); at the wider 0.18 alarm you catch "
                   "~76% but only ~1 in 3 alarms is real. Always read precision next to recall. Time-held-out "
@@ -148,8 +158,6 @@ def _drivers_and_trajectory(tcolors):
         fig = go.Figure(go.Bar(x=env.mean_abs, y=env.label, orientation="h", marker_color=T.SAGE,
                                text=[f"{v:.2f}" for v in env.mean_abs], textposition="outside"))
         st.plotly_chart(T.style_fig(fig, 280, xtitle="mean |log-odds contribution|"), use_container_width=True)
-        T.note("Substrate-moisture (drying vs its 7-day trend) is the #1 <i>actionable</i> driver — a lever a "
-               "manager controls, not just exogenous pest pressure. Source: logistic coefficients.")
     with c[1]:
         T.card_title("Stress over the season, by treatment")
         w = I.weekly_stress_trajectory()
@@ -167,33 +175,27 @@ def _drivers_and_trajectory(tcolors):
                       f"collapses within treatment (r +0.09, p=0.31): never imply lower-stress treatments earn more.")
 
 
-def _alert_exposure(tcolors):
-    a = I.alert_exposure()
-    m = a["plots"]
-    fig = go.Figure()
-    for t in tcolors:
-        sub = m[m.treatment == t]
-        fig.add_trace(go.Bar(x=sub.plot_id, y=sub.alert_days, marker_color=tcolors[t], name=t))
-    fig.update_layout(barmode="stack")
-    fig.update_xaxes(showticklabels=False)
-    st.plotly_chart(T.style_fig(fig, 240, legend=True, xtitle="plots (sorted by alert burden)",
-                                ytitle="pest-alert days / season", xgrid=False), use_container_width=True)
-    T.caveat_note(f"Alert-days are a stress-threshold count (r={a['corr_stress']:.2f} with mean stress), and ~98% "
-                  f"of the spread between plots is driven by experimental <b>treatment assignment</b> "
-                  f"(Shade & Reduced-Pest dominate the high end), not organic per-plot pest exposure — the measured "
-                  f"pest sensor is flat across plots. Read as 'which treatments alert most', not 'which plots are "
-                  f"inherently riskier'.")
+def _recommendation_uptake():
+    g, overall, _ = I.recommendation_adherence()
+    fig = go.Figure(go.Bar(
+        x=g.adhere * 100, y=g.rec, orientation="h", marker_color=T.SAGE,
+        text=[f"{a*100:.0f}%  (n={n:,})" for a, n in zip(g.adhere, g.n)], textposition="auto"))
+    fig.add_vline(x=overall * 100, line_color=T.MUTED, line_dash="dot")
+    st.plotly_chart(T.style_fig(fig, 240, xtitle="% of recommendations acted on"), use_container_width=True)
+    T.caveat_note("Two honest limits: (1) ‘acted on’ = an action was logged on a recommendation-day — an "
+                  "<b>uptake proxy</b>; the data can’t confirm the action matched the specific recommendation "
+                  "(the input-application log doesn’t align with this one — only ~5% same-day overlap). "
+                  "(2) Relief-when-acted is the observed 3-day stress change, not a randomized causal effect. "
+                  "Descriptive, never a profit claim.")
 
 
 def _transparency():
-    metrics, cal, base = I.model_metrics()
+    metrics, cal, _ = I.model_metrics()
     c = st.columns(2, gap="large")
     with c[0]:
         T.card_title("Metrics vs baselines (held-out test)")
         show = metrics.set_index("model")[["AUC_ROC", "AUC_PR", "Brier", "Recall", "Prec@top20%"]].round(3)
         st.dataframe(show, use_container_width=True)
-        T.note(f"Train ≤ 2025-07-15, test ≥ 2025-08-01; AUC-PR no-skill = base rate {base:.3f}. The dashboard "
-               f"uses the <b>Logistic</b> row (it ties the gradient-boosted tree, so we keep the interpretable one).")
     with c[1]:
         T.card_title("Calibration — predicted vs observed")
         mx = float(cal.mean_predicted.max())
@@ -214,7 +216,7 @@ def render_risk() -> None:
     T.brand_bar("OPERATIONS")
     _page_title()
 
-    base = float(I.model_metrics()[2])
+    base = float(I.model_metrics()[2])  # base rate — still used by the risk-spread caption below
     dmin, dmax = I.date_range()
     default = min(max(dmin.date().replace(month=8, day=15), dmin.date()), dmax.date())
     ctl = st.columns([2, 1, 2], gap="large")
@@ -224,11 +226,11 @@ def render_risk() -> None:
     with ctl[1]:
         top_n = st.slider("Watch-list rows", 5, 30, 12)
     date_iso = as_of.isoformat()
-    st.session_state["ops_date"] = date_iso
     wl = I.watchlist(date_iso)
     tcolors = _treat_colors()
 
-    _kpis(base)
+    # One consolidated operational KPI row (after the date control so "today's" count is correct)
+    _kpis(wl)
 
     T.section_header("01 · Where to act first", "The daily watch-list")
     a = st.columns([3, 2], gap="large")
@@ -236,8 +238,6 @@ def render_risk() -> None:
         _watchlist_panel(wl, top_n)
     with a[1]:
         _today_dist(wl, base)
-    T.note("Predicts a <b>stress spike</b> (≥0.10 rise over 3 days), not profit. 'Top driver' = the largest "
-           "risk-raising environmental lever for that plot.")
 
     T.section_header("02 · Why this plot", "Drill-down: drivers & moisture drift")
     _drilldown(wl, date_iso)
@@ -251,8 +251,8 @@ def render_risk() -> None:
     T.section_header("05 · What drives risk & how stress moves", "Levers and the seasonal picture")
     _drivers_and_trajectory(tcolors)
 
-    T.section_header("06 · Alert-burden exposure", "Which treatments carry the pest load")
-    _alert_exposure(tcolors)
+    T.section_header("06 · Are the recommendations followed?", "Decision-support uptake — and whether it helps")
+    _recommendation_uptake()
 
-    T.section_header("07 · Model transparency", "Metrics, calibration & the honest ceiling")
-    _transparency()
+    with st.expander("Model details & validation", expanded=False):
+        _transparency()
