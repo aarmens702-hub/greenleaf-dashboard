@@ -1,24 +1,28 @@
 """Retrieval for the GreenLeaf chat.
 
-Loads the prebuilt index (embeddings + chunk metadata) and the embedding model
-ONCE at import time, then exposes retrieve(question, k). Run build_index.py first.
+Loads the prebuilt index (embeddings + chunk metadata + manifest) and the embedding
+model ONCE at import, validates the index fails-loud on a model/dim/count mismatch
+(so a stale or half-built index never silently serves wrong results), then exposes
+retrieve(question, k). Run build_index.py first.
 
 CLI: python app/rag/retrieve.py <your question>
 """
 from pathlib import Path
-import json
 import sys
 
 import numpy as np
 from sentence_transformers import SentenceTransformer
 
-INDEX_DIR = Path(__file__).resolve().parent / "index_data"
-MODEL_NAME = "all-MiniLM-L6-v2"
+from app.core import config
+from app.rag import index_io
 
-# Loaded ONCE per process at import (not per call).
-_EMBEDDINGS = np.load(INDEX_DIR / "embeddings.npy")
-with open(INDEX_DIR / "chunks.json", encoding="utf-8") as _fh:
-    _CHUNKS = json.load(_fh)
+INDEX_DIR = Path(__file__).resolve().parent / "index_data"
+MODEL_NAME = config.EMBEDDING_MODEL
+
+# Loaded ONCE per process at import (not per call). Validation here means a mismatched
+# or corrupt index raises at startup instead of returning garbage at query time.
+_EMBEDDINGS, _CHUNKS, _MANIFEST = index_io.load_index(INDEX_DIR)
+index_io.validate_index(_EMBEDDINGS, _CHUNKS, _MANIFEST, config.EMBEDDING_DIM, config.EMBEDDING_MODEL)
 _MODEL = SentenceTransformer(MODEL_NAME)
 
 
@@ -39,7 +43,7 @@ def _search_topk(query_vec, k):
     return top[np.argsort(-scores[top])].tolist()
 
 
-def retrieve(question, k=5):
+def retrieve(question, k=config.RETRIEVE_K):
     q_vec = _MODEL.encode([question], normalize_embeddings=True)[0].astype(np.float32)
     results = []
     for i in _search_topk(q_vec, k):

@@ -14,14 +14,13 @@ plumbing. Tool results are appended to the messages array as role="tool" turns.
 import json
 
 import pandas as pd
-import httpx
 
-from app.chat import router
 from app.chat import data_queries as dq
+from app.chat import llm
+from app.core import config
 from app.rag.retrieve import retrieve
 
-AGENT_MODEL = "deepseek-chat"
-_TRUNC = 4000  # cap each tool result fed back to the model
+_TRUNC = config.TOOL_RESULT_TRUNC  # cap each tool result fed back to the model
 
 # ---------------------------------------------------------------------------
 # query_data — the flexible, SAFE escape hatch (parameterized pandas only).
@@ -545,25 +544,30 @@ _FORCE_FINAL_NUDGE = (
 )
 
 
-def _chat(messages, tools=None, max_tokens=1024):
-    """One DeepSeek chat-completions call. Returns the assistant message dict
-    ({role, content, tool_calls?}). SWAP POINT for the provider."""
-    if not router.USE_LIVE_API:
-        raise RuntimeError(
-            "No LLM API key is set, so live calls are disabled. Get a key at "
-            "https://platform.deepseek.com and export DEEPSEEK_API_KEY."
-        )
-    payload = {"model": AGENT_MODEL, "messages": messages, "max_tokens": max_tokens, "stream": False}
-    if tools is not None:
-        payload["tools"] = tools
-    resp = httpx.post(
-        f"{router.DEEPSEEK_BASE_URL}/chat/completions",
-        headers={"Authorization": f"Bearer {router.API_KEY}", "Content-Type": "application/json"},
-        json=payload,
-        timeout=120.0,
-    )
-    resp.raise_for_status()
-    return resp.json()["choices"][0]["message"]
+def _new_meter():
+    """A per-answer accumulator for LLM telemetry (calls/tokens/cost/latency)."""
+    return {"llm_calls": 0, "tokens_in": 0, "tokens_out": 0, "cost_cad": 0.0, "llm_ms": 0}
+
+
+def _accumulate(meter, result):
+    """Fold one llm.ChatResult's usage into the meter."""
+    meter["llm_calls"] += 1
+    usage = result.usage or {}
+    meter["tokens_in"] += int(usage.get("prompt_tokens", 0) or 0)
+    meter["tokens_out"] += int(usage.get("completion_tokens", 0) or 0)
+    meter["cost_cad"] = round(meter["cost_cad"] + (result.cost_cad or 0.0), 6)
+    meter["llm_ms"] += int(result.latency_ms or 0)
+
+
+def _chat(messages, tools=None, max_tokens=1024, meter=None):
+    """One model turn via the LLM seam (app/chat/llm.py). Returns the assistant
+    message dict ({role, content, tool_calls?}); when `meter` is given, this call's
+    token/cost/latency are folded into it for the trace. The provider SWAP POINT now
+    lives in llm.chat() (retry/backoff, split timeout, fallback, usage capture)."""
+    result = llm.chat(messages, tools=tools, max_tokens=max_tokens)
+    if meter is not None:
+        _accumulate(meter, result)
+    return result.message
 
 
 def _assistant_entry(msg):
@@ -585,11 +589,12 @@ def _parse_args(raw):
         return {}
 
 
-def answer(question, max_iterations=6):
+def answer(question, max_iterations=config.AGENT_MAX_ITERATIONS):
     """Answer a question with an agentic tool-calling loop.
 
     Args: question (str); max_iterations (int) — hard cap on model turns.
-    Returns: {answer, sources, trace:{iterations, tool_calls, hit_max}}.
+    Returns: {answer, sources, trace:{iterations, tool_calls, hit_max, llm_calls,
+    tokens_in, tokens_out, cost_cad, llm_ms}}.
     """
     messages = [
         {"role": "system", "content": AGENT_SYSTEM},
@@ -604,10 +609,11 @@ def answer(question, max_iterations=6):
     iterations = 0
     hit_max = False
     final_text = None
+    meter = _new_meter()
 
     while iterations < max_iterations:
         iterations += 1
-        msg = _chat(messages, tools=TOOL_SCHEMAS)
+        msg = _chat(messages, tools=TOOL_SCHEMAS, meter=meter)
         messages.append(_assistant_entry(msg))
         calls = msg.get("tool_calls") or []
         if not calls:
@@ -640,7 +646,7 @@ def answer(question, max_iterations=6):
         # Loop exhausted without a final answer: make one forced answer call (no tools).
         hit_max = True
         messages.append({"role": "user", "content": _FORCE_FINAL_NUDGE})
-        msg = _chat(messages, tools=None)
+        msg = _chat(messages, tools=None, meter=meter)
         final_text = msg.get("content") or "I can't answer that from GreenLeaf's data."
 
     if final_text is None:
@@ -658,5 +664,10 @@ def answer(question, max_iterations=6):
             "iterations": iterations,
             "tool_calls": tool_calls_trace,
             "hit_max": hit_max,
+            "llm_calls": meter["llm_calls"],
+            "tokens_in": meter["tokens_in"],
+            "tokens_out": meter["tokens_out"],
+            "cost_cad": meter["cost_cad"],
+            "llm_ms": meter["llm_ms"],
         },
     }

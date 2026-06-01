@@ -2,45 +2,25 @@
 
 Uses the DeepSeek chat API (cheap/fast, OpenAI-compatible) to map a user question
 onto the 10 data functions in data_queries.py and/or the document knowledge base,
-returning strict JSON. The single _call_llm() below is the only provider-specific
-code — swap its body to change providers without touching the rest of the chat.
+returning strict JSON. All model calls now go through the shared seam in
+app/chat/llm.py (retry/timeout/fallback/usage capture); this module just shapes the
+classification prompt and parses the JSON.
 """
 import json
 import logging
-import os
 import re
-from pathlib import Path
 
-import httpx
+from app.chat import llm
+from app.core import config
 
 logger = logging.getLogger(__name__)
 
-DEEPSEEK_BASE_URL = "https://api.deepseek.com"
-ROUTER_MODEL = "deepseek-chat"
+# Back-compat re-exports: provider plumbing now lives in app/chat/llm.py.
+DEEPSEEK_BASE_URL = config.DEEPSEEK_BASE_URL
+ROUTER_MODEL = config.CHAT_MODEL
+API_KEY = llm.API_KEY
+USE_LIVE_API = llm.USE_LIVE_API
 
-
-def _load_dotenv(path):
-    """Minimal .env loader (no dependency): KEY=VALUE lines -> os.environ.
-
-    A real environment variable always wins (we only setdefault). The .env file is
-    gitignored, so the key never enters version control.
-    """
-    if not path.exists():
-        return
-    for line in path.read_text().splitlines():
-        line = line.strip()
-        if not line or line.startswith("#") or "=" not in line:
-            continue
-        key, _, val = line.partition("=")
-        os.environ.setdefault(key.strip(), val.strip().strip('"').strip("'"))
-
-
-_load_dotenv(Path(__file__).resolve().parents[2] / ".env")
-
-# Prefer DEEPSEEK_API_KEY; fall back to ANTHROPIC_API_KEY (where the key currently
-# lives), sourced from the repo-root .env (above) or the real environment.
-API_KEY = os.environ.get("DEEPSEEK_API_KEY") or os.environ.get("ANTHROPIC_API_KEY")
-USE_LIVE_API = bool(API_KEY)
 if not USE_LIVE_API:
     logger.warning(
         "No LLM API key set — live calls disabled. Export DEEPSEEK_API_KEY "
@@ -49,32 +29,16 @@ if not USE_LIVE_API:
 
 
 def _call_llm(model, system, user, max_tokens=1024):
-    """Single entry point to the LLM API (DeepSeek, OpenAI-compatible).
+    """Run the classifier prompt through the shared LLM seam and return text.
 
-    SWAP POINT: this is the only provider-specific code. To change providers,
-    replace this function body; classify()/answer() stay unchanged.
+    SWAP POINT lives in app/chat/llm.py now; this wraps it so classify() is unchanged.
     """
-    if not USE_LIVE_API:
-        raise RuntimeError(
-            "No LLM API key is set, so live calls are disabled. Get a key at "
-            "https://platform.deepseek.com and export DEEPSEEK_API_KEY."
-        )
-    resp = httpx.post(
-        f"{DEEPSEEK_BASE_URL}/chat/completions",
-        headers={"Authorization": f"Bearer {API_KEY}", "Content-Type": "application/json"},
-        json={
-            "model": model,
-            "messages": [
-                {"role": "system", "content": system},
-                {"role": "user", "content": user},
-            ],
-            "max_tokens": max_tokens,
-            "stream": False,
-        },
-        timeout=60.0,
+    result = llm.chat(
+        [{"role": "system", "content": system}, {"role": "user", "content": user}],
+        max_tokens=max_tokens,
+        model=model,
     )
-    resp.raise_for_status()
-    return resp.json()["choices"][0]["message"]["content"]
+    return result.message.get("content") or ""
 
 
 ROUTER_SYSTEM = """You are the routing layer for GreenLeaf's analytics assistant (a BC controlled-environment agriculture operator). Given a user question, decide what context is needed to answer it: computed data functions and/or a document knowledge base.
