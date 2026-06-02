@@ -26,6 +26,13 @@ def test_golden_file_loads_and_is_well_formed():
             assert r.get("relevant_sources")
 
 
+def test_regression_ok_budget():
+    base = {"recall@k": 1.0, "hit@k": 1.0}
+    assert run_eval.regression_ok({"recall@k": 1.0, "hit@k": 1.0}, base) is True
+    assert run_eval.regression_ok({"recall@k": 0.97, "hit@k": 1.0}, base, tolerance=0.05) is True
+    assert run_eval.regression_ok({"recall@k": 0.80, "hit@k": 1.0}, base, tolerance=0.05) is False
+
+
 def test_evaluate_aggregates_over_labeled_rows():
     rows = [
         {"id": "1", "type": "doc", "question": "q1", "relevant_sources": ["d1.md"]},

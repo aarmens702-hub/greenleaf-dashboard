@@ -10,6 +10,9 @@ Phase 0 of the production-RAG pipeline. Kept dependency-free on purpose: a heavi
 settings library (pydantic-settings) is a later-phase concern.
 """
 import os
+from pathlib import Path
+
+_ROOT = Path(__file__).resolve().parents[2]
 
 
 def _str(name, default):
@@ -61,3 +64,10 @@ LLM_PRICE_CAD_PER_MTOK_OUT = _float("GREENLEAF_LLM_PRICE_OUT", 1.10)
 AGENT_MAX_ITERATIONS = _int("GREENLEAF_AGENT_MAX_ITERATIONS", 6)
 TOOL_RESULT_TRUNC = _int("GREENLEAF_TOOL_RESULT_TRUNC", 4000)
 RETRIEVE_K = _int("GREENLEAF_RETRIEVE_K", 5)
+
+# --- Observability ---------------------------------------------------------
+LOG_LEVEL = _str("GREENLEAF_LOG_LEVEL", "INFO")
+LOG_DIR = _str("GREENLEAF_LOG_DIR", str(_ROOT / "logs"))
+# JSONL stores appended by the Streamlit app (one line per answer / per feedback).
+TRACE_FILE = _str("GREENLEAF_TRACE_FILE", str(Path(LOG_DIR) / "traces.jsonl"))
+FEEDBACK_FILE = _str("GREENLEAF_FEEDBACK_FILE", str(Path(LOG_DIR) / "feedback.jsonl"))

@@ -18,6 +18,7 @@ import pandas as pd
 from app.chat import data_queries as dq
 from app.chat import llm
 from app.core import config
+from app.core import obs
 from app.rag.retrieve import retrieve
 
 _TRUNC = config.TOOL_RESULT_TRUNC  # cap each tool result fed back to the model
@@ -480,13 +481,15 @@ def _execute_tool(name, args):
 
 
 def _tool_content(result):
-    """Serialize a tool result to a string for the messages array (truncated)."""
+    """Serialize a tool result to a string for the messages array (UNtruncated; the
+    caller applies _TRUNC and records whether truncation occurred, so the silent
+    evidence loss is visible in the trace)."""
     if isinstance(result, str):
-        return result[:_TRUNC]
+        return result
     try:
-        return json.dumps(result, default=str)[:_TRUNC]
+        return json.dumps(result, default=str)
     except (TypeError, ValueError):
-        return str(result)[:_TRUNC]
+        return str(result)
 
 
 # ---------------------------------------------------------------------------
@@ -600,7 +603,8 @@ def answer(question, max_iterations=config.AGENT_MAX_ITERATIONS):
         {"role": "system", "content": AGENT_SYSTEM},
         {"role": "user", "content": question},
     ]
-    tool_calls_trace = []      # {name, args, status}
+    request_id = obs.new_request_id()
+    tool_calls_trace = []      # {name, args, status, truncated}
     data_sources = []          # {type:data, tool, function, args}
     doc_candidates = []        # {title, source_url}
     seen_data = set()
@@ -624,7 +628,9 @@ def answer(question, max_iterations=config.AGENT_MAX_ITERATIONS):
             name = fn.get("name", "")
             args = _parse_args(fn.get("arguments"))
             result, status = _execute_tool(name, args)
-            tool_calls_trace.append({"name": name, "args": args, "status": status})
+            raw = _tool_content(result)
+            truncated = len(raw) > _TRUNC
+            tool_calls_trace.append({"name": name, "args": args, "status": status, "truncated": truncated})
             if status == "ok" and name == "search_documents" and isinstance(result, list):
                 for c in result:
                     url = c.get("source_url") or ""
@@ -640,7 +646,7 @@ def answer(question, max_iterations=config.AGENT_MAX_ITERATIONS):
             messages.append({
                 "role": "tool",
                 "tool_call_id": call.get("id", ""),
-                "content": _tool_content(result),
+                "content": raw[:_TRUNC],
             })
     else:
         # Loop exhausted without a final answer: make one forced answer call (no tools).
@@ -657,17 +663,41 @@ def answer(question, max_iterations=config.AGENT_MAX_ITERATIONS):
     docs = cited if cited else doc_candidates
     sources = [{"type": "doc", **d} for d in docs] + data_sources
 
-    return {
-        "answer": final_text,
-        "sources": sources,
-        "trace": {
-            "iterations": iterations,
-            "tool_calls": tool_calls_trace,
-            "hit_max": hit_max,
-            "llm_calls": meter["llm_calls"],
-            "tokens_in": meter["tokens_in"],
-            "tokens_out": meter["tokens_out"],
-            "cost_cad": meter["cost_cad"],
-            "llm_ms": meter["llm_ms"],
-        },
+    # Observability: derive the route from the tools actually called (this is what
+    # populates the previously-dead 'Reasoning' chip in the UI), and flag the silent
+    # failure modes — searches that returned nothing, and tool output truncation.
+    search_happened = any(c["name"] == "search_documents" for c in tool_calls_trace)
+    routing = {
+        "needs_docs": search_happened,
+        "needs_data": any(c["name"] != "search_documents" for c in tool_calls_trace),
+        "reasoning": "derived from tools actually called",
     }
+    empty_retrieval = bool(search_happened) and not doc_candidates
+    any_truncated = any(c.get("truncated") for c in tool_calls_trace)
+    n_tool_errors = sum(1 for c in tool_calls_trace if c.get("status") == "error")
+
+    trace = {
+        "request_id": request_id,
+        "iterations": iterations,
+        "tool_calls": tool_calls_trace,
+        "hit_max": hit_max,
+        "routing": routing,
+        "empty_retrieval": empty_retrieval,
+        "any_truncated": any_truncated,
+        "n_tool_errors": n_tool_errors,
+        "llm_calls": meter["llm_calls"],
+        "tokens_in": meter["tokens_in"],
+        "tokens_out": meter["tokens_out"],
+        "cost_cad": meter["cost_cad"],
+        "llm_ms": meter["llm_ms"],
+    }
+    obs.log_answer({
+        "event": "answer", "request_id": request_id, "iterations": iterations,
+        "hit_max": hit_max, "n_tools": len(tool_calls_trace), "n_tool_errors": n_tool_errors,
+        "empty_retrieval": empty_retrieval, "any_truncated": any_truncated, "routing": routing,
+        "tokens_in": meter["tokens_in"], "tokens_out": meter["tokens_out"],
+        "cost_cad": meter["cost_cad"], "llm_ms": meter["llm_ms"],
+        "question_chars": len(question or ""),
+    })
+
+    return {"answer": final_text, "sources": sources, "trace": trace}

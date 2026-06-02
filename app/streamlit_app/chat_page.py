@@ -19,6 +19,8 @@ import traceback
 import streamlit as st
 
 from app.chat.answer import answer
+from app.core import config
+from app.core import obs
 from app.streamlit_app import theme as T
 
 # Brand accent — forest sage. Match across other tabs.
@@ -188,11 +190,32 @@ def _render_routing(trace):
         st.json(routing)
 
 
+def _render_feedback(trace):
+    """Thumbs + optional correction per answer, persisted to the feedback store keyed
+    by request_id. Writes only when the rating changes, so a rerun doesn't duplicate."""
+    rid = (trace or {}).get("request_id")
+    if not rid:
+        return
+    rating = st.feedback("thumbs", key=f"fb_{rid}")
+    saved_key = f"_fb_saved_{rid}"
+    if rating is not None and st.session_state.get(saved_key) != rating:
+        st.session_state[saved_key] = rating
+        obs.append_jsonl(config.FEEDBACK_FILE, {"request_id": rid, "rating": int(rating)})
+    with st.expander("Suggest a correction"):
+        corr = st.text_area("What should the answer have said?", key=f"corr_{rid}",
+                            label_visibility="collapsed",
+                            placeholder="What should the answer have said?")
+        if st.button("Save correction", key=f"corrbtn_{rid}") and corr.strip():
+            obs.append_jsonl(config.FEEDBACK_FILE, {"request_id": rid, "correction": corr.strip()})
+            st.success("Saved — thanks!")
+
+
 def _render_assistant(msg):
-    """Render a single assistant message: answer, sources, routing, and any error."""
+    """Render a single assistant message: answer, sources, routing, feedback, errors."""
     st.markdown(escape_dollars(msg["content"]))
     _render_sources(msg.get("sources", []))
     _render_routing(msg.get("trace", {}))
+    _render_feedback(msg.get("trace", {}))
     if msg.get("traceback"):
         with st.expander("Error details"):
             st.code(msg["traceback"])
@@ -204,12 +227,14 @@ def _handle_question(question):
     try:
         with st.spinner("Thinking..."):
             result = answer(question)
+        trace = result.get("trace", {})
         st.session_state.messages.append({
             "role": "assistant",
             "content": result["answer"],
             "sources": result.get("sources", []),
-            "trace": result.get("trace", {}),
+            "trace": trace,
         })
+        obs.append_jsonl(config.TRACE_FILE, {"question": question, **trace})
     except Exception as e:  # noqa: BLE001 — UI must never crash; show the error instead.
         st.session_state.messages.append({
             "role": "assistant",

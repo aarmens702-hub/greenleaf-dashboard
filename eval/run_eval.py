@@ -63,6 +63,18 @@ def evaluate(rows, k, retrieve_fn):
     return summary, per_q
 
 
+def regression_ok(current, baseline, tolerance=0.05):
+    """True if current retrieval metrics are within tolerance of (or beat) baseline.
+
+    Guards the cheap, deterministic IR metrics (recall@k, hit@k) so a PR that quietly
+    worsens retrieval fails CI. Pure -> unit-testable without the model.
+    """
+    for key in ("recall@k", "hit@k"):
+        if current.get(key, 0.0) < baseline.get(key, 0.0) - tolerance:
+            return False
+    return True
+
+
 def _index_meta():
     """Stamp the result with which corpus/model produced it (best-effort)."""
     man = ROOT / "app" / "rag" / "index_data" / "manifest.json"
@@ -78,6 +90,9 @@ def main():
     ap = argparse.ArgumentParser(description="GreenLeaf retrieval eval (free IR metrics).")
     ap.add_argument("--k", type=int, default=5)
     ap.add_argument("--out", default=str(DEFAULT_OUT))
+    ap.add_argument("--check", action="store_true",
+                    help="Compare to the existing baseline and exit nonzero on regression (CI gate).")
+    ap.add_argument("--tolerance", type=float, default=0.05)
     args = ap.parse_args()
 
     # Imported here so the pure metrics stay testable without loading the model.
@@ -85,12 +100,20 @@ def main():
 
     rows = load_golden()
     summary, per_q = evaluate(rows, args.k, retrieve)
-    report = {**summary, "index": _index_meta(), "per_question": per_q}
-    Path(args.out).write_text(json.dumps(report, indent=2), encoding="utf-8")
-
     print(f"[eval] {summary['n_labeled']} labeled / {summary['n_total']} total @ k={args.k}")
     print(f"[eval] hit@k={summary['hit@k']}  recall@k={summary['recall@k']}  "
           f"mrr={summary['mrr']}  ndcg@k={summary['ndcg@k']}")
+
+    if args.check:
+        baseline = json.loads(Path(args.out).read_text(encoding="utf-8"))
+        ok = regression_ok(summary, baseline, args.tolerance)
+        verdict = "PASS" if ok else "FAIL"
+        print(f"[eval] regression check vs {args.out} (tol {args.tolerance}): {verdict} "
+              f"(baseline recall@k={baseline.get('recall@k')}, hit@k={baseline.get('hit@k')})")
+        raise SystemExit(0 if ok else 1)
+
+    report = {**summary, "index": _index_meta(), "per_question": per_q}
+    Path(args.out).write_text(json.dumps(report, indent=2), encoding="utf-8")
     print(f"[eval] wrote {args.out}")
 
 
