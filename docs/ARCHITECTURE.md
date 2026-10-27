@@ -69,5 +69,11 @@ Dated, with who decided. Not re-argued without a new reason.
   configuration re-run with 10 fresh seeds; crashed runs count (Agarwal 2021; Patterson 2024).
 - **2026-10-27, Claude.** Harness ported from crivo and Edison: four specialists, work types, an append-only ledger
   with fingerprints, `check_locks`, and a sealed test split enforced in code, by hooks and through git history.
+- **2026-10-27, Claude (veto open).** Deployment, like Edison and mostly static:
+  - a static site on Vercel replays pre-computed seasons (hourly JSON);
+  - a Modal web endpoint built from the training image runs the live season, with a per-visitor limit, sleeping when
+    idle;
+  - the repo holds the ledger, results and report, so every number on the site traces to a run;
+  - the live run offers the three test cities and labels any other city "untested here".
 - **2026-10-27, Claude (veto open).** Licenses: MIT at the repo root for the dashboard; AGPL-3.0-or-later in
   `control/`. The NASA POWER weather fetcher is our own code, not upstream's AGPL script.

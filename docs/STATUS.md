@@ -22,10 +22,10 @@
    - create the GitHub labels (`task`, `bug`, `core`, `code`, `probe`, `experiment`, `analysis`, `final`);
    - file Stage 0 and Stage 1 as issues (`/new-task`).
 2. **Stage 0** (S0-1 … S0-5): the `control/` scaffold, manifests, the ledger, `check_locks`, the `guard_runs` hook.
-3. **Stage 1** (S1-1 … S1-12): foundations and the debug ladder. No experiment before it's all green.
+3. **Stage 1** (S1-1 … S1-13): foundations and the debug ladder. No experiment before it's all green.
 4. **Stage 2** (E1 … E6): experiments, each pre-registered.
 5. **Stage 3:** the final (once), then the analysis.
-6. **Stage 4:** polish and the demo (its own plan).
+6. **Stage 4:** deploy and polish (D1–D7 in the plan). Visual roadmap: https://claude.ai/artifact/19obed2CuttzDAPZzbFDuw
 
 ## What we've learned
 - **GreenLight-Gym at `2d3febb`:**
