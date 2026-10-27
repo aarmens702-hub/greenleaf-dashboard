@@ -35,7 +35,7 @@ We report the result whichever way it comes out.
   strategy such as plant density or harvest timing.
 - **No yield calibration to real data** (a research project of its own). A climate-only calibration to AGC data is a
   stretch, capped at 2–3 days.
-- **No LLM in the core.** An optional "Ask GreenLeaf" explainer agent comes last, in its own plan.
+- **No LLM in the control loop.** The LLM layer is **Ask GreenLeaf**, an agent that explains the controller's decisions with evidence (run steps, ledger rows, re-simulated what-ifs, cited documents). It's graded on its own question set and built while Stage 2's runs train.
 
 ## The demo story (built in its own plan, after the final)
 1. **Season replay:** pick a location and press play. The grower on the left, the AI on the right; climate inside the
@@ -43,4 +43,4 @@ We report the result whichever way it comes out.
 2. **Live run:** any city, year and start date, plus a safety-budget slider. Both controllers simulate a season in
    seconds on a free CPU.
 3. **The trade-off chart:** profit against violation-hours across the three budgets.
-4. **Optional:** "Ask GreenLeaf" explains a decision with a what-if re-simulation.
+4. **Ask GreenLeaf:** ask why the AI did something; it answers with the evidence, and can re-run the next few hours with the grower's choice instead to show what would have happened.
