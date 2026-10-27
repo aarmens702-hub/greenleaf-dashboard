@@ -125,7 +125,7 @@ Per episode:
    - action × observation;
    - residual offset;
    - Lagrangian cost at budget.
-7. **Overfit a trivial case:** one scenario, a 2-day season, no constraint terms. PPO must beat `rb_default` on return.
+7. **Overfit a trivial case:** one scenario (PAPER), a 2-day season, no constraint terms. Within 200,000 steps, PPO must clearly beat `random` and `zero_controls` on return. The gap to `rb_default` is recorded, not gated: a hand-tuned controller can legitimately win a 2-day season, so beating it is not a plumbing test.
 
 ## 8. The seal
 - **What is sealed:** the TEST scenarios are scored only by `evaluate --final <row>`, where `<row>` is a
