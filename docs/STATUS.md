@@ -16,16 +16,39 @@
 - **Nothing in `control/` exists yet.** Stage 0 builds it.
 
 ## To do, in order
-1. **Aarmen's yes, before anything outward-facing:**
-   - push `dev` (with `prod-rag-pipeline`) to the public repo;
-   - add the licenses (MIT at the root, AGPL in `control/`);
-   - create the GitHub labels (`task`, `bug`, `core`, `code`, `probe`, `experiment`, `analysis`, `final`);
-   - file Stage 0 and Stage 1 as issues (`/new-task`).
-2. **Stage 0** (S0-1 … S0-5): the `control/` scaffold, manifests, the ledger, `check_locks`, the `guard_runs` hook.
-3. **Stage 1** (S1-1 … S1-13): foundations and the debug ladder. No experiment before it's all green.
-4. **Stage 2** (E1 … E6): experiments, each pre-registered.
+1. **Done 2026-10-27:**
+   - `dev` pushed, with the dashboard's `prod-rag-pipeline` work;
+   - labels created;
+   - Stage 0 and Stage 1 filed as issues #1–#18.
+2. **Stage 0, now. Start with `/start-task 1`:**
+   - #1 `control/` scaffold, licenses, CI;
+   - #2 manifests;
+   - #3 the ledger;
+   - #4 `check_locks`;
+   - #5 the `guard_runs` hook.
+   - #5 is independent and can run in parallel with #2–#4.
+3. **Stage 1:**
+   - #6 scenarios + weather;
+   - #7 rewards;
+   - #8 rule-based + configs;
+   - #9 envs;
+   - #10 metrics;
+   - #11 golden numbers;
+   - #12 Lagrangian;
+   - #13 train/evaluate/selection;
+   - #14 the probe ladder;
+   - #15 residual and Lagrangian probes;
+   - #16 overfit a trivial case;
+   - #17 stats/tune/grid/Modal;
+   - #18 plots.
+   - No experiment before all of these are shipped.
+4. **Stage 2** (E1 … E6): experiments, each pre-registered. File them with `/new-task` once Stage 1 is green. Ask
+   GreenLeaf (D6) is built in parallel.
 5. **Stage 3:** the final (once), then the analysis.
 6. **Stage 4:** deploy and polish (D1–D7 in the plan). Visual roadmap: https://claude.ai/artifact/19obed2CuttzDAPZzbFDuw
+
+**Run the harness from a Claude Code session started inside this repo** (`cd ~/Desktop/greenleaf-dashboard && claude`).
+Its agents, hooks and skills load only there.
 
 ## What we've learned
 - **GreenLight-Gym at `2d3febb`:**
