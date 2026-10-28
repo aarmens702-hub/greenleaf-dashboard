@@ -57,9 +57,12 @@ def _dry(args: argparse.Namespace, ledger_path: Path) -> int:
         f" (prices as of {PRICES_AS_OF})"
     )
     ends = ledger.rows(kind="run-end", path=ledger_path)
-    finished = [end for end in ends if end["status"] == "finished"]
+    # A tune_rb run-end trains nothing (timesteps 0), so it has no per-step rate.
+    finished = [end for end in ends if end["status"] == "finished" and end["timesteps"] > 0]
     if not finished:
-        print(f"wall clock: no measured run (no finished run-end in {ledger_path})")
+        print(
+            f"wall clock: no measured run (no finished run-end with timesteps > 0 in {ledger_path})"
+        )
         return 0
     end = finished[-1]  # the ledger is append-only, so the last is the newest
     rate = end["wall_s"] / end["timesteps"]

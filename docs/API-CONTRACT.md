@@ -206,9 +206,44 @@ Paths are relative to `control/`. Scenario dicts are `{"location": str, "growth_
 - `stats.prob_improvement(a: np.ndarray, b: np.ndarray) -> float`: rliable's `probability_of_improvement`.
   - Both arrays are 2-D with the same task count (else ValueError); their run counts may differ.
 - `tune_rb`:
-  - `TUNE_SPACE: dict[str, tuple[float, float]]` (12 setpoints, PROTOCOL §3).
-  - `rb_return(params, scenarios, season_length=60) -> float`.
-  - CLI `--trials N --jobs J --seed 0 (--smoke | --registered <row>)`.
+  - `TUNE_SPACE: dict[str, tuple[float, float]]` (12 setpoints, PROTOCOL §3): temp_setpoint_day, temp_setpoint_night,
+    heat_deadzone, co2_day, rh_max (the vents' threshold only; rhMax isn't tuned), t_vent_off, thScrSpDay,
+    thScrSpNight, thScrDeadZone, lamps_on, lamps_off, lamps_off_sun. Every other key stays at
+    `configs/rule_based_default.yml`'s value.
+  - `InvalidSeason(RuntimeError)`: a season metrics marks invalid.
+  - `rb_return(params, scenarios, season_length=60) -> float`: the mean over scenarios of
+    `evaluate.run_rb(params, s, season_length)[0]["paper_return"]` (metrics', not `paper_reward_sum`). An invalid
+    season raises `InvalidSeason` and is never scored.
+  - **Tuning:**
+    - Optuna `TPESampler(seed=--seed)`, maximizing; trial 0 is enqueued at the default setpoints.
+    - Every trial is scored by `rb_return(params, scenarios.TRAIN_EVAL, season_length)`. TRAIN_EVAL is hard-wired.
+    - `optimize(..., n_jobs=--jobs, catch=(InvalidSeason,))`: an invalid-season trial is FAIL and never scored; any
+      other exception crashes the run.
+    - The tuned params are the best COMPLETE trial's. With none, the run crashes and writes no yml.
+    - Deterministic at `--jobs 1` only.
+  - `main(argv=None, *, ledger_path=ledger.LEDGER) -> int`; CLI `--trials N --seed S [--jobs 1] [--runs-dir runs]
+    (--smoke | --registered <row>)`.
+  - `--smoke`: min(N, 2) trials on 1-day seasons into `<runs-dir>/smoke/tune_rb-<UTC stamp>-<hex>`. No ledger row;
+    configs are untouched.
+  - `--registered <row>`, refused before anything is written unless all of these hold:
+    - the row has exactly one arm of method `rb_tuned`, whose config is exactly `{"trials": N}`;
+    - `--trials N`;
+    - scenarios exactly `["validation"]`, the split the result is scored on (PROTOCOL §2, §9);
+    - seeds `[0]` and `--seed 0`;
+    - timesteps 0;
+    - `--jobs 1`;
+    - `configs/rule_based_tuned.yml` doesn't exist yet.
+  - Then a registered run plays N trials on 60-day seasons into `<runs-dir>/<row>/<arm>/seed0`:
+    - a `run` row before the trials;
+    - after them, a `run-end`: finished, or crashed and re-raised; timesteps 0; `solver_failures` = the count of
+      FAIL trials (trials, not steps; null if the tune raised); `cost_usd` and diagnostics null;
+    - then `configs/rule_based_tuned.yml`, written once.
+  - **Run dir outputs:**
+    - `manifest.json`: config `{method: "rb_tuned", seed, trials, jobs, season_length, tuned_on: "train_eval",
+      tune_space, run_dir}`;
+    - `trials.csv`: Optuna's `trials_dataframe()`, with state COMPLETE/FAIL and `params_<key>`;
+    - `rule_based_tuned.yml`: `{"GreenLightEnv": defaults with the best trial's 12 setpoints}`, as
+      `load_rb_params("tuned")` reads it.
 - `run_grid`: `main(argv=None, *, ledger_path=ledger.LEDGER) -> int`. Module constants `CPU=4.0`, `MEMORY_MB=8192`,
   `TIMEOUT_S=14400`, `USD_PER_CORE_S=0.0000131`, `USD_PER_GIB_S=0.00000222`, `PRICES_AS_OF="2026-10-28"`
   (modal.com/pricing; one core = 2 vCPU).
@@ -225,7 +260,8 @@ Paths are relative to `control/`. Scenario dicts are `{"location": str, "growth_
     - the worst case: CPU-hours = runs × TIMEOUT_S × CPU, and $ = runs × TIMEOUT_S × (CPU × USD_PER_CORE_S +
       MEMORY_MB/1024 × USD_PER_GIB_S). A true bound per attempt, because Modal bills max(request, usage) and
       `train_remote`'s limits equal its requests;
-    - the wall clock from the newest `finished` run-end (wall_s / timesteps × T, × ceil(runs / parallel) locally).
+    - the wall clock from the newest `finished` run-end with timesteps > 0, so never a tune_rb run (wall_s / timesteps
+      × T, × ceil(runs / parallel) locally); with none, "no measured run".
 - `modal_app` (import contacts nothing; nothing calls it before #19):
   - `app = modal.App("greenleaf")`;
   - image: `debian_slim(python_version="3.12")` + `apt_install("git")` + `uv_sync(<absolute control/>, frozen=True)` +

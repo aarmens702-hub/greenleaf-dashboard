@@ -322,6 +322,73 @@ def test_dry_says_no_measured_run_without_a_finished_run_end(state, tmp_path, mo
     assert re.search(r"(?<![\d.])15 runs\b", out), out
 
 
+def _tune_end(path: Path) -> None:
+    """A finished tune_rb run-end, appended through the ledger API: its registration (one rb_tuned
+    arm of 200 trials, seed 0, timesteps 0), its run, and the run-end tune_rb.main records when it
+    finishes: 5,200 s of wall clock, timesteps 0 (nothing trains), solver_failures 0, cost None
+    and every diagnostic None (no PPO update)."""
+    arm = {"name": "rb_tuned", "method": "rb_tuned", "config": {"trials": 200}}
+    reg = ledger.register(
+        **{**REGISTRATION, "arms": [arm], "seeds": [0], "timesteps": 0}, path=path
+    )
+    run = ledger.run_start(
+        registered=reg["row_id"], arm="rb_tuned", seed=0, run_dir="runs/rb_tuned/seed0", path=path
+    )
+    ledger.run_end(
+        run=run["row_id"],
+        status="finished",
+        wall_s=5200.0,
+        timesteps=0,
+        solver_failures=0,
+        cost_usd=None,
+        diagnostics=dict.fromkeys(ledger.DIAGNOSTIC_KEYS),
+        path=path,
+    )
+
+
+def test_dry_estimates_from_a_training_run_not_a_newer_tune_with_no_timesteps(
+    tmp_path, monkeypatch, capsys
+):
+    """Regression for #17 (17b review): tune_rb records a finished run-end with timesteps 0, and
+    --dry divided its wall_s by those 0 timesteps (ZeroDivisionError). The wall-clock estimate uses
+    only finished run-ends with timesteps > 0.
+
+    The ledger holds, oldest first: a finished training run at 108 s / 20,000 steps (0.0054
+    s/step), then a NEWER finished tune_rb run-end (5,200 s, timesteps 0). Known answer: the
+    estimate is the training run's, 0.0054 s/step x 1,000,000 steps = 5,400 s = 1.5 h per run, and
+    3 arms x 5 seeds = 15 runs at --parallel 2 is ceil(15 / 2) = 8 waves x 1.5 h = 12 h locally. It
+    exits 0 and the ledger is byte-identical afterwards.
+    """
+    from greenleaf_control import run_grid
+
+    path, reg = _registered(tmp_path)
+    _run_end(path, reg, "ppo_low_w", 3, "finished", wall_s=108.0, timesteps=20_000)
+    _tune_end(path)
+
+    out = _dry(run_grid, _dry_argv(3, [0, 1, 2, 3, 4]), tmp_path, path, monkeypatch, capsys)
+
+    assert re.search(r"(?<![\d.])1\.50*\s*h", out), out  # per run
+    assert re.search(r"(?<![\d.])12(\.0+)?\s*h", out), out  # local total
+    assert "no measured run" not in out
+
+
+def test_dry_says_no_measured_run_when_the_only_finished_run_end_has_no_timesteps(
+    tmp_path, monkeypatch, capsys
+):
+    """Regression for #17 (17b review): a ledger whose only finished run-end is a tune's
+    (timesteps 0) has no rate to measure: --dry exits 0, the wall-clock line says "no measured
+    run", and the worst case (15 runs) is still printed."""
+    from greenleaf_control import run_grid
+
+    path = tmp_path / "ledger.jsonl"
+    _tune_end(path)
+
+    out = _dry(run_grid, _dry_argv(3, [0, 1, 2, 3, 4]), tmp_path, path, monkeypatch, capsys)
+
+    assert "no measured run" in out
+    assert re.search(r"(?<![\d.])15 runs\b", out), out
+
+
 @pytest.mark.parametrize(("extra", "parallel"), [([], 2), (["--parallel", "3"], 3)])
 def test_registered_local_launches_one_train_run_per_arm_and_seed(
     extra, parallel, tmp_path, monkeypatch
