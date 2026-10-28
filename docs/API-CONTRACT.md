@@ -175,13 +175,40 @@ Paths are relative to `control/`. Scenario dicts are `{"location": str, "growth_
 ## `greenleaf_control.selection`, `stats`, `tune_rb`, `run_grid`, `modal_app`
 - `select_checkpoint(run_dir: Path) -> str`: the PROTOCOL §5 rule on VALIDATION; writes `selected.json`.
 - `stats.iqm_ci(scores: np.ndarray, reps: int = 2000, seed: int = 0) -> tuple[float, float, float]`
-- `stats.prob_improvement(a: np.ndarray, b: np.ndarray) -> float`
+  - `scores` is 2-D, runs × tasks (seeds × scenarios); anything else raises ValueError.
+  - Returns `(iqm, ci_low, ci_high)` as Python floats.
+  - The IQM is `rliable.metrics.aggregate_iqm`.
+  - The CI is the percentile 95% stratified bootstrap (runs resampled within each task) from a local
+    `RandomState(seed)`, equal to rliable 1.2.0's `get_interval_estimates(method="percentile")` after
+    `np.random.seed(seed)`.
+  - The global RNG is untouched.
+- `stats.prob_improvement(a: np.ndarray, b: np.ndarray) -> float`: rliable's `probability_of_improvement`.
+  - Both arrays are 2-D with the same task count (else ValueError); their run counts may differ.
 - `tune_rb`:
   - `TUNE_SPACE: dict[str, tuple[float, float]]` (12 setpoints, PROTOCOL §3).
   - `rb_return(params, scenarios, season_length=60) -> float`.
   - CLI `--trials N --jobs J --seed 0 (--smoke | --registered <row>)`.
-- `run_grid`: `--registered <row> --backend {local,modal} [--parallel 2]`, or `--issue N --dry` (worst-case
-  CPU-hours, $, wall time).
-- `modal_app`:
-  - `train_remote(argv: list[str]) -> str`, with `cpu=4.0, memory=8192, timeout=4*3600`;
-  - volume `greenleaf-runs` mounted at `/runs`.
+- `run_grid`: `main(argv=None, *, ledger_path=ledger.LEDGER) -> int`. Module constants `CPU=4.0`, `MEMORY_MB=8192`,
+  `TIMEOUT_S=14400`, `USD_PER_CORE_S=0.0000131`, `USD_PER_GIB_S=0.00000222`, `PRICES_AS_OF="2026-10-28"`
+  (modal.com/pricing; one core = 2 vCPU).
+  - `--registered <row> --backend {local,modal} [--parallel 2]`:
+    - Before any launch, refuses an unknown row, a method not in `envs.METHODS`, a config key outside `CONFIG_KEYS`
+      (train's `penalty_weight, budget_frac, season_length, n_envs, rb`) and any scenario in `scenarios.TEST`.
+    - Then runs `python -m greenleaf_control.train --method M [--<key> V ...] --seed S --timesteps T --registered
+      <row>` once per arm × seed, `--parallel` at a time, and exits 1 naming the arm and seed of any failure.
+    - run_grid writes no ledger row; each train run records its own.
+    - `--backend modal` refuses until #19 (remote runs can't record ledger rows, fingerprints or cost yet).
+  - `--issue N --arms '<JSON list of {name, method, config}>' --seeds S [S ...] --timesteps T --dry [--parallel 2]`,
+    run before registering. It writes nothing and prints:
+    - the run count;
+    - the worst case: CPU-hours = runs × TIMEOUT_S × CPU, and $ = runs × TIMEOUT_S × (CPU × USD_PER_CORE_S +
+      MEMORY_MB/1024 × USD_PER_GIB_S). A true bound per attempt, because Modal bills max(request, usage) and
+      `train_remote`'s limits equal its requests;
+    - the wall clock from the newest `finished` run-end (wall_s / timesteps × T, × ceil(runs / parallel) locally).
+- `modal_app` (import contacts nothing; nothing calls it before #19):
+  - `app = modal.App("greenleaf")`;
+  - image: `debian_slim(python_version="3.12")` + `apt_install("git")` + `uv_sync(<absolute control/>, frozen=True)` +
+    `add_local_python_source("greenleaf_control")`;
+  - `train_remote(argv: list[str]) -> str`, with hard limits `cpu=(4.0, 4.0)`, `memory=(8192, 8192)` ((request,
+    limit) pairs) and `timeout=4*3600`;
+  - volume `greenleaf-runs` (`create_if_missing=True`) mounted at `/runs`.
