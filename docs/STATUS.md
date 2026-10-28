@@ -19,12 +19,13 @@
   - #12 `lagrangian.py` (`6554dc0`, with the approved integral clamp in the contract);
   - #9 `envs.py` (`ad7c769`, seasons of exactly N steps), #10 `metrics.py` (`964a194`), #11 golden numbers (`1a220cc`);
   - #13a `train.py` (`d3844cb`), #13b `evaluate.py` (`ec0f96e`, with `pyarrow<26`);
-  - #16 overfit probe (`57e113a`), #14 probe ladder (`c39b482`), #18 `viz.py` (`d6955d1`).
-- **Stage 1, in flight:** #13c `selection.py` (`.worktrees/13c`), #17a `stats`/`run_grid`/`modal_app` (`.worktrees/17`), #17b `tune_rb` (`.worktrees/17b`).
+  - #16 overfit probe (`57e113a`), #14 probe ladder (`c39b482`), #18 `viz.py` (`d6955d1`);
+  - #17a `stats`/`run_grid`/`modal_app` (`a5618eb`), #13c `selection.py` (`e7d5476`, closing #13), #17b `tune_rb` (`14feb9e`, closing #17).
+- **Stage 1, open:** #15 residual-offset and Lagrangian probes (`.worktrees/15`, waiting on Aarmen: Open decision 0); #20 experiment results (selection CLI plus per-arm numbers); #19 Modal recording.
 - **Filed 2026-10-28:** #19, recording Modal runs (ledger rows, fingerprints, cost, configs and weather in the image). Due before E2. Until it lands, `run_grid --backend modal` refuses.
 
 ## To do, in order
-1. **Finish Stage 1:** #13c, #17a, #17b, then #15 (residual-offset and Lagrangian probes; needs #14's `toys.py`), #19, and a `selection` CLI (the experiment skill calls `python -m greenleaf_control.selection --registered <row>`; no contract line yet). No experiment before all of Stage 1 is shipped.
+1. **Finish Stage 1:** #15 (waiting on Aarmen, Open decision 0); #20, the selection CLI plus the per-arm numbers `ledger result --numbers` records (nothing computes them yet; needed before E1's result); #19 (Modal recording, before E2). No experiment before all of Stage 1 is shipped.
 2. **Aarmen, before E1:** veto or keep the TUNE_SPACE default (Defaults taken, #17b).
 3. **Stage 2** (E1 … E6): experiments, each pre-registered. File them with `/new-task` once Stage 1 is green. Ask GreenLeaf (D6) is built in parallel.
 4. **Stage 3:** the final (once), then the analysis.
@@ -36,11 +37,19 @@
 
 ## Open decisions for Aarmen
 ### Decide before the stage that needs it
+0. **#15's Lagrangian probe (blocks shipping #15; matters for E5).**
+   - What holds: on the toy (reward = cost = u, budget 0.3), the PID-Lagrangian holds mean cost in 0.3 ± 0.05 at both seeds (0.319, 0.295).
+   - What fails: λ_co2 never settles. It cycles 0.72 to 1.20 around ≈1.0 with a period of about 6 to 7 updates, so the issue's "std of the last 10 updates < 10% of the mean" gives 0.098 (seed 0) and 0.105 (seed 1, fail).
+   - The likely cause: PPO moves cost a roughly fixed step per update (an on/off switch), and the PID integral cycles around it.
+   - Options: (a) judge "settled" over whole cycles (the drift of λ's 30-update mean); (b) change kp/ki (contract defaults; an E5 call); (c) accept "cost held, λ cycles ±20%" as the known answer.
+   - Default: none taken. Changing a probe's criterion is yours.
+   - The residual probe passes. Details are on #15; the worktree `.worktrees/15` holds both probes uncommitted.
 1. **Root CI breaks `master` on the first `/promote`.** `.github/workflows/ci.yml:33` runs a bare `pytest -q` from the root, which collects `control/tests/` (import-file mismatch with the root `tests/test_smoke.py`, and no `gl_gym` there). The PR path filter hides it, so the PR looks green and master goes red on merge. Fix: `pytest -q tests`. It's a dashboard file, so it needs an issue and a yes.
 2. **The probe bar vs rung 7.** AGENTS.md says a probe runs "in under ~2 min on the Mac", but #16's overfit probe needs the issue's ~200k steps: `model.learn` alone took 130 s at load 7 to 10, and the whole test 118 to 280 s depending on load. Default: accept it for rung 7 (it's `@slow`, so off the Stop hook and CI) and add "rung 7 excepted" to the bar.
 3. **The `final` reviewer can't read `control/results/final/`** (blocked in every guard_runs mode). Decide how the final's review reads its results before the final issue.
 4. **PID recovery speed (before E5).** Decided 2026-10-28: the integral is clamped to [0, `lambda_max`] (#12). That stops unbounded windup, but it does not make λ recover within a run at the defaults: costs are ≥ 0, so the integral drops by at most `ki` per update, and from the cap λ needs (`lambda_max` − `kp`)/`ki` updates to reach 0 at zero cost: 1,990 at the defaults (100, 0.5, 0.05), against ~244 updates per run. A budget of 0 sends λ to the cap on the first violation. Prompt recovery needs a smaller `lambda_max` or a larger `ki`, both per-run settings; choose them when registering E5.
-5. **Zero-cost budgets for residual_lag (before E5).** rb_default never violates CO₂ on the TRAIN_EVAL seasons, so `budget_frac` × 0 gives a CO₂ budget of 0; the PID's error is then cost / 1e-8 and λ_co2 jumps to its cap (100) at the first CO₂ cost. If rb_tuned also has zero CO₂ cost, residual_lag is pinned at λ = 100 on CO₂. Option: a budget floor.
+5. **Zero-cost budgets for residual_lag (before E5).** It also bites selection: with a CO₂ budget of 0, × 1.10 leaves no slack, so one CO₂-violating step disqualifies a checkpoint and §5 falls to "lowest total cost" more often (both smoke manifests the #13c reviewer saw had a CO₂ budget of 0.0).
+   - Earlier note: rb_default never violates CO₂ on the TRAIN_EVAL seasons, so `budget_frac` × 0 gives a CO₂ budget of 0; the PID's error is then cost / 1e-8 and λ_co2 jumps to its cap (100) at the first CO₂ cost. If rb_tuned also has zero CO₂ cost, residual_lag is pinned at λ = 100 on CO₂. Option: a budget floor.
 
 ### Decided 2026-10-28
 - **The "modal" rule in `guard_runs` stays as is.** Specialists built and reviewed #17a's `modal_app` without loosening it: they write with the Write tool, check with `ruff check .` and plain `pytest`, and read with the Read and Grep tools. No guard change.
@@ -87,7 +96,13 @@
 - **tune_rb (#17b), veto before E1:**
   - TUNE_SPACE: temp_setpoint_day (16, 24), temp_setpoint_night (14, 20), heat_deadzone (1, 10), co2_day (400, 1200), rh_max (70, 90), t_vent_off (0, 4), thScrSpDay and thScrSpNight (0, 15), thScrDeadZone (1, 8), lamps_on (0, 6), lamps_off (12, 24), lamps_off_sun (200, 600).
   - P-bands and flags stay at their defaults. Trial 0 runs at the defaults.
-  - E1 is registered as arm `rb_tuned` with `{"trials": 200}`, seed 0, scenarios `train_eval`, `--jobs 1`.
+  - E1 is registered as arm `rb_tuned` with `{"trials": 200}` exactly, seed 0, timesteps 0, `--jobs 1`, and scenarios `["validation"]`: the registration's scenarios are where the result is scored (PROTOCOL §2, §9), while the tuning itself is hard-wired to TRAIN_EVAL. Scoring E1 on train_eval would be in-sample.
+  - A trial that hits a solver failure is marked FAIL in trials.csv, never scored, and counted in the run-end; the tune finishes. A registered tune refuses if `configs/rule_based_tuned.yml` already exists.
+  - Things to know before E1:
+    - `rh_max` (70, 90) straddles the 85 % RH bound, and `temp_setpoint_night`'s low end (14) sits under the 15 °C bound; paper_return penalizes both, so the ranges allow choices outside the bounds on purpose.
+    - `rh_max` sets only the vents' RH threshold; the screen uses `rhMax`, which isn't tuned.
+    - lamps_on 0 with lamps_off 24 allows 24 h of light (cost only).
+  - E1's cost: TRAIN_EVAL is 9 seasons, so 200 trials are 1,800 sixty-day seasons, about 1.5 h at `--jobs 1` locally. Register a cap of about 2 CPU-h. E1 launches directly (`tune_rb --registered <row> --trials 200 --jobs 1 --seed 0`), not through run_grid (which only launches train).
 - **selection (#13c):**
   - The scoring is §5 as written.
   - "Total cost" is the plain sum of the mean per-step costs. The ≤ is inclusive. A tie goes to the earliest checkpoint.
@@ -118,6 +133,8 @@
 - `evaluate.run_policy` is tested only on a `residual` run. A 1-day smoke over `ppo_paper` (other obs shape, normalized actions) and `residual_lag` (VecLagrangianReward in the stack) would lock it for every method.
 - `.claude/skills/experiment/SKILL.md` step 4 says `run_grid --backend modal`, which refuses until #19; run local until then.
 - `selection.py` isn't in `manifest.FINGERPRINTED`, so a change to it won't show in ledger rows, though it applies PROTOCOL §5.
+- The `selection` CLI (before E2) should refuse a run whose manifest status isn't `finished` (a crashed run with `ckpt_<steps>` files still gets a checkpoint today), and the contract should pick one checkpoint-name form: `select_checkpoint` returns `"final"` / `"<steps>"`, but the ledger tests use `"ckpt_final.zip"` for a result row's `selected`.
+- Budgets come from the run's training season length (train.py ~l.358), but selection always plays 60 days; that matches every default arm, but an arm registered with another `season_length` would be held to budgets measured over a different window.
 - viz's season strip counts 15-minute steps (to 5,760); days would read better in the README.
 
 ## What we've learned
@@ -154,6 +171,7 @@
   - pyarrow 26 refuses numpy 1.x;
   - `rliable.library` breaks on pandas 3 (through arch 7.2.0);
   - Python 3.12's `sum()` over floats is compensated, so it can differ from a `+=` loop.
+- **Residual evaluation overshoots toward a bound (#15):** PPO optimises the sampled, clipped policy, so when the optimum sits within about σ of the action bound, the deterministic control lands past it. Target 0.40 (a* = 2/3) peaked at 0.432 mid-training, then fell back as σ shrank. Expect the same on the greenhouse residual arms near u = 0 or 1.
 - **Parallel slow suites contend:** four test suites at once on the M3 (plus other load) slowed probes up to 5×. Ship one slow suite at a time.
 
 ## How Aarmen likes to work
