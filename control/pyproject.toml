@@ -10,7 +10,7 @@ dependencies = [
     "torch",
     "optuna>=3.6",
     "rliable==1.2.0",
-    "pyarrow",
+    "pyarrow<26",  # 26 needs numpy >= 2; gl-gym pins numpy < 2
     "matplotlib",
     "pyyaml",
     "tensorboard",
