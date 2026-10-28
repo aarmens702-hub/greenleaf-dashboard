@@ -16,18 +16,16 @@
   - #8 `rule_based.py` and upstream's configs (`d2db5cc`);
   - #7 `rewards.py` (`eda7af5`, scorer file, approved by Aarmen);
   - #6 `scenarios.py` and the weather data (`b136399`, scorer file, approved by Aarmen: 2 m wind, plain git);
-  - #12 `lagrangian.py` (`6554dc0`, with the approved integral clamp in the contract).
-- **Stage 1, in flight:** #9 `envs.py` (`.worktrees/9`, being built; core, so it stops for Aarmen) with decision B (seasons of exactly N steps); #10 metrics scouted ahead.
-- **Decided 2026-10-28:** episode length B (5,760 steps; envs.py ends the season itself; 3104.58 gets re-measured in #11); the PID integral clamp; #6's wind height (2 m), data in plain git, and format/range tests on the fetched 2012 files.
+  - #12 `lagrangian.py` (`6554dc0`, with the approved integral clamp in the contract);
+  - #9 `envs.py` (`ad7c769`, seasons of exactly N steps), #10 `metrics.py` (`964a194`), #11 golden numbers (`1a220cc`);
+  - #13a `train.py` (`d3844cb`), #13b `evaluate.py` (`ec0f96e`, with `pyarrow<26`);
+  - #16 overfit probe (`57e113a`), #14 probe ladder (`c39b482`), #18 `viz.py` (`d6955d1`).
+- **Stage 1, in flight:** #13c `selection.py` (`.worktrees/13c`), #17a `stats`/`run_grid`/`modal_app` (`.worktrees/17`), #17b `tune_rb` (`.worktrees/17b`).
+- **Filed 2026-10-28:** #19, recording Modal runs (ledger rows, fingerprints, cost, configs and weather in the image). Due before E2. Until it lands, `run_grid --backend modal` refuses.
 
 ## To do, in order
-1. **Aarmen:** say yes or no to #7's diff; then #6's when it reaches the gate.
-2. **Stage 1, by dependency wave:**
-   - now: #6, #7 (in flight);
-   - next: #9 envs (needs #6, #7, #8), #12 Lagrangian (needs #7);
-   - then: #10 metrics (needs #9), then #11 golden numbers (needs #10) and #13 train/evaluate/selection (needs #9, #10, #12);
-   - last: #14, #15, #16 probes, #17 stats/tune/grid/Modal, #18 plots (all need #13).
-   - No experiment before all of Stage 1 is shipped.
+1. **Finish Stage 1:** #13c, #17a, #17b, then #15 (residual-offset and Lagrangian probes; needs #14's `toys.py`), #19, and a `selection` CLI (the experiment skill calls `python -m greenleaf_control.selection --registered <row>`; no contract line yet). No experiment before all of Stage 1 is shipped.
+2. **Aarmen, before E1:** veto or keep the TUNE_SPACE default (Defaults taken, #17b).
 3. **Stage 2** (E1 … E6): experiments, each pre-registered. File them with `/new-task` once Stage 1 is green. Ask GreenLeaf (D6) is built in parallel.
 4. **Stage 3:** the final (once), then the analysis.
 5. **Stage 4:** deploy and polish (D1–D7 in the plan). Visual roadmap: https://claude.ai/artifact/19obed2CuttzDAPZzbFDuw
@@ -39,12 +37,13 @@
 ## Open decisions for Aarmen
 ### Decide before the stage that needs it
 1. **Root CI breaks `master` on the first `/promote`.** `.github/workflows/ci.yml:33` runs a bare `pytest -q` from the root, which collects `control/tests/` (import-file mismatch with the root `tests/test_smoke.py`, and no `gl_gym` there). The PR path filter hides it, so the PR looks green and master goes red on merge. Fix: `pytest -q tests`. It's a dashboard file, so it needs an issue and a yes.
-2. **The "modal" rule in `guard_runs` (before #17).** Any Bash command containing "modal" is blocked for specialists, including `pytest tests/test_modal_app.py`, `ruff check .../modal_app.py` and `grep modal_app`. Option: block `modal` as a program word and `--backend modal` instead.
+2. **The probe bar vs rung 7.** AGENTS.md says a probe runs "in under ~2 min on the Mac", but #16's overfit probe needs the issue's ~200k steps: `model.learn` alone took 130 s at load 7 to 10, and the whole test 118 to 280 s depending on load. Default: accept it for rung 7 (it's `@slow`, so off the Stop hook and CI) and add "rung 7 excepted" to the bar.
 3. **The `final` reviewer can't read `control/results/final/`** (blocked in every guard_runs mode). Decide how the final's review reads its results before the final issue.
 4. **PID recovery speed (before E5).** Decided 2026-10-28: the integral is clamped to [0, `lambda_max`] (#12). That stops unbounded windup, but it does not make λ recover within a run at the defaults: costs are ≥ 0, so the integral drops by at most `ki` per update, and from the cap λ needs (`lambda_max` − `kp`)/`ki` updates to reach 0 at zero cost: 1,990 at the defaults (100, 0.5, 0.05), against ~244 updates per run. A budget of 0 sends λ to the cap on the first violation. Prompt recovery needs a smaller `lambda_max` or a larger `ki`, both per-run settings; choose them when registering E5.
 5. **Zero-cost budgets for residual_lag (before E5).** rb_default never violates CO₂ on the TRAIN_EVAL seasons, so `budget_frac` × 0 gives a CO₂ budget of 0; the PID's error is then cost / 1e-8 and λ_co2 jumps to its cap (100) at the first CO₂ cost. If rb_tuned also has zero CO₂ cost, residual_lag is pinned at λ = 100 on CO₂. Option: a budget floor.
 
 ### Decided 2026-10-28
+- **The "modal" rule in `guard_runs` stays as is.** Specialists built and reviewed #17a's `modal_app` without loosening it: they write with the Write tool, check with `ruff check .` and plain `pytest`, and read with the Read and Grep tools. No guard change.
 - **Run automated (Aarmen, 2026-10-28):** scorer-file and golden-number diffs ship once the reviewer says SHIP IT, and the diff is shown to Aarmen in the summary afterward (he can revert). Paid Modal runs, the final, each experiment's adopt/drop, and merges to `master` still wait for his explicit yes.
 - **Ledger vs the dirty-tree check:** the manifest's dirty check exempts exactly `control/ledger/ledger.jsonl` (append-only, guarded by `check_locks`), alongside `control/runs/`; otherwise every registered run after the first in a grid was refused (found in #13a's review; shipped with #13a).
 - **Episode length:** B. Seasons are exactly N steps (5,760 for 60 days), as PROTOCOL §1 says; envs.py ends the season itself because upstream's env runs N+1. PROTOCOL §7's 3104.58 (the 2026-10-27 bench, 5,761 steps on upstream's env) is re-measured in #11.
@@ -62,6 +61,40 @@
 - **rewards (#7):** upstream's mislabelled `temp_penalty`/`co2_penalty`/`rh_penalty` are dropped from info; `info["reward"]` is ours and upstream's is `paper_reward`; upstream's unweighted `penalty` key stays.
 - **train/evaluate/selection (#13), shipped in three parts (13a train, 13b evaluate, 13c selection):** `train --rb {tuned,default}` (default tuned; the resolved params are stored in the manifest, so evaluation rebuilds from them); VecNormalize normalises obs and reward with PPO's gamma (0.9631) and SB3's default clips; a mid-season solver failure keeps SB3's time-limit bootstrap and is counted; after training, one deterministic PAPER episode with the in-memory model is logged to `final_eval.json` for the reload check; the path that opens the test weather (`evaluate --final`) waits for the final (Stage 3), so #13 ships only its refusals.
 - **metrics (#10):** `metrics.py` imports nothing from gl_gym at all (importing `gl_gym.environments.utils` loads `gl_gym.components.rewards` through its package `__init__`), so its unit conversions are reimplemented. `yield_kg_m2` is upstream's `fruit_growth_ffw`: the net change in standing fruit dry matter (growth minus maintenance and harvest), not harvested yield; say so in the write-up.
+- **Probe ladder (#14):**
+  - The toys are swapped in for `envs.make_env`, and train.py is unchanged.
+  - The constant-reward probe asserts V / `normalize_reward(1)` ≈ 1 ± 0.1. VecNormalize clips that reward to 10, so V_norm = 10, and de-normalising by sqrt(var) is meaningless there.
+  - The action × obs probe needs > 0.9 / < −0.9 at the two contexts. The issue's sign-only check passes untrained, because the initial policy is nearly odd-symmetric.
+  - A fast negative control shows that every criterion fails untrained.
+- **Overfit (#16):**
+  - The gate is zero_controls + 1.0 return unit (€0.0202/m²), fixed on the issue before PPO trained.
+  - The baselines are computed live, and each must be a valid 192-step season.
+- **evaluate (#13b):**
+  - `paper_reward_sum` is summed with `+=` like `train._final_eval`. Python 3.12's `sum()` is compensated, so the two differ in the last bits.
+  - `--final` is refused until F1.
+  - A baseline row's checkpoint is None.
+  - `pyarrow<26`, a dependency change under run-automated.
+- **viz (#18):**
+  - Each function returns its Figure, built without pyplot on a white facecolor.
+  - Actuator axes are padded to −0.05 to 1.05, so a control pinned at a bound stays visible.
+  - Learning curves are labelled as the env reward at the run's w, which for residual_lag is profit only.
+- **stats, run_grid, modal_app (#17a):**
+  - `iqm_ci` writes out rliable 1.2.0's percentile stratified bootstrap on a local `RandomState(seed)`. `rliable.library` can't import here: arch 7.2.0 against pandas 3. Checked equal to rliable itself (shimmed) to 6e-17.
+  - `run_grid --dry` takes `--issue --arms --seeds --timesteps`, since it runs before registering.
+  - Prices come from modal.com/pricing, fetched 2026-10-28.
+  - `train_remote` has hard limits `cpu=(4, 4)` and `memory=(8192, 8192)`. Modal bills max(request, usage), so the limits make the dry run's worst case a real bound.
+  - `--backend modal` refuses until #19.
+- **tune_rb (#17b), veto before E1:**
+  - TUNE_SPACE: temp_setpoint_day (16, 24), temp_setpoint_night (14, 20), heat_deadzone (1, 10), co2_day (400, 1200), rh_max (70, 90), t_vent_off (0, 4), thScrSpDay and thScrSpNight (0, 15), thScrDeadZone (1, 8), lamps_on (0, 6), lamps_off (12, 24), lamps_off_sun (200, 600).
+  - P-bands and flags stay at their defaults. Trial 0 runs at the defaults.
+  - E1 is registered as arm `rb_tuned` with `{"trials": 200}`, seed 0, scenarios `train_eval`, `--jobs 1`.
+- **selection (#13c):**
+  - The scoring is §5 as written.
+  - "Total cost" is the plain sum of the mean per-step costs. The ≤ is inclusive. A tie goes to the earliest checkpoint.
+  - Invalid episodes are recorded, never dropped.
+  - Seasons are 60 days.
+  - `selected.json` is written once and refuses an existing file.
+  - The function only, no CLI yet.
 - **rule_based (#8):** configs are byte-identical upstream copies under a 3-line AGPL header; `load_rb_params` unwraps the `GreenLightEnv:` key, so `tune_rb` (#17) must write the tuned file in that shape.
 
 ### Follow-ups worth an issue
@@ -82,6 +115,10 @@
 - `guard_tests.py` and `protect_secrets.py` fail open on unparseable input.
 - `builder.md` rule 10's bullets are stricter than the hook (`run_grid` outright, `tune_rb` over 5 trials); the hook also blocks read-only `cp control/runs/x /tmp/y` and `rm -rf runs/smoke`.
 - MIT copyright names only Aarmen; confirm for the hackathon team.
+- `evaluate.run_policy` is tested only on a `residual` run. A 1-day smoke over `ppo_paper` (other obs shape, normalized actions) and `residual_lag` (VecLagrangianReward in the stack) would lock it for every method.
+- `.claude/skills/experiment/SKILL.md` step 4 says `run_grid --backend modal`, which refuses until #19; run local until then.
+- `selection.py` isn't in `manifest.FINGERPRINTED`, so a change to it won't show in ledger rows, though it applies PROTOCOL §5.
+- viz's season strip counts 15-minute steps (to 5,760); days would read better in the README.
 
 ## What we've learned
 - **GreenLight-Gym at `2d3febb`:**
@@ -107,6 +144,17 @@
 - **Metrics matches upstream:** on 21 full seasons (PAPER and TRAIN_EVAL, three baselines), `metrics.profit_eur_m2` is within 1e-13 of upstream's summed profit and violation counts are equal, though the closest values sit within 1 to 2 float32 ulps of a bound (unrecorded reviewer check). A count split on another platform is a finding: our float64 state is the truth.
 - **Data sources differ by city:** Amsterdam comes from GL-Gym's bundled files, London and Abbotsford from NASA POWER. TEST cities differ by data source as well as climate; say so in the write-up.
 - **Compute:** CPU-bound, so Modal CPU containers (~$10 expected), capped at $40 total. GPUs don't help here.
+- **Our training plumbing learns:** the five rung 6 toys pass at seeds 0 and 1 within 12,288 steps each, at ppo.yml's lr 2e-5 (#14).
+- **A 2-day PAPER season at w = 0 (#16):**
+  - Doing nothing beats the rule-based controller: zero_controls 126.80 vs rb_default 86.82 return (random 67.58).
+  - The lamps cost more per step than the fruit they add.
+  - PPO (196,608 steps, seed 0) reaches 129.30 by shutting the costly actuators and using the free thermal screen.
+  - Deterministic over 4 runs.
+- **Library traps in the locked env:**
+  - pyarrow 26 refuses numpy 1.x;
+  - `rliable.library` breaks on pandas 3 (through arch 7.2.0);
+  - Python 3.12's `sum()` over floats is compensated, so it can differ from a `+=` loop.
+- **Parallel slow suites contend:** four test suites at once on the M3 (plus other load) slowed probes up to 5×. Ship one slow suite at a time.
 
 ## How Aarmen likes to work
 - **Decisions stated as defaults**, not rounds of questions; he vetoes what he doesn't like.

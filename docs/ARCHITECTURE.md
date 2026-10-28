@@ -80,3 +80,10 @@ Dated, with who decided. Not re-argued without a new reason.
 - **2026-10-28, Aarmen.** Seasons are exactly N steps (5,760 for 60 days), matching PROTOCOL §1; upstream's env runs
   N+1, so `envs.py` ends the season itself. PROTOCOL §7's 3104.58 (the 2026-10-27 bench, 5,761 steps on upstream's
   env) is re-measured in #11.
+- **2026-10-28, Claude (veto open).** `stats.iqm_ci` writes out rliable 1.2.0's percentile stratified bootstrap
+  (resample runs within each task) on a local `RandomState(seed)`, with rliable's own `aggregate_iqm`, instead of
+  calling `rliable.library`. That module can't import in the locked env (arch 7.2.0 breaks on pandas 3, and rliable pins
+  arch<8). A test pins the replica, and a one-time check against `rliable.library` itself (pandas shimmed in memory)
+  matched to 6e-17.
+- **2026-10-28, Claude (veto open).** Modal containers get hard limits equal to their requests (4 cores, 8 GiB, 4 h),
+  so `run_grid --dry`'s worst case is a real bound: Modal bills max(request, usage).
