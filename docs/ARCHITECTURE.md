@@ -78,4 +78,5 @@ Dated, with who decided. Not re-argued without a new reason.
 - **2026-10-27, Claude (veto open).** Licenses: MIT at the repo root for the dashboard; AGPL-3.0-or-later in
   `control/`. The NASA POWER weather fetcher is our own code, not upstream's AGPL script.
 - **2026-10-28, Aarmen.** Seasons are exactly N steps (5,760 for 60 days), matching PROTOCOL §1; upstream's env runs
-  N+1, so `envs.py` ends the season itself. The paper's 3104.58 (5,761 steps) is re-measured in #11.
+  N+1, so `envs.py` ends the season itself. PROTOCOL §7's 3104.58 (the 2026-10-27 bench, 5,761 steps on upstream's
+  env) is re-measured in #11.
