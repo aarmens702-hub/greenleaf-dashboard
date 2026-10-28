@@ -1,0 +1,28 @@
+name: control-ci
+
+# GreenLeaf 2.0 (control/): lint, format and the fast tests. Keyless and offline.
+on:
+  push:
+    branches: [dev, master]
+  pull_request:
+
+jobs:
+  lint-and-test:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: control
+    steps:
+      - uses: actions/checkout@v7
+      # setup-uv has published no floating major tag since v7, so pin the release.
+      - uses: astral-sh/setup-uv@v10.3.2
+        with:
+          python-version: "3.12"
+      - name: Install
+        run: uv sync --frozen
+      - name: Lint
+        run: uv run ruff check .
+      - name: Format
+        run: uv run ruff format --check .
+      - name: Fast tests
+        run: uv run pytest -q -m "not slow"
