@@ -12,11 +12,13 @@
   - #3 `ledger.py`, the append-only experiment ledger (`2fa45c4`);
   - #4 `scripts/check_locks.py`, the ledger's history lock (`4c9790c`);
   - #5 `.claude/hooks/guard_runs.py`, the specialists' guard hook (`916c883`).
-- **Stage 1 has started:**
-  - #8 `rule_based.py` and upstream's configs: shipped (`d2db5cc`).
-  - #7 `rewards.py`: built and reviewed, **waiting for Aarmen's yes** on the scorer-file diff (`.worktrees/7`).
-  - #6 `scenarios.py` and the weather data: built, in review (`.worktrees/6`). Core, so it stops for Aarmen too.
-  - #9 envs and #12 Lagrangian: scouted, waiting on #6 and #7.
+- **Stage 1, shipped to `dev` with CI green:**
+  - #8 `rule_based.py` and upstream's configs (`d2db5cc`);
+  - #7 `rewards.py` (`eda7af5`, scorer file, approved by Aarmen);
+  - #6 `scenarios.py` and the weather data (`b136399`, scorer file, approved by Aarmen: 2 m wind, plain git);
+  - #12 `lagrangian.py` (`6554dc0`, with the approved integral clamp in the contract).
+- **Stage 1, in flight:** #9 `envs.py` (`.worktrees/9`, being built; core, so it stops for Aarmen) with decision B (seasons of exactly N steps); #10 metrics scouted ahead.
+- **Decided 2026-10-28:** episode length B (5,760 steps; envs.py ends the season itself; 3104.58 gets re-measured in #11); the PID integral clamp; #6's wind height (2 m), data in plain git, and format/range tests on the fetched 2012 files.
 
 ## To do, in order
 1. **Aarmen:** say yes or no to #7's diff; then #6's when it reaches the gate.
@@ -36,16 +38,17 @@
 
 ## Open decisions for Aarmen
 ### Decide before the stage that needs it
-1. **Episode length (before #11 golden numbers).** Upstream's env ends `terminated` after N+1 steps (`_terminalState` checks `timestep >= N` before `timestep += 1`): 97 steps per day, 5,761 per 60-day season. Upstream's 3104.58 covers 5,761 steps. PROTOCOL §7.1 says "exactly 5,760 steps, ending terminated". Match upstream, or truncate at 5,760 (then 3104.58 won't reproduce exactly).
-2. **Ledger vs the dirty-tree check (before local training, S1-8/S1-12).** The experiment skill appends a `run` row to the tracked ledger at launch, so the next local run's `write_manifest(smoke=False)` sees ` M control/ledger/ledger.jsonl` and refuses. Options: ignore the ledger file in the dirty check; write every manifest before any ledger row; or commit between runs.
-3. **casadi 3.8.2 (before #11).** The simulator's ODE solver was uploaded the same day the lock was made; the bench that gave 3104.58 didn't record its casadi version. If #11 can't reproduce 3104.58, casadi is the first suspect. Options: pin the bench's version, or a uv `exclude-newer` cooldown.
-4. **Root CI breaks `master` on the first `/promote`.** `.github/workflows/ci.yml:33` runs a bare `pytest -q` from the root, which collects `control/tests/` (import-file mismatch with the root `tests/test_smoke.py`, and no `gl_gym` there). The PR path filter hides it, so the PR looks green and master goes red on merge. Fix: `pytest -q tests`. It's a dashboard file, so it needs an issue and a yes.
-5. **The "modal" rule in `guard_runs` (before #17).** Any Bash command containing "modal" is blocked for specialists, including `pytest tests/test_modal_app.py`, `ruff check .../modal_app.py` and `grep modal_app`. Option: block `modal` as a program word and `--backend modal` instead.
-6. **The seal and the fetched TEST weather (at #6's gate).** #6's tests read London/Abbotsford `2012.csv` for header, spacing and ranges, as its Done-when asks. That goes past PROTOCOL §8's literal "loading 2012 to check a reset". Confirm, or reword §8.
-7. **Weather CSVs in git (at #6's gate).** About 65 MB in 7 files, each under GitHub's 50 MB limit. Default plain git, not LFS.
-8. **The `final` reviewer can't read `control/results/final/`** (blocked in every guard_runs mode). Decide how the final's review reads its results before the final issue.
-9. **Wind height of the fetched TEST weather (at #6's gate).** The fetcher follows upstream and requests NASA POWER's 2 m wind (WS2M). On Amsterdam 2011 that averages 4.11 m/s against 5.06 m/s in the bundled file, which looks like 10 m station wind. So London and Abbotsford get systematically lower wind than the Amsterdam training weather. Keep WS2M (matches upstream) or switch to WS10M (matches the training data).
-10. **PID integral windup (before #12, a contract change).** The contract clamps the PID integral at ≥ 0 only. Costs are ≥ 0, so the error is ≥ -1 and the integral can fall by at most `ki` = 0.05 per update; over ~244 updates per run, once it passes ~12 λ never unwinds, and a budget of 0 pins λ at 100 on the first violation. Option: also clamp the integral to `lambda_max`.
+1. **Ledger vs the dirty-tree check (before local training, S1-8/S1-12).** The experiment skill appends a `run` row to the tracked ledger at launch, so the next local run's `write_manifest(smoke=False)` sees ` M control/ledger/ledger.jsonl` and refuses. Options: ignore the ledger file in the dirty check; write every manifest before any ledger row; or commit between runs.
+2. **casadi 3.8.2 (before #11).** The simulator's ODE solver was uploaded the same day the lock was made; the bench that gave 3104.58 didn't record its casadi version. If #11 can't reproduce 3104.58, casadi is the first suspect. Options: pin the bench's version, or a uv `exclude-newer` cooldown.
+3. **Root CI breaks `master` on the first `/promote`.** `.github/workflows/ci.yml:33` runs a bare `pytest -q` from the root, which collects `control/tests/` (import-file mismatch with the root `tests/test_smoke.py`, and no `gl_gym` there). The PR path filter hides it, so the PR looks green and master goes red on merge. Fix: `pytest -q tests`. It's a dashboard file, so it needs an issue and a yes.
+4. **The "modal" rule in `guard_runs` (before #17).** Any Bash command containing "modal" is blocked for specialists, including `pytest tests/test_modal_app.py`, `ruff check .../modal_app.py` and `grep modal_app`. Option: block `modal` as a program word and `--backend modal` instead.
+5. **The `final` reviewer can't read `control/results/final/`** (blocked in every guard_runs mode). Decide how the final's review reads its results before the final issue.
+6. **PID recovery speed (before E5).** Decided 2026-10-28: the integral is clamped to [0, `lambda_max`] (#12). That stops unbounded windup, but it does not make λ recover within a run at the defaults: costs are ≥ 0, so the integral drops by at most `ki` per update, and from the cap λ needs (`lambda_max` − `kp`)/`ki` updates to reach 0 at zero cost: 1,990 at the defaults (100, 0.5, 0.05), against ~244 updates per run. A budget of 0 sends λ to the cap on the first violation. Prompt recovery needs a smaller `lambda_max` or a larger `ki`, both per-run settings; choose them when registering E5.
+
+### Decided 2026-10-28
+- **Episode length:** B. Seasons are exactly N steps (5,760 for 60 days), as PROTOCOL §1 says; envs.py ends the season itself because upstream's env runs N+1. The paper's 3104.58 (5,761 steps) is re-measured in #11.
+- **#6 at its gate:** 2 m wind for London and Abbotsford (matches upstream; the Amsterdam training files look like 10 m, about 20% windier; say so in the write-up); the weather CSVs in plain git; #6's format and range tests on the fetched 2012 files are fine.
+- **PID integral clamp** to [0, `lambda_max`] (see 6 above for its limit).
 
 ### Defaults taken (veto any)
 - **Manifest (#2):** `manifest.REPO_ROOT` is the git seam (the contract has no repo argument); `fingerprints(root=None)` gains the issue's optional argument (the contract text still says `fingerprints()`); fingerprint keys are repo-relative POSIX paths, a missing file is `null`; `seeds` come from `config["seed"]` (not in the contract); a dirty tree raises `RuntimeError`.
