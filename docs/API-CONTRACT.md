@@ -173,7 +173,28 @@ Paths are relative to `control/`. Scenario dicts are `{"location": str, "growth_
     step's info values (reward-side diagnostics, not metrics).
 
 ## `greenleaf_control.selection`, `stats`, `tune_rb`, `run_grid`, `modal_app`
-- `select_checkpoint(run_dir: Path) -> str`: the PROTOCOL §5 rule on VALIDATION; writes `selected.json`.
+- `select_checkpoint(run_dir: Path) -> str`: the PROTOCOL §5 rule on VALIDATION; writes `run_dir/selected.json` once.
+  - **Write-once:** an existing `selected.json` raises FileExistsError before any scoring.
+  - **Candidates:** `ckpt_<steps>.zip` in numeric order of steps, then `ckpt_final.zip`. Any other `ckpt_*.zip` is
+    ignored; none raises FileNotFoundError.
+  - **Scoring:** each candidate is scored with `evaluate.run_policy(run_dir, name, s, 60, record_steps=<residual_lag>)`
+    for s in `scenarios.VALIDATION`, in order. Seasons are always 60 days, whatever the manifest's season length.
+  - **residual_lag:**
+    - A candidate qualifies when, for every constraint c, the mean of its frames' `cost_<c>`, pooled over the three
+      seasons, is ≤ `config["budgets"][c] × 1.10`.
+    - The qualifying candidate with the highest mean `profit_eur_m2` wins.
+    - If none qualifies, the lowest total cost wins: the plain sum over c of those means.
+  - **Other arms:** the highest mean `paper_return` (metrics', not `paper_reward_sum`).
+  - **Ties and bad values:** a tie goes to the earliest candidate. Invalid seasons are scored, never dropped. A
+    non-finite value raises ValueError, and no file is written.
+  - **Returns** `"<steps>"` or `"final"`, the name `run_policy` takes.
+  - **`selected.json`:** JSON with sorted keys, indent 2, no NaN or Infinity:
+    - `checkpoint`, `method`;
+    - `rule` (`max_mean_paper_return` | `max_mean_profit_within_budget` | `min_total_cost`);
+    - `scenarios` (VALIDATION), `season_length` (60);
+    - `budgets` and `tolerance` (1.1), both residual_lag only, else null;
+    - `candidates: {name: {per_scenario: [run_policy result dicts], mean_paper_return, mean_profit_eur_m2, mean_cost:
+      {co2, temp, rh} or null, qualifies: bool or null}}`.
 - `stats.iqm_ci(scores: np.ndarray, reps: int = 2000, seed: int = 0) -> tuple[float, float, float]`
   - `scores` is 2-D, runs × tasks (seeds × scenarios); anything else raises ValueError.
   - Returns `(iqm, ci_low, ci_high)` as Python floats.
