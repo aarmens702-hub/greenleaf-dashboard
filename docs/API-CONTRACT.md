@@ -66,11 +66,12 @@ Paths are relative to `control/`. Scenario dicts are `{"location": str, "growth_
 
 ## `greenleaf_control.metrics` (scorer file; never imports `rewards`)
 - `episode_metrics(states: np.ndarray, controls: np.ndarray, params: np.ndarray, *, dt: float = 900.0,
-  season_steps: int, prices: dict, bounds: dict) -> dict`
+  season_steps: int, prices: dict = PRICES, bounds: dict = BOUNDS) -> dict`
   - `states` has shape (T + 1, nx); `controls` has shape (T, 6).
+  - `prices` and `bounds` default to the module constants `PRICES` and `BOUNDS` (`docs/PROTOCOL.md` §1).
   - Keys per `docs/PROTOCOL.md` §4, plus `steps` and `valid`.
-- `trace_from_infos(infos: list[dict], raw_env) -> tuple[np.ndarray, np.ndarray]`: collects states and controls from
-  an episode (the env exposes `x` and `u`).
+- `trace_from_infos(infos: list[dict]) -> tuple[np.ndarray, np.ndarray]`: collects an episode's states
+  (`infos[0]["x_prev"]`, then each step's `x`) and controls (each step's `controls`), both float64.
 
 ## `greenleaf_control.lagrangian`
 - `class PIDLagrangian`, constructed as `__init__(self, budget: float, kp: float = 0.5, ki: float = 0.05,
