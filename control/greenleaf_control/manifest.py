@@ -23,6 +23,8 @@ FINGERPRINTED = [
 ]
 LIBRARIES = ["stable-baselines3", "torch", "gymnasium", "casadi", "numpy"]
 STATUSES = {"finished", "crashed", "budget-stop"}
+# Registered runs append to it; it is append-only and check_locks guards its history.
+LEDGER_FILE = "control/ledger/ledger.jsonl"
 
 
 def _git(*args: str) -> str:
@@ -71,11 +73,12 @@ def write_manifest(
     run_dir = Path(run_dir)
     if run_dir.exists():
         raise FileExistsError(f"run_dir already exists: {run_dir}")
-    # Porcelain v1 lines are "XY path"; run dirs under control/runs/ don't count as dirty.
+    # Porcelain v1 lines are "XY path"; run dirs under control/runs/ and the ledger file itself
+    # (nothing else in control/ledger/) don't count as dirty.
     dirty_lines = [
         line
         for line in _git("status", "--porcelain", "--untracked-files=normal").splitlines()
-        if not line[3:].startswith("control/runs/")
+        if not line[3:].startswith("control/runs/") and line[3:] != LEDGER_FILE
     ]
     if dirty_lines and not smoke:
         raise RuntimeError(

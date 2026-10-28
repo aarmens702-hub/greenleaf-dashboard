@@ -39,11 +39,21 @@ SCORER_KEYS = [
 ]
 LIBRARIES = ["stable-baselines3", "torch", "gymnasium", "casadi", "numpy"]
 CONFIG = {"method": "ppo", "seed": 7, "timesteps": 20_000, "season_length": 2}
+LEDGER_FILE = "control/ledger/ledger.jsonl"  # the ledger, repo-relative
 
 
 def _git(repo: Path, *args: str) -> str:
     out = subprocess.run(["git", *args], check=True, cwd=repo, capture_output=True, text=True)
     return out.stdout.strip()
+
+
+def _commit(repo: Path) -> None:
+    """Commit everything staged. CI has no git identity and may sign commits globally."""
+    _git(
+        repo,
+        *("-c", "user.name=t", "-c", "user.email=t@t", "-c", "commit.gpgsign=false"),
+        *("commit", "-q", "-m", "commit"),
+    )
 
 
 def _make_repo(tmp_path: Path, monkeypatch, manifest) -> Path:
@@ -56,13 +66,27 @@ def _make_repo(tmp_path: Path, monkeypatch, manifest) -> Path:
     (repo / "control" / "README.md").write_text("temp repo\n")
     _git(repo, "init", "-q")
     _git(repo, "add", ".")
-    # CI has no git identity and may sign commits globally.
-    _git(
-        repo,
-        *("-c", "user.name=t", "-c", "user.email=t@t", "-c", "commit.gpgsign=false"),
-        *("commit", "-q", "-m", "init"),
-    )
+    _commit(repo)
     monkeypatch.setattr(manifest, "REPO_ROOT", repo)
+    return repo
+
+
+def _repo_with_a_new_ledger_row(tmp_path: Path, monkeypatch, manifest, *, tracked: bool) -> Path:
+    """The temp repo laid out like this one: control/ledger/.gitkeep committed, and a ledger row
+    appended to control/ledger/ledger.jsonl since HEAD.
+
+    tracked: ledger.jsonl was committed with one row, so git shows it " M". Otherwise it was never
+    added, so git shows "?? control/ledger/ledger.jsonl" (the directory itself is tracked).
+    """
+    repo = _make_repo(tmp_path, monkeypatch, manifest)
+    (repo / "control" / "ledger").mkdir()
+    (repo / "control" / "ledger" / ".gitkeep").write_text("")
+    if tracked:
+        (repo / LEDGER_FILE).write_text('{"row": 1}\n')
+    _git(repo, "add", ".")
+    _commit(repo)
+    with (repo / LEDGER_FILE).open("a") as f:
+        f.write('{"row": 2}\n')
     return repo
 
 
@@ -294,6 +318,58 @@ def test_dirty_check_ignores_control_runs(tmp_path, monkeypatch):
         manifest.write_manifest(
             runs / "run-c", config=CONFIG, issue=2, registered=None, smoke=False
         )
+
+
+@pytest.mark.parametrize(
+    ("tracked", "porcelain"),
+    [(True, f" M {LEDGER_FILE}"), (False, f"?? {LEDGER_FILE}")],
+    ids=["tracked-and-modified", "untracked"],
+)
+def test_dirty_check_ignores_the_ledger_file(tmp_path, monkeypatch, tracked, porcelain):
+    """A row appended to <repo>/control/ledger/ledger.jsonl doesn't make the tree dirty (#13).
+
+    Each registered run appends its run and run-end rows to the ledger inside the repo, so without
+    this the second run of a grid would be refused. git status does list the file, so only the
+    filter can hide it; a non-smoke manifest is written with dirty False.
+    """
+    import greenleaf_control.manifest as manifest
+
+    repo = _repo_with_a_new_ledger_row(tmp_path, monkeypatch, manifest, tracked=tracked)
+    status = subprocess.run(
+        ["git", "status", "--porcelain", "--untracked-files=normal"],
+        check=True,
+        cwd=repo,
+        capture_output=True,
+        text=True,
+    ).stdout.splitlines()
+    assert status == [porcelain]
+    run_dir = tmp_path / "run"
+    m = manifest.write_manifest(run_dir, config=CONFIG, issue=13, registered=None, smoke=False)
+
+    assert m["dirty"] is False
+    assert json.loads((run_dir / "manifest.json").read_text())["dirty"] is False
+
+
+@pytest.mark.parametrize(
+    "neighbour",
+    [
+        "control/ledger/notes.txt",  # next to the ledger
+        "control/ledger/ledger.jsonl.bak",  # the ledger's path is a prefix of it
+    ],
+)
+def test_dirty_check_exempts_only_the_ledger_file_itself(tmp_path, monkeypatch, neighbour):
+    """Only control/ledger/ledger.jsonl is exempt: another uncommitted file in control/ledger/
+    still makes the tree dirty. With the ledger modified too, a non-smoke run raises RuntimeError
+    naming the neighbour, and makes no run_dir."""
+    import greenleaf_control.manifest as manifest
+
+    repo = _repo_with_a_new_ledger_row(tmp_path, monkeypatch, manifest, tracked=True)
+    (repo / neighbour).write_text("uncommitted\n")
+    run_dir = tmp_path / "run"
+
+    with pytest.raises(RuntimeError, match=re.escape(neighbour)):
+        manifest.write_manifest(run_dir, config=CONFIG, issue=13, registered=None, smoke=False)
+    assert not run_dir.exists()
 
 
 def test_fingerprints_are_sha256_of_each_file(tmp_path):

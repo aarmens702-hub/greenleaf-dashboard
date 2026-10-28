@@ -125,15 +125,26 @@ Paths are relative to `control/`. Scenario dicts are `{"location": str, "growth_
 
 ## `greenleaf_control.train`
 - `python -m greenleaf_control.train --method M --seed S [--penalty-weight W] [--budget-frac B] [--timesteps N]
-  [--season-length D] [--n-envs 4] [--runs-dir runs] (--smoke | --registered <row>)`
+  [--season-length D] [--n-envs 4] [--runs-dir runs] [--rb {tuned,default}] (--smoke | --registered <row>)`
 - `--smoke` caps timesteps at 20,000 and the season at 2 days, writes under `runs/smoke/`, and records no ledger row.
 - Without `--smoke`, `--registered` is required, and the arm and seed must be in that registration.
+- `--rb` picks the residual arms' RB params (`configs/rule_based_<rb>.yml`, default `tuned`); the resolved params are
+  stored in the manifest as `config["rb_params"]`.
 - **Outputs:**
   - checkpoints `ckpt_<steps>.zip` + `vecnorm_<steps>.pkl` every 250,000 steps, and `ckpt_final.zip` +
     `vecnorm_final.pkl`;
   - `tb/` (TensorBoard: SB3's train/* diagnostics plus `lag/*`);
   - `manifest.json`;
-  - `lambdas.csv` (residual_lag only).
+  - `lambdas.csv` (residual_lag only);
+  - `final_eval.json`: `{scenario, season_length, checkpoint: "final", paper_return, steps}`, one deterministic PAPER
+    season at the run's season length, played by the end-of-training model with frozen copies of its VecNormalize
+    stats.
+- `build_vec_env(config: dict, n_envs: int, *, scenario: dict | None = None, season_length: int | None = None)
+  -> VecNormalize`: `SubprocVecEnv` (`DummyVecEnv` for one env) → `VecMonitor` → `VecLagrangianReward` (residual_lag
+  only) → `VecNormalize`, env i = `make_env(method, seed=seed + i, ...)` from the manifest's config; `scenario` and
+  `season_length` override the config's (for evaluation).
+- `build_model(config: dict, venv) -> PPO`: `configs/ppo.yml`'s PPO on cpu, seeded, with only `log_std_init` changed
+  (-1.0 for the residual arms).
 
 ## `greenleaf_control.evaluate`
 - `run_rb(params: dict, scenario: dict, season_length: int = 60, record_steps: bool = False) -> tuple[dict, pd.DataFrame | None]`
