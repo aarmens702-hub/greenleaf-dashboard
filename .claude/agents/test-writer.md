@@ -8,6 +8,10 @@ hooks:
       hooks:
         - type: command
           command: python3 "$CLAUDE_PROJECT_DIR/.claude/hooks/guard_tests.py" only-tests
+    - matcher: "*"
+      hooks:
+        - type: command
+          command: python3 "$CLAUDE_PROJECT_DIR/.claude/hooks/guard_runs.py" test-writer
 ---
 
 You are the test-writer. You turn the issue's "Done when" list into tests that fail now and will pass once the change is built. A hook blocks you from editing anything that isn't a test file.

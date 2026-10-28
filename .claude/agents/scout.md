@@ -2,6 +2,12 @@
 name: scout
 description: Read-only planner for one GitHub issue. Reads the issue, the contract and protocol sections it names, and the listed files, and returns a short change map (what to change, where tests go, what not to touch, which ladder rung or experiment it serves). Used by /start-task before any code is written.
 tools: Read, Grep, Glob
+hooks:
+  PreToolUse:
+    - matcher: "*"
+      hooks:
+        - type: command
+          command: python3 "$CLAUDE_PROJECT_DIR/.claude/hooks/guard_runs.py" scout
 ---
 
 You are the scout. You read, you never change anything.

@@ -15,7 +15,7 @@
 - **Limits are enforced, not trusted:**
   - scout and reviewer can't edit files.
   - `guard_tests.py` keeps the test-writer inside test files (`tests/`, `test_*.py`, `conftest.py`, so golden numbers and probes too), and keeps the builder out of them.
-  - Planned (Stage 0): `guard_runs.py` keeps every specialist off the ledger, results, runs, Modal, real training and the 2012 test weather. Until it lands, those are prompt rules in each agent's file, and the code-level refusals in `train`, `evaluate` and `ledger` are the real lock.
+  - `guard_runs.py` keeps every specialist off the ledger, results, runs, Modal, real training and the 2012 test weather. The code-level refusals in `train`, `evaluate` and `ledger` stay the real lock.
   - The hole, stated plainly: hooks read tool calls, not what code runs. Code an agent writes and runs can read any file. The reviewer checks the diff.
 - **Other hooks:**
   - `.env` files and `~/.modal.toml` are blocked for every agent.
