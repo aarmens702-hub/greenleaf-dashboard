@@ -71,7 +71,7 @@ Paths are relative to `control/`. Scenario dicts are `{"location": str, "growth_
   kd: float = 0.1, lambda_max: float = 100.0)`.
   - `update(mean_cost: float) -> float`. `lam` starts at 0.0.
   - The error is relative to the budget: `e = (cost - budget) / max(budget, 1e-8)`.
-  - The integral is clamped ≥ 0; the derivative acts only on increases; λ is clamped to [0, lambda_max].
+  - The integral is clamped to [0, lambda_max] (anti-windup); the derivative acts only on increases; λ is clamped to [0, lambda_max].
 - `class VecLagrangianReward(VecEnvWrapper)`
   - `lambdas: np.ndarray` (3,)
   - Each reward becomes `(r - Σλᵢcᵢ) / (1 + Σλᵢ)`.
