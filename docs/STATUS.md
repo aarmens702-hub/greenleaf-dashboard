@@ -2,7 +2,7 @@
 
 **Read this first when you pick the project up on any machine.** It's the shared memory: where things stand, what's next, what we learned, and how Aarmen likes to work. Update it at the end of each session.
 
-*Last updated: 2026-10-29, Mac session (stopped for the night after E1).*
+*Last updated: 2026-10-29, Mac session (E1 adopted).*
 
 ## Where things are
 - **The repo** is `github.com/aarmens702-hub/greenleaf-dashboard`: public, default branch `master`, MIT at the root and AGPL-3.0-or-later in `control/`. It holds the hackathon dashboard that placed 2nd (RBC × BCCAI × SFU, May 2026). GreenLeaf 2.0 lives in `control/`.
@@ -27,20 +27,19 @@
   - #23 dashboard cleanup (`c87bdf9`: fresh clone starts, screenshots, root CI fixed);
   - #21 media (`6639e45`, outputs in `docs/media/` at `c73aadd`);
   - #24 export_replay (`5a4ffd7`).
-- **E1 (#22) has run and has a result; it waits for Aarmen's adopt/drop.**
-  - Ledger: registered-b89a61b1 → run-85d29481 → run-end-dfcc777b → **result-525a6e90** (`34a4717`).
+- **E1 (#22) is adopted** (Aarmen, 2026-10-29): rb_tuned is the rule-based baseline the RL arms must beat, not a claim that it grows better.
+  - Ledger: registered-b89a61b1 → run-85d29481 → run-end-dfcc777b → result-525a6e90 (`34a4717`) → **decision-b2221004**.
   - rb_tuned mean paper_return on VALIDATION is 3551.84 vs rb_default's 2950.87; it wins all 3 seasons, with 0 invalid and 1,067 vs 2,229.5 violation hours. All four parts of the registered rule hold.
-  - Caveats are on #22: it trades humidity for heat stress (hours above 34 °C) and grows less fruit; 5 of 12 setpoints sit at a range edge; it's 3 seasons with no interval.
-  - Record the decision: `ledger decide --result result-525a6e90 --adopted|--dropped --note "..."`.
+  - Adopted with its caveats on the record (#22 and the decision note): temperature violation hours +9%, up to 27 h a season above 34 °C vs about 0 for rb_default; fruit growth 15 to 28% lower; 5 of 12 setpoints at a range edge; 3 seasons of one year, no interval.
   - **The run dir** (manifest.json, trials.csv) lives in `.worktrees/22/control/runs/registered-b89a61b1/`, where the ledger's run_dir points, so that worktree is kept on purpose. A backup copy is in the main checkout's `control/runs/registered-b89a61b1/` (git-ignored).
 - **Also shipped 2026-10-29:** #25 ledger refuses non-metric primary/guards (`3f9e932`); #26 CI and hooks fail closed (`5c2fe87`). **Filed:** #27, older guard gaps (secrets via Grep's glob filter, path traversal in guard_tests, stop_tests fails open).
 - **Filed 2026-10-28:** #19, recording Modal runs (ledger rows, fingerprints, cost, configs and weather in the image). Due before E2. Until it lands, `run_grid --backend modal` refuses.
 
 ## To do, in order
-1. **Aarmen:** adopt or drop E1 (#22, `result-525a6e90`). If adopted, rb_tuned is the grower for E3-E5 and the Lagrangian budgets' reference.
+1. **Next:** rb_tuned (E1, adopted) is the grower for E3-E5 and the Lagrangian budgets' reference.
    - Free next steps: #27 (guard gaps); D3, the demo site preview with baseline replays (no deploy).
    - Everything else needs spend (the Modal plumbing run, then E2) or results.
-2. **Aarmen, before E1:** veto or keep the TUNE_SPACE default (Defaults taken, #17b).
+2. **TUNE_SPACE (#17b):** settled; E1 ran with it and was adopted.
 3. **Stage 2** (E1 … E6): experiments, each pre-registered. File them with `/new-task` once Stage 1 is green. Ask GreenLeaf (D6) is built in parallel.
 4. **Stage 3:** the final (once), then the analysis.
 5. **Stage 4:** deploy and polish (D1–D7 in the plan). Visual roadmap: https://claude.ai/artifact/19obed2CuttzDAPZzbFDuw
