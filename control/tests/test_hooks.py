@@ -8,10 +8,15 @@ protect_secrets.py already exist; their tests pin today's behaviour so #5 can't 
 Each hook runs as a subprocess with Claude Code's PreToolUse JSON on stdin: exit 2 blocks the call,
 exit 0 lets it through. `python` on a missing script also exits 2, so every block is checked for its
 one "Blocked" line on stderr too; until guard_runs.py exists its tests fail on that assertion.
+
+Issue #26 makes the safety net fail closed: guard_tests.py and protect_secrets.py block a call they
+can't read, the Stop hook (stop_tests.py) sees a .py file inside a brand-new folder under control/,
+and control-ci.yml refuses a stale lockfile, reads the repo only and pins its uv.
 """
 
 import json
 import os
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -405,3 +410,338 @@ def test_protect_secrets_blocks_a_shell_command_on_a_secret_file(command):
 @pytest.mark.parametrize("command", ["cat .env.example", 'python -c "load_dotenv()"'])
 def test_protect_secrets_lets_other_shell_commands_through(command):
     _assert_allowed(_hook("protect_secrets.py", _bash(command, ROOT)))
+
+
+# ---------------------------------------------------------------------------------------------
+# Fail closed (#26): guard_tests.py and protect_secrets.py block a call they can't read
+# ---------------------------------------------------------------------------------------------
+
+
+def _real(payload: dict) -> dict:
+    """payload with the other top-level fields Claude Code sends on every PreToolUse call."""
+    return {
+        "session_id": "abc123",
+        "transcript_path": "/tmp/transcript.jsonl",
+        "permission_mode": "default",
+        "tool_use_id": "toolu_01",
+        **payload,
+    }
+
+
+# stdin neither hook can read: not JSON, not an object, no tool_input object, or a path that isn't a
+# string. Before #26 both hooks exited 0 on these, or crashed with exit 1, which Claude Code also lets
+# through. JSON nested past the recursion limit makes json raise RecursionError, not ValueError, so
+# it reaches each hook's crash handler.
+UNREADABLE = [
+    pytest.param("[" * 100_000 + "]" * 100_000, id="nested past the recursion limit"),
+    pytest.param("", id="empty"),
+    pytest.param("not json", id="not json"),
+    pytest.param("[]", id="a list"),
+    pytest.param("null", id="null"),
+    pytest.param("{}", id="an empty object"),
+    pytest.param(json.dumps({"tool_name": "Edit"}), id="no tool_input"),
+    pytest.param(json.dumps({"tool_name": "Edit", "tool_input": None}), id="tool_input null"),
+    pytest.param(json.dumps({"tool_name": "Edit", "tool_input": "x.py"}), id="tool_input a string"),
+    pytest.param(
+        json.dumps({"tool_name": "Write", "tool_input": {"file_path": 5, "content": "x"}}),
+        id="file_path an int",
+    ),
+]
+# guard_tests decides on the edited file alone, so an edit that doesn't name one is unreadable too.
+UNREADABLE_EDIT = [
+    *UNREADABLE,
+    pytest.param(
+        json.dumps({"tool_name": "Edit", "tool_input": {"old_string": "a", "new_string": "b"}}),
+        id="no file_path",
+    ),
+    pytest.param(
+        json.dumps({"tool_name": "Write", "tool_input": {"file_path": None, "content": "x"}}),
+        id="file_path null",
+    ),
+]
+# protect_secrets picks its rule by tool_name (the command for Bash, the paths for the rest), so a
+# call without a string tool_name, or with a command that isn't a string, is unreadable too.
+UNREADABLE_CALL = [
+    *UNREADABLE,
+    pytest.param(json.dumps({"tool_input": {"command": "ls"}}), id="no tool_name"),
+    pytest.param(
+        json.dumps({"tool_name": 5, "tool_input": {"file_path": "README.md"}}),
+        id="tool_name an int",
+    ),
+    pytest.param(
+        json.dumps({"tool_name": "Bash", "tool_input": {"command": ["cat", "README.md"]}}),
+        id="command a list",
+    ),
+]
+
+# A file each guard_tests mode lets its agent edit.
+PERMITTED_EDIT = {
+    "only-tests": CONTROL / "tests/test_x.py",
+    "no-tests": CONTROL / "greenleaf_control/envs.py",
+}
+
+
+@pytest.mark.parametrize("mode", ["only-tests", "no-tests"])
+@pytest.mark.parametrize("stdin", UNREADABLE_EDIT)
+def test_guard_tests_fails_closed_on_unreadable_input(stdin, mode):
+    """stdin that isn't a JSON object, or a call without a tool_input object holding a string
+    file_path, blocks with one "Blocked" line in both modes; a permitted edit still passes.
+    """
+    _assert_blocked(_hook("guard_tests.py", stdin, mode))
+    _assert_allowed(_hook("guard_tests.py", _file_call("Edit", PERMITTED_EDIT[mode]), mode))
+
+
+@pytest.mark.parametrize(
+    "argv",
+    [(), ("",), ("builder",), ("no-test",)],
+    ids=["missing", "empty", "guard_runs' mode", "misspelt"],
+)
+def test_guard_tests_fails_closed_without_a_known_mode(argv):
+    """A missing, empty or unknown mode (guard_runs' builder, or no-test for no-tests) blocks an
+    edit no-tests allows, with one "Blocked" line; the same edit in no-tests passes.
+    """
+    payload = _file_call("Edit", PERMITTED_EDIT["no-tests"])
+    _assert_blocked(_hook("guard_tests.py", payload, *argv))
+    _assert_allowed(_hook("guard_tests.py", payload, "no-tests"))
+
+
+@pytest.mark.parametrize("mode", ["only-tests", "no-tests"])
+@pytest.mark.parametrize("tool", ["Edit", "Write", "MultiEdit"])
+def test_guard_tests_still_reads_a_real_call(tool, mode):
+    """A full payload, with Claude Code's other top-level fields and the tool's non-path inputs
+    (booleans, a list of edits), is readable: a permitted edit passes in both modes.
+    """
+    path = str(PERMITTED_EDIT[mode])
+    tool_input = {
+        "Edit": {"file_path": path, "old_string": "a", "new_string": "b", "replace_all": False},
+        "Write": {"file_path": path, "content": "x\n"},
+        "MultiEdit": {
+            "file_path": path,
+            "edits": [{"old_string": "a", "new_string": "b", "replace_all": True}],
+        },
+    }[tool]
+    _assert_allowed(_hook("guard_tests.py", _real(_call(tool, **tool_input)), mode))
+
+
+@pytest.mark.parametrize("stdin", UNREADABLE_CALL)
+def test_protect_secrets_fails_closed_on_unreadable_input(stdin):
+    """stdin that isn't a JSON object, a tool_name that isn't a string, a tool_input that isn't an
+    object, or a path or command that isn't a string blocks with one "Blocked" line. Reading
+    README.md still passes and reading .env is still blocked.
+    """
+    _assert_blocked(_hook("protect_secrets.py", stdin))
+    _assert_allowed(_hook("protect_secrets.py", _file_call("Read", ROOT / "README.md")))
+    _assert_blocked(_hook("protect_secrets.py", _file_call("Read", ROOT / ".env")))
+
+
+# One harmless call per tool protect_secrets is wired on (.claude/settings.json), with the non-path
+# inputs Claude Code really sends (numbers, booleans, lists), so failing closed can't block them.
+HARMLESS_REAL_CALLS = [
+    pytest.param(_call("Read", file_path=str(ROOT / "README.md"), offset=1, limit=50), id="Read"),
+    pytest.param(
+        _call(
+            "Edit",
+            file_path=str(CONTROL / "greenleaf_control/envs.py"),
+            old_string="a",
+            new_string="b",
+            replace_all=True,
+        ),
+        id="Edit",
+    ),
+    pytest.param(_call("Write", file_path=str(CONTROL / "x.py"), content="x\n"), id="Write"),
+    pytest.param(
+        _call(
+            "MultiEdit",
+            file_path=str(CONTROL / "x.py"),
+            edits=[{"old_string": "a", "new_string": "b", "replace_all": False}],
+        ),
+        id="MultiEdit",
+    ),
+    pytest.param(
+        _call("Grep", ROOT, pattern="def ", output_mode="content", head_limit=20, **{"-n": True}),
+        id="Grep without a path",
+    ),
+    pytest.param(
+        _call("Grep", ROOT, pattern="def ", path="control", glob="*.py"), id="Grep with a path"
+    ),
+    pytest.param(
+        _call(
+            "Bash",
+            ROOT,
+            command="git status",
+            description="status",
+            timeout=60000,
+            run_in_background=False,
+        ),
+        id="Bash",
+    ),
+    pytest.param(
+        _call(
+            "NotebookEdit",
+            notebook_path=str(ROOT / "x.ipynb"),
+            new_source="x",
+            cell_id="c1",
+            edit_mode="replace",
+        ),
+        id="NotebookEdit",
+    ),
+]
+
+
+@pytest.mark.parametrize("payload", HARMLESS_REAL_CALLS)
+def test_protect_secrets_still_reads_every_real_call(payload):
+    _assert_allowed(_hook("protect_secrets.py", _real(payload)))
+
+
+# ---------------------------------------------------------------------------------------------
+# stop_tests.py (#26): a .py file in a brand-new folder under control/ is a change
+# ---------------------------------------------------------------------------------------------
+
+# Stands in for uv: says it ran and exits 1, as a failing fast suite would, so the Stop hook blocks
+# (exit 2) with this line in its message exactly when it decided control/ changed.
+FAKE_UV = '#!/bin/sh\necho "FAKE-UV-RAN $*"\nexit 1\n'
+
+
+def _stop_repo(tmp_path: Path) -> tuple[Path, dict]:
+    """A git repo shaped like this one (a committed control/ package, a control/.venv folder) and the
+    environment to run the Stop hook in: HOME's ~/.local/bin/uv, also first on PATH, is FAKE_UV,
+    and git reads no global or system config, so a user's status.showUntrackedFiles can't decide
+    the result.
+    """
+    uv = tmp_path / "home/.local/bin/uv"
+    uv.parent.mkdir(parents=True)
+    uv.write_text(FAKE_UV)
+    uv.chmod(0o755)
+    repo = tmp_path / "repo"
+    package = repo / "control/greenleaf_control"
+    package.mkdir(parents=True)
+    (package / "__init__.py").write_text("")
+    (package / "a.py").write_text("A = 1\n")
+    (repo / "control/pyproject.toml").write_text('[project]\nname = "x"\n')
+    (repo / "control/.venv").mkdir()
+    env = {
+        k: v for k, v in os.environ.items() if not k.startswith("GIT_") and k != "XDG_CONFIG_HOME"
+    }
+    env.update(
+        HOME=str(tmp_path / "home"),
+        PATH=f"{uv.parent}{os.pathsep}{os.environ['PATH']}",
+        GIT_CONFIG_GLOBAL=os.devnull,
+        GIT_CONFIG_NOSYSTEM="1",
+        CLAUDE_PROJECT_DIR=str(repo),
+    )
+    identity = ["-c", "user.name=t", "-c", "user.email=t@example.com"]
+    for args in (["init", "-q"], ["add", "-A"], [*identity, "commit", "-q", "-m", "init"]):
+        subprocess.run(
+            ["git", "-C", str(repo), *args], env=env, check=True, capture_output=True, timeout=20
+        )
+    return repo, env
+
+
+def _stop(repo: Path, env: dict) -> subprocess.CompletedProcess:
+    """Run the Stop hook as Claude Code does when a session in repo is about to finish."""
+    payload = {
+        "session_id": "abc123",
+        "transcript_path": str(repo.parent / "transcript.jsonl"),
+        "cwd": str(repo),
+        "hook_event_name": "Stop",
+        "stop_hook_active": False,
+    }
+    return subprocess.run(
+        [sys.executable, "-S", str(HOOKS / "stop_tests.py")],
+        input=json.dumps(payload),
+        capture_output=True,
+        text=True,
+        timeout=30,
+        cwd=repo,
+        env=env,
+    )
+
+
+@pytest.mark.parametrize(
+    "rel",
+    [
+        pytest.param("control/greenleaf_control/a.py", id="an edited tracked file"),
+        pytest.param("control/greenleaf_control/b.py", id="a new file in a tracked folder"),
+        pytest.param("control/newpkg/mod.py", id="a new file in a new folder"),
+        pytest.param("control/newpkg/sub/mod.py", id="a new file two new folders deep"),
+    ],
+)
+def test_stop_tests_runs_the_fast_tests_on_a_python_change(tmp_path, rel):
+    """An edited or new .py file under control/ makes the Stop hook run the fast tests, inside a new
+    folder too. Plain `git status --porcelain` lists a new folder as `?? control/newpkg/`, never
+    the .py inside it, so the hook used to skip it; --untracked-files=all lists the file.
+    """
+    repo, env = _stop_repo(tmp_path)
+    path = repo / rel
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("B = 2\n")
+    proc = _stop(repo, env)
+    assert proc.returncode == 2 and "FAKE-UV-RAN" in proc.stderr, (proc.returncode, proc.stderr)
+
+
+@pytest.mark.parametrize(
+    "rel",
+    [
+        pytest.param(None, id="nothing changed"),
+        pytest.param("control/notes/todo.md", id="a new folder without python"),
+        pytest.param("app/new/mod.py", id="a new folder outside control"),
+    ],
+)
+def test_stop_tests_skips_when_no_python_under_control_changed(tmp_path, rel):
+    """No .py change under control/ (and no scorer file): the hook exits 0 without running the
+    suite.
+    """
+    repo, env = _stop_repo(tmp_path)
+    if rel:
+        path = repo / rel
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("x\n")
+    proc = _stop(repo, env)
+    assert proc.returncode == 0 and "FAKE-UV-RAN" not in proc.stderr, (proc.returncode, proc.stderr)
+
+
+# ---------------------------------------------------------------------------------------------
+# control-ci.yml (#26): a stale lock fails, the token reads only, uv is pinned
+# ---------------------------------------------------------------------------------------------
+
+CI = ROOT / ".github/workflows/control-ci.yml"
+
+
+def _ci() -> dict:
+    """The workflow, parsed (PyYAML reads its `on:` key as True)."""
+    return yaml.safe_load(CI.read_text())
+
+
+def _ci_steps() -> list[dict]:
+    return [step for job in _ci()["jobs"].values() for step in job.get("steps") or []]
+
+
+def test_ci_install_refuses_a_stale_lockfile():
+    """Every `uv sync` uses --locked, which fails when uv.lock no longer matches pyproject.toml;
+    --frozen installs the stale lock without checking it.
+    """
+    syncs = [step["run"] for step in _ci_steps() if "uv sync" in step.get("run", "")]
+    assert syncs, "control-ci.yml has no uv sync step"
+    for run in syncs:
+        assert "--locked" in run.split() and "--frozen" not in run.split(), run
+
+
+def test_ci_token_reads_the_repo_only():
+    """Every job's GITHUB_TOKEN is `contents: read` and nothing more, set at the top of the
+    workflow or on the job.
+    """
+    ci = _ci()
+    for name, job in ci["jobs"].items():
+        assert job.get("permissions", ci.get("permissions")) == {"contents": "read"}, name
+
+
+def test_ci_pins_the_uv_version():
+    """setup-uv's `version` input names one uv release (x.y.z), not latest or a range, so a new uv
+    can't change how CI resolves and installs.
+    """
+    setup = [
+        step for step in _ci_steps() if str(step.get("uses", "")).startswith("astral-sh/setup-uv@")
+    ]
+    assert len(setup) == 1, setup
+    version = (setup[0].get("with") or {}).get("version")
+    assert isinstance(version, str) and re.fullmatch(r"\d+\.\d+\.\d+", version), version

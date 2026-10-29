@@ -57,7 +57,15 @@ if data.get("cwd"):
 
 project = os.path.join(root, "control")
 try:
-    changed = git("status", "--porcelain", "--", "control", "docs/PROTOCOL.md", cwd=root)
+    changed = git(
+        "status",
+        "--porcelain",
+        "--untracked-files=all",
+        "--",
+        "control",
+        "docs/PROTOCOL.md",
+        cwd=root,
+    )
 except (OSError, subprocess.SubprocessError):
     sys.exit(0)
 lines = changed.stdout.splitlines()

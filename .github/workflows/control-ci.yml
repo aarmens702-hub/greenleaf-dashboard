@@ -6,6 +6,9 @@ on:
     branches: [dev, master]
   pull_request:
 
+permissions:
+  contents: read
+
 jobs:
   lint-and-test:
     runs-on: ubuntu-latest
@@ -17,9 +20,10 @@ jobs:
       # setup-uv has published no floating major tag since v7, so pin the release.
       - uses: astral-sh/setup-uv@v10.3.2
         with:
+          version: "0.12.3"
           python-version: "3.12"
       - name: Install
-        run: uv sync --frozen
+        run: uv sync --locked
       - name: Lint
         run: uv run ruff check .
       - name: Format
