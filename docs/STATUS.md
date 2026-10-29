@@ -2,7 +2,7 @@
 
 **Read this first when you pick the project up on any machine.** It's the shared memory: where things stand, what's next, what we learned, and how Aarmen likes to work. Update it at the end of each session.
 
-*Last updated: 2026-10-28, Mac session.*
+*Last updated: 2026-10-29, Mac session (stopped for the night after E1).*
 
 ## Where things are
 - **The repo** is `github.com/aarmens702-hub/greenleaf-dashboard`: public, default branch `master`, MIT at the root and AGPL-3.0-or-later in `control/`. It holds the hackathon dashboard that placed 2nd (RBC × BCCAI × SFU, May 2026). GreenLeaf 2.0 lives in `control/`.
@@ -23,12 +23,23 @@
   - #17a `stats`/`run_grid`/`modal_app` (`a5618eb`), #13c `selection.py` (`e7d5476`, closing #13), #17b `tune_rb` (`14feb9e`, closing #17);
   - #19a passed-in code stamp for remote runs (`d8caeee`), #20 the selection CLI and per-arm numbers (`d84dbff`), #19b remote runs recorded from the Mac (`78f04d5`, closing #19).
 - **Stage 1 is done** (2026-10-28): #15 shipped as `6d86993`, and the whole ladder (27 slow tests) is green.
-- **Stage 4, free parts:** #23 dashboard cleanup (`c87bdf9`: fresh clone starts, screenshots, root CI fixed); #21 media (in review).
-- **E1 (#22)** is written up with a proposed Measurement and waits for Aarmen's yes before registration (the decision rule is his).
+- **Stage 4, free parts:**
+  - #23 dashboard cleanup (`c87bdf9`: fresh clone starts, screenshots, root CI fixed);
+  - #21 media (`6639e45`, outputs in `docs/media/` at `c73aadd`);
+  - #24 export_replay (`5a4ffd7`).
+- **E1 (#22) has run and has a result; it waits for Aarmen's adopt/drop.**
+  - Ledger: registered-b89a61b1 → run-85d29481 → run-end-dfcc777b → **result-525a6e90** (`34a4717`).
+  - rb_tuned mean paper_return on VALIDATION is 3551.84 vs rb_default's 2950.87; it wins all 3 seasons, with 0 invalid and 1,067 vs 2,229.5 violation hours. All four parts of the registered rule hold.
+  - Caveats are on #22: it trades humidity for heat stress (hours above 34 °C) and grows less fruit; 5 of 12 setpoints sit at a range edge; it's 3 seasons with no interval.
+  - Record the decision: `ledger decide --result result-525a6e90 --adopted|--dropped --note "..."`.
+  - **The run dir** (manifest.json, trials.csv) lives in `.worktrees/22/control/runs/registered-b89a61b1/`, where the ledger's run_dir points, so that worktree is kept on purpose. A backup copy is in the main checkout's `control/runs/registered-b89a61b1/` (git-ignored).
+- **Also shipped 2026-10-29:** #25 ledger refuses non-metric primary/guards (`3f9e932`); #26 CI and hooks fail closed (`5c2fe87`). **Filed:** #27, older guard gaps (secrets via Grep's glob filter, path traversal in guard_tests, stop_tests fails open).
 - **Filed 2026-10-28:** #19, recording Modal runs (ledger rows, fingerprints, cost, configs and weather in the image). Due before E2. Until it lands, `run_grid --backend modal` refuses.
 
 ## To do, in order
-1. **E1 (#22):** Aarmen confirms or edits the Measurement (TUNE_SPACE, decision rule), then it registers and runs locally (~1.5 h, $0).
+1. **Aarmen:** adopt or drop E1 (#22, `result-525a6e90`). If adopted, rb_tuned is the grower for E3-E5 and the Lagrangian budgets' reference.
+   - Free next steps: #27 (guard gaps); D3, the demo site preview with baseline replays (no deploy).
+   - Everything else needs spend (the Modal plumbing run, then E2) or results.
 2. **Aarmen, before E1:** veto or keep the TUNE_SPACE default (Defaults taken, #17b).
 3. **Stage 2** (E1 … E6): experiments, each pre-registered. File them with `/new-task` once Stage 1 is green. Ask GreenLeaf (D6) is built in parallel.
 4. **Stage 3:** the final (once), then the analysis.
@@ -161,6 +172,12 @@
 - #20's tests: add a positive crash-plus-rerun case, assert rb_tuned's "deterministic, 1 run" line, and pin `selection.RESULT_KEYS` against a real `metrics.episode_metrics` output (a drift fails loudly today, but late: after seasons are scored). The selection line could print each arm's crashed count (the experiment skill wants it shown).
 - `ledger.register` doesn't validate `primary`/`guards` against metric names (test_ledger's fixtures use "profit" and "violation_hours"); selection refuses them later, so a typo'd registration is caught only at result time.
 - `tune_rb`'s run-end diagnostics are `dict.fromkeys(DIAGNOSTIC_KEYS)` but its manifest records `diagnostics: null`; harmless (the equality claim covers train runs).
+- **Before D3/F1, from #24's review (export_replay):**
+  - Its `meta.note` is hard-coded "a simulator run, not a registered result". It's right for everything until F1, but a registered final run needs its own note.
+  - A run dir always replays the checkpoint named "final"; after F1 it should replay the selected checkpoint from the final-registered row.
+  - `meta` records the export checkout's commit, not the run's own manifest commit, run id or split.
+  - media.py samples hourly climate at row 4h (15 min into the hour) and actuators as instants; export_replay uses row 4h+3 (the end of the hour) and hourly means. Pick one before the README GIF and the site sit side by side. media.play/running and export_replay's baseline branch now duplicate each other (a shared helper is justified).
+  - Rounding climate to 3 significant digits can put a just-out-of-band point on the bound (1,604 ppm → 1600). The site should colour violations from the counter increments, not the rounded climate.
 - viz's season strip counts 15-minute steps (to 5,760); days would read better in the README.
 
 ## What we've learned
