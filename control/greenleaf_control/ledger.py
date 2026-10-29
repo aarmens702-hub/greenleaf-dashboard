@@ -59,6 +59,26 @@ BUDGET_KEYS = {"cpu_hours", "usd", "backend"}
 PER_ARM_KEYS = {"iqm", "ci_low", "ci_high", "guards", "crashed", "invalid_episodes", "spend_usd"}
 DIAGNOSTIC_KEYS = {"min_approx_kl", "final_entropy", "final_explained_variance"}
 DECISIONS = {"adopted", "dropped"}
+# A scored season's numeric keys, what a primary or guard may name: metrics.episode_metrics' keys
+# but valid, plus evaluate's paper_reward_sum. Written out so the ledger stays stdlib-only; a test
+# pins it to a real episode_metrics output, and selection scores with it.
+RESULT_KEYS = (
+    "profit_eur_m2",
+    "viol_hours_co2",
+    "viol_hours_temp",
+    "viol_hours_rh",
+    "pct_in_bounds_co2",
+    "pct_in_bounds_temp",
+    "pct_in_bounds_rh",
+    "yield_kg_m2",
+    "heat_cost",
+    "elec_cost",
+    "co2_cost",
+    "paper_return",
+    "solver_failures",
+    "steps",
+    "paper_reward_sum",
+)
 
 # One short detail per kind for show, naming the parent row first.
 SUMMARY = {
@@ -149,6 +169,12 @@ def _check(row: dict, path: Path) -> str:
         for arm in row["arms"]:
             _need_keys("an arm", arm, ARM_KEYS)
         _need_keys("budget", row["budget"], BUDGET_KEYS)
+        for key in [row["primary"], *row["guards"]]:
+            if key not in RESULT_KEYS:
+                raise ValueError(
+                    f"primary or guard {key!r} is not a scored result key;"
+                    f" expected one of {RESULT_KEYS}"
+                )
         earlier = [r for r in existing if r["kind"] == "registered" and r["issue"] == row["issue"]]
         if len(earlier) >= 2 and row["owner_ok"] is not True:
             raise ValueError(

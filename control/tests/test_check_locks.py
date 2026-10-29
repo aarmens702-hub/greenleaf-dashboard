@@ -28,8 +28,8 @@ REGISTRATION = {
     "seeds": [0],
     "timesteps": 20_000,
     "scenarios": ["validation"],
-    "primary": "profit",
-    "guards": ["violation_hours"],
+    "primary": "profit_eur_m2",
+    "guards": ["viol_hours_temp"],
     "rule": "adopt if the profit IQM CI excludes 0",
     "budget": {"cpu_hours": 1.0, "usd": 0.0, "backend": "local"},
 }
@@ -121,7 +121,7 @@ def _result(path: Path, registered: dict, run: dict) -> dict:
             "iqm": 1.5,
             "ci_low": 1.0,
             "ci_high": 2.0,
-            "guards": {"violation_hours": 3.0},
+            "guards": {"viol_hours_temp": 3.0},
             "invalid_episodes": 0,
         }
     }

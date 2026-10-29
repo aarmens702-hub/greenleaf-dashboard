@@ -71,13 +71,14 @@ PATH_FUNCTIONS = [
     "show",
     "main",
 ]
-# A registration's fields other than issue, arms and seeds. "validation" is a split name.
+# A registration's fields other than issue, arms and seeds. "validation" is a split name; the
+# primary and guards are scored result keys (selection.RESULT_KEYS), which register checks.
 REGISTRATION = {
     "hypothesis": "residual PPO beats plain PPO on validation profit",
     "timesteps": 20_000,
     "scenarios": ["validation"],
-    "primary": "profit",
-    "guards": ["violation_hours"],
+    "primary": "profit_eur_m2",
+    "guards": ["viol_hours_temp"],
     "rule": "adopt if the profit IQM CI excludes 0",
     "budget": {"cpu_hours": 1.0, "usd": 0.0, "backend": "local"},
 }
@@ -95,8 +96,8 @@ CLI_REGISTERED = {
     "seeds": [0, 1],
     "timesteps": 20_000,
     "scenarios": ["validation"],
-    "primary": "profit",
-    "guards": ["violation_hours", "lamp_hours"],
+    "primary": "profit_eur_m2",
+    "guards": ["viol_hours_temp", "elec_cost"],
     "rule": "adopt if the profit IQM CI excludes 0",
     "budget": {"cpu_hours": 2.5, "usd": 0.0, "backend": "local"},
     "owner_ok": False,
@@ -112,8 +113,8 @@ def _register_argv(*extra: str, issue: int = 3) -> list[str]:
         *("--seeds", "0", "1"),
         *("--timesteps", "20000"),
         *("--scenarios", "validation"),
-        *("--primary", "profit"),
-        *("--guards", "violation_hours", "lamp_hours"),
+        *("--primary", "profit_eur_m2"),
+        *("--guards", "viol_hours_temp", "elec_cost"),
         *("--rule", CLI_REGISTERED["rule"]),
         *("--cpu-hours", "2.5"),
         *("--usd", "0"),
@@ -157,7 +158,7 @@ def _per_arm(arms, iqm=1.5) -> dict:
             "iqm": iqm,
             "ci_low": 1.0,
             "ci_high": 2.0,
-            "guards": {"violation_hours": 3.0},
+            "guards": {"viol_hours_temp": 3.0},
             "invalid_episodes": 0,
         }
         for name in arms
@@ -429,11 +430,15 @@ def test_append_rejects_a_row_missing_a_required_field(tmp_path, field):
         ("row_id", "registered-0123abcg"),  # g isn't hex
         ("row_id", "run-0123abcd"),  # another kind's prefix
         ("row_id", "0123abcd"),  # no prefix
+        # not a scored result key (selection.RESULT_KEYS)
+        pytest.param("primary", "profit", id="primary-not-a-result-key"),
+        pytest.param("guards", ["viol_hours_temp", "violation_hours"], id="guard-not-a-result-key"),
     ],
 )
 def test_append_rejects_a_bad_value(tmp_path, field, value):
-    """An unknown kind, a wrong schema_version, a non-int issue or a malformed row_id raises
-    ValueError with the file byte-identical; the intact row is then accepted."""
+    """An unknown kind, a wrong schema_version, a non-int issue, a malformed row_id, or a primary or
+    guard that isn't a scored result key raises ValueError with the file byte-identical; the intact
+    row is then accepted. So a hand-built registered row can't skip register's metric-name check."""
     import greenleaf_control.ledger as ledger
 
     path = tmp_path / "ledger.jsonl"
@@ -700,7 +705,7 @@ def test_result_counts_crashed_runs_and_sums_spend_per_arm(tmp_path):
         registered=reg["row_id"], per_arm=per_arm, selected=selected, path=path
     )
 
-    caller = {"ci_low": 1.0, "ci_high": 2.0, "guards": {"violation_hours": 3.0}}
+    caller = {"ci_low": 1.0, "ci_high": 2.0, "guards": {"viol_hours_temp": 3.0}}
     assert res["per_arm"] == {
         "a": {**caller, "iqm": 1.5, "invalid_episodes": 0, "crashed": 1, "spend_usd": 0.75},
         "b": {**caller, "iqm": 2.5, "invalid_episodes": 0, "crashed": 0, "spend_usd": 1.0},
@@ -896,6 +901,117 @@ def test_register_dry_returns_the_row_and_writes_nothing(tmp_path):
     assert re.fullmatch(r"registered-[0-9a-f]{8}", row["row_id"])
     assert row["issue"] == 3
     assert row["owner_ok"] is False
+
+
+# A primary or guard selection can't score: (field, value, the name the refusal must give).
+NOT_RESULT_KEYS = [
+    pytest.param("primary", "profit", "profit", id="primary-profit"),
+    pytest.param("primary", "valid", "valid", id="primary-the-valid-flag"),
+    pytest.param("primary", "paper_reward", "paper_reward", id="primary-an-info-key"),
+    pytest.param("guards", ["violation_hours"], "violation_hours", id="guard-violation-hours"),
+    pytest.param(
+        "guards", ["viol_hours_temp", "lamp_hours"], "lamp_hours", id="one-bad-guard-of-two"
+    ),
+]
+
+
+@pytest.mark.parametrize("dry", [False, True])
+@pytest.mark.parametrize(("field", "value", "name"), NOT_RESULT_KEYS)
+def test_register_refuses_a_primary_or_guard_that_is_not_a_result_key(
+    tmp_path, field, value, name, dry
+):
+    """register, dry or not, raises ValueError when the primary or any guard isn't one of a scored
+    season's numeric keys (selection.RESULT_KEYS), naming the bad key by its repr ('profit', as the
+    ledger's other refusals quote a value). A typo is caught at register time, not after the
+    seasons are played. "valid" is episode_metrics' flag, not a number; "paper_reward" is the
+    per-step info key, not the season's paper_reward_sum.
+
+    The ledger, which already holds one registration, is byte-identical afterwards.
+    """
+    import greenleaf_control.ledger as ledger
+
+    path = tmp_path / "ledger.jsonl"
+    _register(ledger, path, issue=4)
+    before = path.read_bytes()
+
+    with pytest.raises(ValueError) as excinfo:
+        _register(ledger, path, dry=dry, **{field: value})
+    assert repr(name) in str(excinfo.value), str(excinfo.value)
+    assert path.read_bytes() == before
+
+
+@pytest.mark.parametrize(
+    ("flag", "values"),
+    [("--primary", ["profit"]), ("--guards", ["viol_hours_temp", "violation_hours"])],
+    ids=["primary-profit", "guard-violation-hours"],
+)
+def test_cli_register_refuses_a_primary_or_guard_that_is_not_a_result_key(
+    tmp_path, capsys, flag, values
+):
+    """Through main, register --primary profit (or a guard violation_hours) is refused: ValueError,
+    or an argparse error (SystemExit, non-zero). The ledger, holding one registration, is
+    byte-identical and nothing names a new row."""
+    import greenleaf_control.ledger as ledger
+
+    path = tmp_path / "ledger.jsonl"
+    assert ledger.main(_register_argv(issue=4), path=path) == 0
+    before = path.read_bytes()
+    capsys.readouterr()
+    argv = _register_argv(flag, *values)  # argparse keeps a repeated option's last value
+
+    try:
+        code = ledger.main(argv, path=path)
+    except (ValueError, SystemExit) as e:
+        if isinstance(e, SystemExit):
+            assert e.code not in (0, None), f"main exited {e.code!r}, which is not a refusal"
+    else:
+        assert code != 0, "main accepted a primary or guard that isn't a result key"
+    assert path.read_bytes() == before
+    assert "registered-" not in capsys.readouterr().out
+
+
+def test_register_accepts_e1s_registration(tmp_path):
+    """E1's real registration (registered-b89a61b1, issue #22) still validates: arm rb_tuned
+    (method rb_tuned, {"trials": 200}), seed 0, 0 timesteps, scenarios ["validation"], primary
+    paper_return, guards viol_hours_co2, viol_hours_temp and viol_hours_rh, local at 0 USD with a
+    3 CPU-hour cap. It is written as given."""
+    import greenleaf_control.ledger as ledger
+
+    path = tmp_path / "ledger.jsonl"
+    row = ledger.register(
+        issue=22,
+        hypothesis="tuning the RB's setpoints raises its validation paper_return",
+        arms=[{"name": "rb_tuned", "method": "rb_tuned", "config": {"trials": 200}}],
+        seeds=[0],
+        timesteps=0,
+        scenarios=["validation"],
+        primary="paper_return",
+        guards=["viol_hours_co2", "viol_hours_temp", "viol_hours_rh"],
+        rule="adopt if (a)-(d) of #22 hold",
+        budget={"cpu_hours": 3.0, "usd": 0.0, "backend": "local"},
+        path=path,
+    )
+
+    assert ledger.rows(path=path) == [row]
+    assert row["primary"] == "paper_return"
+    assert row["guards"] == ["viol_hours_co2", "viol_hours_temp", "viol_hours_rh"]
+
+
+def test_register_accepts_every_result_key(tmp_path):
+    """register refuses only what selection can't score: each of selection.RESULT_KEYS is accepted
+    as the primary, with all of them as guards (one registration per issue, so none needs
+    owner_ok)."""
+    import greenleaf_control.ledger as ledger
+    import greenleaf_control.selection as selection
+
+    path = tmp_path / "ledger.jsonl"
+    keys = list(selection.RESULT_KEYS)
+    for issue, key in enumerate(keys, start=100):
+        _register(ledger, path, issue=issue, primary=key, guards=keys)
+
+    written = ledger.rows(kind="registered", path=path)
+    assert [r["primary"] for r in written] == keys
+    assert all(r["guards"] == keys for r in written)
 
 
 def test_rows_filters_by_kind_and_issue(tmp_path):

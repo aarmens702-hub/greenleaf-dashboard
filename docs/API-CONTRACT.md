@@ -129,7 +129,8 @@ Paths are relative to `control/`. Scenario dicts are `{"location": str, "growth_
   - `decide --result <row> --adopted|--dropped --note "..."`
   - `show [--issue N] [--spend]`
   - `final-register ... --approved-by Aarmen`
-- **Appends only.** `register` refuses a third registration on one issue without `--owner-ok`. `result` refuses
+- **Appends only.** `register` refuses a third registration on one issue without `--owner-ok`, and any `primary`
+  or `guards` entry not in `ledger.RESULT_KEYS` (checked on every append). `result` refuses
   unless every registered arm × seed has a `run-end` row.
 
 ## `greenleaf_control.train`
@@ -230,8 +231,8 @@ Paths are relative to `control/`. Scenario dicts are `{"location": str, "growth_
     - `budgets` and `tolerance` (1.1), both residual_lag only, else null;
     - `candidates: {name: {per_scenario: [run_policy result dicts], mean_paper_return, mean_profit_eur_m2, mean_cost:
       {co2, temp, rh} or null, qualifies: bool or null}}`.
-- `RESULTS` = `control/results/validation`. `RESULT_KEYS` = a scored season's numeric keys (`metrics.episode_metrics`'
-  keys except `valid`, plus `paper_reward_sum`).
+- `RESULTS` = `control/results/validation`. `RESULT_KEYS` (defined in `ledger`, dependency-free; selection re-exports it)
+  = a scored season's numeric keys (`metrics.episode_metrics`' keys except `valid`, plus `paper_reward_sum`).
 - `main(argv=None, *, ledger_path=ledger.LEDGER) -> int`; CLI `python -m greenleaf_control.selection --registered <row>
   [--out FILE]`, `--out` defaulting to `RESULTS/<row>.json`, created exclusively.
   - **Refused before anything is scored or written:**
@@ -254,7 +255,7 @@ Paths are relative to `control/`. Scenario dicts are `{"location": str, "growth_
     - `per_arm[arm]` = {iqm, ci_low, ci_high, guards: {g: {iqm, ci_low, ci_high}}, invalid_episodes};
     - each is `stats.iqm_ci` on the runs (by seed) × VALIDATION array, all null when no run was scored;
     - no `crashed` or `spend_usd`.
-  - **Prints** one line per arm (primary and guards as iqm [lo, hi], n_runs, invalid_episodes). It ends with
+  - **Prints** one line per arm (primary and guards as iqm [lo, hi], n_runs, invalid_episodes, crashed N). It ends with
     `n<5: no claim` under 5 scored runs, or `deterministic, 1 run` for a one-run rb_tuned arm.
 - `stats.iqm_ci(scores: np.ndarray, reps: int = 2000, seed: int = 0) -> tuple[float, float, float]`
   - `scores` is 2-D, runs × tasks (seeds × scenarios); anything else raises ValueError.

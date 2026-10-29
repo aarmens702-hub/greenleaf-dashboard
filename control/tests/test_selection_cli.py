@@ -15,7 +15,8 @@ selection.main(argv=None, *, ledger_path=ledger.LEDGER) -> int, as these tests p
   - two finished runs of one arm x seed;
   - an existing --out;
   - a primary or guard that isn't a numeric key of the scored result dicts
-    (metrics.episode_metrics' keys plus paper_reward_sum; not valid);
+    (metrics.episode_metrics' keys plus paper_reward_sum; not valid). ledger.register refuses
+    such a row too (#25), so these tests plant it in the tmp ledger by hand;
   - an existing selected.json whose scenarios aren't VALIDATION or whose season_length isn't 60.
 - Every run that didn't crash (finished or budget-stop) is scored on VALIDATION:
   - a learning arm (envs.METHODS) from run_dir/selected.json, or, when there is none, through
@@ -31,9 +32,13 @@ selection.main(argv=None, *, ledger_path=ledger.LEDGER) -> int, as these tests p
   - selected maps each scored learning run's row_id to its checkpoint ("<steps>" or "final").
 - --out defaults to selection.RESULTS / "<row>.json" (RESULTS is control/results/validation) and
   is created exclusively. main prints one line per arm and nothing else, flagged "n<5: no claim"
-  under 5 runs.
+  under 5 runs, except an rb_tuned arm's one run, flagged "deterministic, 1 run" (PROTOCOL §6).
+  Each line shows "crashed N": the arm's crashed run-ends, the count the ledger's result records.
+- selection.RESULT_KEYS is exactly a real metrics.episode_metrics output's numeric keys (all but
+  valid) plus paper_reward_sum.
 
-Nothing here plays a season: run_policy and run_rb are faked or tripped, as are select_checkpoint
+Nothing here plays a season except the RESULT_KEYS pin, which grades one real PAPER day of zero
+controls: run_policy and run_rb are faked or tripped, as are select_checkpoint
 (except where a test spies on it), every env builder and rule_based.load_rb_params. Every ledger,
 run dir and numbers file is under tmp_path, and selection.RESULTS is patched to a tmp dir in every
 test that calls main; the last test checks the real ledger, control/runs/ and control/results/ are
@@ -42,6 +47,7 @@ as they were when this module was collected.
 
 import inspect
 import json
+import re
 from pathlib import Path
 
 import numpy as np
@@ -425,6 +431,49 @@ def test_a_crashed_run_is_counted_and_never_scored(decoy, tmp_path, monkeypatch)
     assert _record(path, reg["row_id"], out)["per_arm"]["alpha"]["crashed"] == 1
 
 
+def test_a_crashed_run_and_its_finished_rerun_score_the_rerun(tmp_path, monkeypatch):
+    """Arm alpha, seeds 0-4: seed 2's first run crashed, its dir holding a decoy selected.json
+    (chosen "final", 1000 in every metric, every season invalid), and a rerun of seed 2, appended
+    last in the ledger, finished and chose "500000". The rerun is scored in seed 2's place.
+
+    Known answer: all five seeds' PROFIT, VIOL and YIELD, so IQMs 8.0, 31.0 and 2.0 (see their
+    comment), each CI stats.iqm_ci's on the rows in seed order, though the rerun is the ledger's
+    last run; invalid_episodes 0 (the decoy's 3 invalid seasons aren't read). selected maps the
+    rerun to "500000" and every other finished run to "final", and never names the crashed run.
+    The ledger's result counts crashed 1.
+    """
+    selection = _selection(monkeypatch, tmp_path)
+    path = tmp_path / "ledger.jsonl"
+    reg = _register(path, arms=(("alpha", "ppo"),), seeds=range(5))
+    runs = {}
+    for seed in range(5):
+        if seed == 2:
+            crashed, _ = _run(
+                path, tmp_path, reg, "alpha", 2, status="crashed", spec=_spec(_decoy())
+            )
+        else:
+            spec = _spec(_seasons(PROFIT[seed], VIOL[seed], YIELD[seed]))
+            runs[seed], _ = _run(path, tmp_path, reg, "alpha", seed, spec=spec)
+    rerun_spec = _spec(_seasons(PROFIT[2], VIOL[2], YIELD[2]), chosen="500000")
+    runs[2], _ = _run(path, tmp_path, reg, "alpha", 2, spec=rerun_spec, tag="-rerun")
+    _trip(monkeypatch, selection)
+    out = tmp_path / "numbers.json"
+
+    numbers = _numbers(selection, path, reg["row_id"], out)
+
+    alpha = numbers["per_arm"]["alpha"]
+    assert _ci(alpha) == stats.iqm_ci(_by_seed(PROFIT))
+    assert alpha["iqm"] == pytest.approx(8.0)
+    for g, table, iqm in zip(GUARDS, (VIOL, YIELD), (31.0, 2.0), strict=True):
+        assert _ci(alpha["guards"][g]) == stats.iqm_ci(_by_seed(table)), g
+        assert alpha["guards"][g]["iqm"] == pytest.approx(iqm), g
+    assert alpha["invalid_episodes"] == 0
+    want = {runs[s]["row_id"]: "500000" if s == 2 else "final" for s in range(5)}
+    assert numbers["selected"] == want
+    assert crashed["row_id"] not in numbers["selected"]
+    assert _record(path, reg["row_id"], out)["per_arm"]["alpha"]["crashed"] == 1
+
+
 def test_an_arm_whose_runs_all_crashed_has_null_numbers_the_ledger_accepts(tmp_path, monkeypatch):
     """An arm with no run to score (bravo: both seeds crashed) has iqm, ci_low and ci_high null and
     each guard's null too (null, not NaN, which the ledger refuses), and invalid_episodes 0. The
@@ -747,8 +796,15 @@ def _refusal_setup(path: Path, root: Path, case: dict) -> tuple[str, dict]:
     (bravo seed 1's with case's stale keys). case changes one thing. Returns the row to pass and the
     run ids a message may name: "open", "first" and "rerun"."""
     methods = {"alpha": "ppo", "bravo": "residual", **case.get("methods", {})}
-    over = {key: case[key] for key in ("scenarios", "primary", "guards") if key in case}
-    reg = _register(path, arms=tuple(methods.items()), seeds=(0, 1), **over)
+    over = {key: case[key] for key in ("scenarios",) if key in case}
+    unscorable = {key: case[key] for key in ("primary", "guards") if key in case}
+    reg = _register(path, arms=tuple(methods.items()), seeds=(0, 1), dry=bool(unscorable), **over)
+    if unscorable:
+        # ledger.register refuses a primary or guard that isn't a result key (#25), so plant the
+        # row as one written before that check would sit in the ledger: a valid row, then edited.
+        reg = {**reg, **unscorable}
+        with path.open("a") as f:
+            f.write(json.dumps(reg, sort_keys=True, allow_nan=False) + "\n")
     ids = {}
     for arm, method in methods.items():
         for seed in (0, 1):
@@ -831,6 +887,106 @@ def test_prints_one_line_per_arm_flagged_under_five_runs(n, tmp_path, monkeypatc
         assert not any("n<5" in line for line in lines), lines
 
 
+def _rb_tuned_run(path: Path, root: Path, reg: dict, arm: str, seed: int = 0) -> dict:
+    """An rb_tuned run as tune_rb records one: a run dir holding manifest.json and
+    rule_based_tuned.yml (the default params here), a run row naming it and a finished run-end
+    (timesteps 0, diagnostics null). Returns the run row."""
+    run_dir = root / "runs" / reg["row_id"] / arm / f"seed{seed}"
+    run_dir.mkdir(parents=True)
+    config = {"method": "rb_tuned", "seed": seed, "trials": 2, "jobs": 1, "season_length": 60}
+    (run_dir / "manifest.json").write_text(json.dumps({"config": config}, indent=2) + "\n")
+    defaults = yaml.safe_load((rule_based.CONFIGS / "rule_based_default.yml").read_text())
+    (run_dir / "rule_based_tuned.yml").write_text(yaml.safe_dump(defaults, sort_keys=False))
+    run = ledger.run_start(
+        registered=reg["row_id"], arm=arm, seed=seed, run_dir=str(run_dir), path=path
+    )
+    ledger.run_end(
+        run=run["row_id"],
+        status="finished",
+        wall_s=3.0,
+        timesteps=0,
+        solver_failures=0,
+        cost_usd=None,
+        diagnostics=dict.fromkeys(ledger.DIAGNOSTIC_KEYS),
+        path=path,
+    )
+    return run
+
+
+def _fake_run_rb(monkeypatch, seasons: list[dict]) -> None:
+    """evaluate.run_rb returns seasons[i] for VALIDATION[i] and refuses any other scenario."""
+
+    def run_rb(params, scenario, season_length=60, record_steps=False):
+        if scenario not in scenarios.VALIDATION:
+            raise AssertionError(f"run_rb played {scenario}, not a VALIDATION scenario")
+        return dict(seasons[scenarios.VALIDATION.index(scenario)]), None
+
+    monkeypatch.setattr(evaluate, "run_rb", run_rb)
+
+
+def _arm_lines(out: str, arms) -> dict[str, str]:
+    """The printed lines, one per arm and nothing else, keyed by the arm each starts with."""
+    lines = [line for line in out.splitlines() if line.strip()]
+    assert len(lines) == len(arms), lines
+    by_arm = {line.split()[0]: line for line in lines}
+    assert set(by_arm) == set(arms), lines
+    return by_arm
+
+
+def test_rb_tuneds_one_run_prints_deterministic_not_no_claim(tmp_path, monkeypatch, capsys):
+    """E1's shape (#22): an rb_tuned arm with one seed, primary paper_return, guards
+    viol_hours_co2, viol_hours_temp and viol_hours_rh. A deterministic arm needs one run (PROTOCOL
+    §6), so its line says "deterministic, 1 run" and has no "n<5". A ppo arm's one run in the same
+    registration still says "n<5: no claim" and not "deterministic": the flag follows the method,
+    not the run count alone."""
+    selection = _selection(monkeypatch, tmp_path)
+    path = tmp_path / "ledger.jsonl"
+    guards = [f"viol_hours_{c}" for c in metrics.CONSTRAINTS]
+    arms = (("rb", "rb_tuned"), ("alpha", "ppo"))
+    reg = _register(path, arms=arms, seeds=(0,), primary="paper_return", guards=guards)
+    _rb_tuned_run(path, tmp_path, reg, "rb")
+    _run(path, tmp_path, reg, "alpha", 0, spec=_spec(_seasons((1, 2, 3), paper_return=(1, 2, 3))))
+    _trip(monkeypatch, selection)
+    _fake_run_rb(monkeypatch, _seasons((5, 6, 10), paper_return=(4, 5, 6)))
+    capsys.readouterr()
+
+    _numbers(selection, path, reg["row_id"], tmp_path / "numbers.json")
+
+    lines = _arm_lines(capsys.readouterr().out, ("rb", "alpha"))
+    assert "deterministic, 1 run" in lines["rb"], lines["rb"]
+    assert "n<5" not in lines["rb"], lines["rb"]
+    assert NO_CLAIM in lines["alpha"], lines["alpha"]
+    assert "deterministic" not in lines["alpha"], lines["alpha"]
+
+
+def test_each_arms_line_shows_its_crashed_count(tmp_path, monkeypatch, capsys):
+    """Each arm's line shows "crashed N", N the arm's crashed run-ends: the count the ledger's
+    result records, a rerun's crash included.
+
+    Known answer, seeds 0 and 1: alpha's seed 0 crashed and its rerun finished, and seed 1 crashed
+    with no rerun: crashed 2. bravo's two runs finished: crashed 0.
+    """
+    selection = _selection(monkeypatch, tmp_path)
+    path = tmp_path / "ledger.jsonl"
+    reg = _register(path, arms=(("alpha", "ppo"), ("bravo", "residual")), seeds=(0, 1))
+    for seed in (0, 1):
+        _run(path, tmp_path, reg, "alpha", seed, status="crashed")
+        spec = _spec(_seasons(PROFIT[seed], VIOL[seed], YIELD[seed]))
+        _run(path, tmp_path, reg, "bravo", seed, method="residual", spec=spec)
+    _run(path, tmp_path, reg, "alpha", 0, spec=_spec(_seasons((1, 2, 3))), tag="-rerun")
+    _trip(monkeypatch, selection)
+    out = tmp_path / "numbers.json"
+    capsys.readouterr()
+
+    _numbers(selection, path, reg["row_id"], out)
+
+    lines = _arm_lines(capsys.readouterr().out, ("alpha", "bravo"))
+    res = _record(path, reg["row_id"], out)
+    for arm, want in (("alpha", 2), ("bravo", 0)):
+        assert re.findall(r"\bcrashed (\d+)\b", lines[arm]) == [str(want)], lines[arm]
+        assert res["per_arm"][arm]["crashed"] == want, arm
+
+
 def test_out_defaults_to_results_row_json_and_is_written_once(tmp_path, monkeypatch, capsys):
     """Without --out the file is selection.RESULTS / "<row>.json" (RESULTS is control/results/
     validation, patched here to a tmp dir that doesn't exist yet, as control/results/ doesn't). A
@@ -852,6 +1008,29 @@ def test_out_defaults_to_results_row_json_and_is_written_once(tmp_path, monkeypa
 
 
 # --- The contract ------------------------------------------------------------------------------
+
+
+def test_result_keys_are_a_real_seasons_numeric_keys_plus_paper_reward_sum():
+    """selection.RESULT_KEYS, what a primary or guard may name, is exactly the numeric keys of a
+    real metrics.episode_metrics output (every key but its bool valid) plus evaluate's
+    paper_reward_sum, with no duplicates. So a metric added to or renamed in metrics fails here,
+    not after seasons are scored. The output grades one real PAPER day (96 steps, not TEST weather)
+    of zero controls as evaluate grades a season: trace_from_infos, the model's params and N."""
+    import greenleaf_control.selection as selection
+
+    infos = envs.run_baseline("zero_controls", scenarios.PAPER, 1)
+    raw = envs.make_raw_env(scenario=scenarios.PAPER, season_length=1, normalize_actions=False)
+    params, season_steps = np.asarray(raw.unwrapped.p), raw.unwrapped.N
+    raw.close()
+    states, controls = metrics.trace_from_infos(infos)
+    graded = metrics.episode_metrics(states, controls, params, season_steps=season_steps)
+
+    numeric = {
+        k for k, v in graded.items() if isinstance(v, int | float) and not isinstance(v, bool)
+    }
+    assert set(graded) - numeric == {"valid"}
+    assert len(selection.RESULT_KEYS) == len(set(selection.RESULT_KEYS))
+    assert set(selection.RESULT_KEYS) == numeric | {"paper_reward_sum"}
 
 
 def test_main_matches_the_contract_and_no_test_wrote_the_real_ledger_runs_or_results():

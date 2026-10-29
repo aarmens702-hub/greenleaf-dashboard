@@ -37,21 +37,9 @@ from greenleaf_control import envs, evaluate, ledger, metrics, scenarios, stats
 
 TOLERANCE = 1.10  # PROTOCOL §5: a mean cost qualifies up to budget x 1.10, inclusive
 RESULTS = Path(__file__).resolve().parents[1] / "results" / "validation"
-# A scored season's numeric keys, what a primary or guard may name: metrics.episode_metrics' keys
-# but valid, plus evaluate's paper_reward_sum.
-RESULT_KEYS = (
-    "profit_eur_m2",
-    *(f"viol_hours_{c}" for c in metrics.CONSTRAINTS),
-    *(f"pct_in_bounds_{c}" for c in metrics.CONSTRAINTS),
-    "yield_kg_m2",
-    "heat_cost",
-    "elec_cost",
-    "co2_cost",
-    "paper_return",
-    "solver_failures",
-    "steps",
-    "paper_reward_sum",
-)
+# A scored season's numeric keys, what a primary or guard may name; the ledger's, which register
+# checks against.
+RESULT_KEYS = ledger.RESULT_KEYS
 NO_CLAIM = "n<5: no claim"
 
 
@@ -265,6 +253,7 @@ def main(argv: list[str] | None = None, *, ledger_path: Path = ledger.LEDGER) ->
     if out.exists():
         raise FileExistsError(f"{out} already exists; a numbers file is written once")
     reg, runs = _registration(args.registered, ledger_path)
+    ends = ledger._run_ends(ledger.rows(path=ledger_path), reg["row_id"])  # the result's crashed
     methods = {arm["name"]: arm["method"] for arm in reg["arms"]}
     # Every selected.json and rb_tuned's params, checked before a season is played or a file written.
     read = {
@@ -291,6 +280,7 @@ def main(argv: list[str] | None = None, *, ledger_path: Path = ledger.LEDGER) ->
         line = (
             f"{name}  {reg['primary']} {_shown(numbers)}  {guards}  n_runs {len(by_run)}"
             f"  invalid_episodes {numbers['invalid_episodes']}"
+            f"  crashed {ledger._arm_tally(ends, name)['crashed']}"
         )
         if methods[name] == "rb_tuned" and len(by_run) == 1:
             line += "  deterministic, 1 run"  # PROTOCOL §6: a deterministic arm needs one run
