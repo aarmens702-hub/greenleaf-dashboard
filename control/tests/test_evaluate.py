@@ -406,6 +406,34 @@ def test_run_policy_frame_adds_the_rb_action_for_the_residual_arm(residual_run):
     assert np.all((u >= 0.0) & (u <= 1.0))
 
 
+@pytest.mark.usefixtures("no_2012_reads")
+def test_run_policy_return_trace_adds_the_graded_raw_trace_and_changes_nothing_else(residual_run):
+    """#24: run_policy(..., return_trace=True) returns a third item, the graded season's raw
+    trace (states, controls, params), so export_replay can grade a run dir's running counters.
+
+    On the residual smoke run's final checkpoint over a 1-day PAPER season (96 steps):
+    - the result == the plain call's, and the frame equals the plain call's exactly (the policy is
+      deterministic and its VecNormalize frozen, so it is the same season);
+    - states is (97, nx) and controls (96, 6), and controls are the frame's applied u_* exactly;
+    - the trace is the one graded: metrics.episode_metrics(states, controls, params,
+      season_steps=96) == the result without paper_reward_sum, exactly.
+    """
+    import greenleaf_control.evaluate as evaluate
+
+    want, want_frame = evaluate.run_policy(residual_run, "final", PAPER, 1, record_steps=True)
+    result, frame, (states, controls, params) = evaluate.run_policy(
+        residual_run, "final", PAPER, 1, record_steps=True, return_trace=True
+    )
+
+    assert result == want
+    pd.testing.assert_frame_equal(frame, want_frame)
+    assert states.shape[0] == N_DAY + 1
+    assert controls.shape == (N_DAY, 6)
+    np.testing.assert_array_equal(controls, frame[U_COLS].to_numpy(dtype=np.float64))
+    graded = {k: v for k, v in result.items() if k != "paper_reward_sum"}
+    assert metrics.episode_metrics(states, controls, params, season_steps=N_DAY) == graded
+
+
 FRAME_CASES = [
     pytest.param("rb", RB_DEFAULT, id="rb-default"),
     pytest.param("rb", {**RB_DEFAULT, "co2_day": 2500}, id="rb-co2-day-2500"),
@@ -649,7 +677,9 @@ def test_build_vec_env_builds_the_residual_arm_at_the_recorded_scale(scale, expe
 
 def test_signatures_match_the_contract_and_no_test_wrote_the_real_ledger_or_runs():
     """run_rb(params, scenario, season_length=60, record_steps=False), run_policy(run_dir,
-    checkpoint, scenario, season_length=60, record_steps=False) and main(argv=None).
+    checkpoint, scenario, season_length=60, record_steps=False, return_trace=False) and
+    main(argv=None). return_trace (#24) is a backward-compatible extension: off by default, so
+    every earlier call is unchanged.
 
     This test runs last in the module and checks the real ledger's size and mtime, and the
     listing of control/runs/, are as they were when the module was collected.
@@ -659,9 +689,17 @@ def test_signatures_match_the_contract_and_no_test_wrote_the_real_ledger_or_runs
     rb = inspect.signature(evaluate.run_rb).parameters
     assert list(rb) == ["params", "scenario", "season_length", "record_steps"]
     policy = inspect.signature(evaluate.run_policy).parameters
-    assert list(policy) == ["run_dir", "checkpoint", "scenario", "season_length", "record_steps"]
+    assert list(policy) == [
+        "run_dir",
+        "checkpoint",
+        "scenario",
+        "season_length",
+        "record_steps",
+        "return_trace",
+    ]
     for params in (rb, policy):
         assert (params["season_length"].default, params["record_steps"].default) == (60, False)
+    assert policy["return_trace"].default is False
     main = inspect.signature(evaluate.main).parameters
     assert list(main) == ["argv"]
     assert main["argv"].default is None

@@ -89,8 +89,11 @@ def run_policy(
     scenario: dict,
     season_length: int = 60,
     record_steps: bool = False,
-) -> tuple[dict, pd.DataFrame | None]:
-    """A run's checkpoint, one deterministic season on its training stack with frozen stats."""
+    return_trace: bool = False,
+) -> tuple:
+    """A run's checkpoint, one deterministic season on its training stack with frozen stats.
+
+    With return_trace, also the graded season's (states, controls, params) as a third item."""
     run_dir = Path(run_dir)
     config = json.loads((run_dir / "manifest.json").read_text())["config"]
     stack = train.build_vec_env(config, 1, scenario=scenario, season_length=season_length)
@@ -105,9 +108,14 @@ def run_policy(
         obs, _, dones, step_infos = venv.step(action)
         infos.append(step_infos[0])
         done = bool(dones[0])
-    result = _grade(infos, venv.unwrapped.envs[0].unwrapped)
+    raw = venv.unwrapped.envs[0].unwrapped
+    result = _grade(infos, raw)
+    params = np.asarray(raw.p, dtype=np.float64)
     venv.close()
-    return result, _frame(infos) if record_steps else None
+    frame = _frame(infos) if record_steps else None
+    if return_trace:
+        return result, frame, (*metrics.trace_from_infos(infos), params)
+    return result, frame
 
 
 def _score(controller: str, scenario: dict) -> dict:

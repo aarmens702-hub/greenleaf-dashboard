@@ -166,8 +166,9 @@ Paths are relative to `control/`. Scenario dicts are `{"location": str, "growth_
 
 ## `greenleaf_control.evaluate`
 - `run_rb(params: dict, scenario: dict, season_length: int = 60, record_steps: bool = False) -> tuple[dict, pd.DataFrame | None]`
-- `run_policy(run_dir: Path, checkpoint: str, scenario: dict, season_length: int = 60, record_steps: bool = False)
-  -> tuple[dict, pd.DataFrame | None]`
+- `run_policy(run_dir: Path, checkpoint: str, scenario: dict, season_length: int = 60, record_steps: bool = False,
+  return_trace: bool = False) -> tuple[dict, pd.DataFrame | None]`, or with `return_trace=True`
+  `(result, frame, (states, controls, params))`: the same season's raw trace that metrics graded (no second season).
   - Rebuilds the training stack with `train.build_vec_env(manifest["config"], 1, scenario=..., season_length=...)`
     (`DummyVecEnv` → `VecMonitor` → `VecLagrangianReward` for residual_lag), loads
     `VecNormalize.load(run_dir/"vecnorm_<checkpoint>.pkl", <that stack>)`, sets `training = False` and
@@ -188,6 +189,23 @@ Paths are relative to `control/`. Scenario dicts are `{"location": str, "growth_
   - `t` is 0..T-1; co2 [ppm], temp [°C] and rh [%] from the state after the step; `u_*` (the applied absolute
     controls) and `u_rb_*` in upstream order: boil, co2, thscr, vent, lamp, blscr; `profit` and `cost_*` are the
     step's info values (reward-side diagnostics, not metrics).
+
+## `greenleaf_control.export_replay` (D2, for the demo site)
+- `export(frame, result, states, controls, params, *, controller, scenario, stamp) -> dict`:
+  - `{meta, hourly, totals}`.
+  - `meta` = {controller, scenario, commit, dirty, gl_gym, note ("a simulator run, not a registered result"), bounds,
+    units}.
+  - `hourly` holds H = season_length × 24 points of:
+    - t_hour;
+    - co2/temp/rh at the end of each hour (frame row 4h+3, 3 significant digits);
+    - the six u_* as the hour's mean (3 decimals);
+    - profit and viol_co2/temp/rh as metrics on the prefix to that hour (4 decimals).
+  - `totals` = the result exactly.
+- CLI `--controller {zero_controls|random|rb_default|rb_tuned|<run_dir>} --split ... --out <dir> [--final ROW]`:
+  - writes `<controller>_<location>_<year>_<startday>.json` per scenario (compact, no NaN), each under 250 KB;
+  - the test splits are refused without `--final`, and `--final` until F1, before any env;
+  - an existing file is refused;
+  - a run dir plays its `final` checkpoint through `evaluate.run_policy(..., return_trace=True)`.
 
 ## `greenleaf_control.selection`, `stats`, `tune_rb`, `run_grid`, `modal_app`
 - `select_checkpoint(run_dir: Path) -> str`: the PROTOCOL §5 rule on VALIDATION; writes `run_dir/selected.json` once.
