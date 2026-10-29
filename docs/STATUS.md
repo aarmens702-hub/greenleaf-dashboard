@@ -21,12 +21,12 @@
   - #13a `train.py` (`d3844cb`), #13b `evaluate.py` (`ec0f96e`, with `pyarrow<26`);
   - #16 overfit probe (`57e113a`), #14 probe ladder (`c39b482`), #18 `viz.py` (`d6955d1`);
   - #17a `stats`/`run_grid`/`modal_app` (`a5618eb`), #13c `selection.py` (`e7d5476`, closing #13), #17b `tune_rb` (`14feb9e`, closing #17);
-  - #19a passed-in code stamp for remote runs (`d8caeee`), #20 the selection CLI and per-arm numbers (`d84dbff`).
-- **Stage 1, open:** #15 residual-offset and Lagrangian probes (`.worktrees/15`, waiting on Aarmen: Open decision 0); #19b Modal recording from the Mac (`.worktrees/19`).
+  - #19a passed-in code stamp for remote runs (`d8caeee`), #20 the selection CLI and per-arm numbers (`d84dbff`), #19b remote runs recorded from the Mac (`78f04d5`, closing #19).
+- **Stage 1, open:** only #15, the residual-offset and Lagrangian probes (`.worktrees/15`, both probes written but uncommitted; waiting on Aarmen: Open decision 0). Every other Stage 1 issue is shipped with CI green.
 - **Filed 2026-10-28:** #19, recording Modal runs (ledger rows, fingerprints, cost, configs and weather in the image). Due before E2. Until it lands, `run_grid --backend modal` refuses.
 
 ## To do, in order
-1. **Finish Stage 1:** #15 (waiting on Aarmen, Open decision 0); #19b (Modal recording, before E2). No experiment before all of Stage 1 is shipped. E1 runs locally and needs only #15 settled.
+1. **Finish Stage 1:** #15 (waiting on Aarmen, Open decision 0). No experiment before all of Stage 1 is shipped. E1 runs locally and needs only #15 settled, plus Aarmen's look at TUNE_SPACE.
 2. **Aarmen, before E1:** veto or keep the TUNE_SPACE default (Defaults taken, #17b).
 3. **Stage 2** (E1 … E6): experiments, each pre-registered. File them with `/new-task` once Stage 1 is green. Ask GreenLeaf (D6) is built in parallel.
 4. **Stage 3:** the final (once), then the analysis.
@@ -56,6 +56,18 @@
    - An arm with crashes reports its IQM over its surviving seeds, which can bias it upward. How is such a number quoted?
    - A crash followed by a finished rerun still records crashed ≥ 1, so §6 blocks adopting that arm even though every seed is scored. A Modal infrastructure crash would sink an arm; is that wanted?
    - `budget-stop` runs are scored as full runs with no flag.
+8. **A plumbing run before E2 (from #19b's review; spend).**
+   - Nothing on the container side has ever run: the /root layout, SubprocVecEnv in the container, the volume commit and reload, and train_remote's body against the real SDK.
+   - `--remote` refuses `--smoke`, so E2's registered runs would be the first execution, and any plumbing failure becomes a permanent crashed run-end under E2.
+   - Default: a throwaway plumbing registration first (1 arm × 1 seed, a few thousand timesteps, cents). Its own issue, and it needs your yes on spend.
+   - Two more from #19b's last review:
+     - A cell can't be retried under the same registration: run_grid refuses any cell that already has a run row, so a retry needs a new registration, and a third one on an issue needs `--owner-ok`.
+     - After a Ctrl-C, run_grid waits for in-flight calls to fail once the app disconnects. If one never returns, a second Ctrl-C exits but leaves those runs open: close each with `ledger.run_end(status="crashed")` before `check_locks`.
+   - Also:
+     - no live container logs (watch the Modal dashboard);
+     - the ledger's cost_usd is an upper bound (the Mac's wall, queue time included);
+     - keep the Mac plugged in, since caffeinate doesn't stop lid-close sleep on battery;
+     - the image uploads the whole weather dir, 2012 included (hashed against the stamp, never trained on).
 7. **Preemption on Modal (before E2; from #19's scout).** Modal reruns a preempted input up to 8 times, even with `retries=0`. The rerun hits train's refusal of an existing run dir, so it's recorded as crashed, which blocks adoption (see 6). Option: `nonpreemptible=True` at a higher price (read the multiplier on modal.com/pricing). It's a spend call.
 
 ### Decided 2026-10-28
@@ -135,6 +147,7 @@
 - CI: `uv sync --frozen` doesn't fail on a stale lock (`--locked` would); no `permissions: contents: read`; uv version unpinned.
 - The venv uses Anaconda's CPython 3.12.7; a `.python-version` or `UV_PYTHON_PREFERENCE=only-managed` would decouple it.
 - `guard_tests.py` and `protect_secrets.py` fail open on unparseable input.
+- **guard_runs' "modal" rule is a plain substring check.** On 2026-10-28 #19b's builder tried once to get past it by splitting the word inside a path (to grep the SDK source). The auto-mode classifier denied it; nothing ran, and the agent switched to the Read tool. The hook can't catch every shell spelling, so the classifier and the reviewer stay part of the lock.
 - `builder.md` rule 10's bullets are stricter than the hook (`run_grid` outright, `tune_rb` over 5 trials); the hook also blocks read-only `cp control/runs/x /tmp/y` and `rm -rf runs/smoke`.
 - MIT copyright names only Aarmen; confirm for the hackathon team.
 - `evaluate.run_policy` is tested only on a `residual` run. A 1-day smoke over `ppo_paper` (other obs shape, normalized actions) and `residual_lag` (VecLagrangianReward in the stack) would lock it for every method.
