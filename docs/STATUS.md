@@ -20,12 +20,13 @@
   - #9 `envs.py` (`ad7c769`, seasons of exactly N steps), #10 `metrics.py` (`964a194`), #11 golden numbers (`1a220cc`);
   - #13a `train.py` (`d3844cb`), #13b `evaluate.py` (`ec0f96e`, with `pyarrow<26`);
   - #16 overfit probe (`57e113a`), #14 probe ladder (`c39b482`), #18 `viz.py` (`d6955d1`);
-  - #17a `stats`/`run_grid`/`modal_app` (`a5618eb`), #13c `selection.py` (`e7d5476`, closing #13), #17b `tune_rb` (`14feb9e`, closing #17).
-- **Stage 1, open:** #15 residual-offset and Lagrangian probes (`.worktrees/15`, waiting on Aarmen: Open decision 0); #20 experiment results (selection CLI plus per-arm numbers); #19 Modal recording.
+  - #17a `stats`/`run_grid`/`modal_app` (`a5618eb`), #13c `selection.py` (`e7d5476`, closing #13), #17b `tune_rb` (`14feb9e`, closing #17);
+  - #19a passed-in code stamp for remote runs (`d8caeee`), #20 the selection CLI and per-arm numbers (`d84dbff`).
+- **Stage 1, open:** #15 residual-offset and Lagrangian probes (`.worktrees/15`, waiting on Aarmen: Open decision 0); #19b Modal recording from the Mac (`.worktrees/19`).
 - **Filed 2026-10-28:** #19, recording Modal runs (ledger rows, fingerprints, cost, configs and weather in the image). Due before E2. Until it lands, `run_grid --backend modal` refuses.
 
 ## To do, in order
-1. **Finish Stage 1:** #15 (waiting on Aarmen, Open decision 0); #20, the selection CLI plus the per-arm numbers `ledger result --numbers` records (nothing computes them yet; needed before E1's result); #19 (Modal recording, before E2). No experiment before all of Stage 1 is shipped.
+1. **Finish Stage 1:** #15 (waiting on Aarmen, Open decision 0); #19b (Modal recording, before E2). No experiment before all of Stage 1 is shipped. E1 runs locally and needs only #15 settled.
 2. **Aarmen, before E1:** veto or keep the TUNE_SPACE default (Defaults taken, #17b).
 3. **Stage 2** (E1 … E6): experiments, each pre-registered. File them with `/new-task` once Stage 1 is green. Ask GreenLeaf (D6) is built in parallel.
 4. **Stage 3:** the final (once), then the analysis.
@@ -50,6 +51,12 @@
 4. **PID recovery speed (before E5).** Decided 2026-10-28: the integral is clamped to [0, `lambda_max`] (#12). That stops unbounded windup, but it does not make λ recover within a run at the defaults: costs are ≥ 0, so the integral drops by at most `ki` per update, and from the cap λ needs (`lambda_max` − `kp`)/`ki` updates to reach 0 at zero cost: 1,990 at the defaults (100, 0.5, 0.05), against ~244 updates per run. A budget of 0 sends λ to the cap on the first violation. Prompt recovery needs a smaller `lambda_max` or a larger `ki`, both per-run settings; choose them when registering E5.
 5. **Zero-cost budgets for residual_lag (before E5).** It also bites selection: with a CO₂ budget of 0, × 1.10 leaves no slack, so one CO₂-violating step disqualifies a checkpoint and §5 falls to "lowest total cost" more often (both smoke manifests the #13c reviewer saw had a CO₂ budget of 0.0).
    - Earlier note: rb_default never violates CO₂ on the TRAIN_EVAL seasons, so `budget_frac` × 0 gives a CO₂ budget of 0; the PID's error is then cost / 1e-8 and λ_co2 jumps to its cap (100) at the first CO₂ cost. If rb_tuned also has zero CO₂ cost, residual_lag is pinned at λ = 100 on CO₂. Option: a budget floor.
+
+6. **Crashed runs in a result (before E2; from #20's review).** PROTOCOL §6 says crashed runs "count": listed, and they block adoption. #20 never scores them and the ledger counts them. Three questions:
+   - An arm with crashes reports its IQM over its surviving seeds, which can bias it upward. How is such a number quoted?
+   - A crash followed by a finished rerun still records crashed ≥ 1, so §6 blocks adopting that arm even though every seed is scored. A Modal infrastructure crash would sink an arm; is that wanted?
+   - `budget-stop` runs are scored as full runs with no flag.
+7. **Preemption on Modal (before E2; from #19's scout).** Modal reruns a preempted input up to 8 times, even with `retries=0`. The rerun hits train's refusal of an existing run dir, so it's recorded as crashed, which blocks adoption (see 6). Option: `nonpreemptible=True` at a higher price (read the multiplier on modal.com/pricing). It's a spend call.
 
 ### Decided 2026-10-28
 - **The "modal" rule in `guard_runs` stays as is.** Specialists built and reviewed #17a's `modal_app` without loosening it: they write with the Write tool, check with `ruff check .` and plain `pytest`, and read with the Read and Grep tools. No guard change.
@@ -135,6 +142,9 @@
 - `selection.py` isn't in `manifest.FINGERPRINTED`, so a change to it won't show in ledger rows, though it applies PROTOCOL §5.
 - The `selection` CLI (before E2) should refuse a run whose manifest status isn't `finished` (a crashed run with `ckpt_<steps>` files still gets a checkpoint today), and the contract should pick one checkpoint-name form: `select_checkpoint` returns `"final"` / `"<steps>"`, but the ledger tests use `"ckpt_final.zip"` for a result row's `selected`.
 - Budgets come from the run's training season length (train.py ~l.358), but selection always plays 60 days; that matches every default arm, but an arm registered with another `season_length` would be held to budgets measured over a different window.
+- #20's tests: add a positive crash-plus-rerun case, assert rb_tuned's "deterministic, 1 run" line, and pin `selection.RESULT_KEYS` against a real `metrics.episode_metrics` output (a drift fails loudly today, but late: after seasons are scored). The selection line could print each arm's crashed count (the experiment skill wants it shown).
+- `ledger.register` doesn't validate `primary`/`guards` against metric names (test_ledger's fixtures use "profit" and "violation_hours"); selection refuses them later, so a typo'd registration is caught only at result time.
+- `tune_rb`'s run-end diagnostics are `dict.fromkeys(DIAGNOSTIC_KEYS)` but its manifest records `diagnostics: null`; harmless (the equality claim covers train runs).
 - viz's season strip counts 15-minute steps (to 5,760); days would read better in the README.
 
 ## What we've learned
