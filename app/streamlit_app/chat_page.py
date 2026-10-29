@@ -18,7 +18,6 @@ import traceback
 
 import streamlit as st
 
-from app.chat.answer import answer
 from app.core import config
 from app.core import obs
 from app.streamlit_app import theme as T
@@ -225,6 +224,10 @@ def _handle_question(question):
     """Append the user turn, call answer(), append the assistant turn, rerun."""
     st.session_state.messages.append({"role": "user", "content": question})
     try:
+        # Imported here, not at module top: it loads the RAG index, the embedding model and the
+        # derived data, so the dashboard starts without them and a failure shows as a chat error.
+        from app.chat.answer import answer
+
         with st.spinner("Thinking..."):
             result = answer(question)
         trace = result.get("trace", {})
