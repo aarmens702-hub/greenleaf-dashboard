@@ -66,13 +66,20 @@ def _versions() -> dict:
     return versions
 
 
-def write_manifest(
-    run_dir: Path, *, config: dict, issue: int, registered: str | None, smoke: bool
-) -> dict:
-    """Write run_dir/manifest.json; refuse a reused run_dir, and a dirty tree unless smoke."""
-    run_dir = Path(run_dir)
-    if run_dir.exists():
-        raise FileExistsError(f"run_dir already exists: {run_dir}")
+def _weather_hashes() -> dict:
+    # S1-1 provides scenarios.weather_hashes and removes this fallback.
+    try:
+        from greenleaf_control.scenarios import weather_hashes
+    except ModuleNotFoundError as e:
+        if e.name != "greenleaf_control.scenarios":
+            raise
+        return {}
+    return weather_hashes()
+
+
+def code_stamp(*, smoke: bool) -> dict:
+    """This checkout's commit, dirty, fingerprints and weather hashes; refuse a dirty tree unless
+    smoke."""
     # Porcelain v1 lines are "XY path"; run dirs under control/runs/ and the ledger file itself
     # (nothing else in control/ledger/) don't count as dirty.
     dirty_lines = [
@@ -84,22 +91,52 @@ def write_manifest(
         raise RuntimeError(
             "git tree is dirty; commit first or pass smoke:\n" + "\n".join(dirty_lines)
         )
-
-    # S1-1 provides scenarios.weather_hashes and removes this fallback.
-    try:
-        from greenleaf_control.scenarios import weather_hashes
-    except ModuleNotFoundError as e:
-        if e.name != "greenleaf_control.scenarios":
-            raise
-        hashes = {}
-    else:
-        hashes = weather_hashes()
-
-    manifest = {
+    return {
         "commit": _git("rev-parse", "HEAD").strip(),
         "dirty": bool(dirty_lines),
         "fingerprints": fingerprints(),
-        "weather_hashes": hashes,
+        "weather_hashes": _weather_hashes(),
+    }
+
+
+def write_manifest(
+    run_dir: Path,
+    *,
+    config: dict,
+    issue: int,
+    registered: str | None,
+    smoke: bool,
+    stamp: dict | None = None,
+) -> dict:
+    """Write run_dir/manifest.json; refuse a reused run_dir, and a dirty tree unless smoke.
+
+    A passed stamp (a remote run's, from code_stamp on the Mac) is recorded as is and no git runs;
+    it's refused if dirty unless smoke, or if this machine's weather files hash differently.
+    """
+    run_dir = Path(run_dir)
+    if run_dir.exists():
+        raise FileExistsError(f"run_dir already exists: {run_dir}")
+    if stamp is None:
+        stamp = code_stamp(smoke=smoke)
+    else:
+        if stamp["dirty"] and not smoke:
+            raise RuntimeError("the passed stamp is from a dirty tree; commit first or pass smoke")
+        here = _weather_hashes()
+        differ = sorted(
+            key
+            for key in here.keys() | stamp["weather_hashes"].keys()
+            if here.get(key) != stamp["weather_hashes"].get(key)
+        )
+        if differ:
+            raise RuntimeError(
+                f"weather files hash differently from the stamp: {', '.join(differ)}"
+            )
+
+    manifest = {
+        "commit": stamp["commit"],
+        "dirty": stamp["dirty"],
+        "fingerprints": stamp["fingerprints"],
+        "weather_hashes": stamp["weather_hashes"],
         "versions": _versions(),
         "config": config,
         "seeds": {"model": config["seed"], "env": config["seed"]},
@@ -124,6 +161,7 @@ def finish_manifest(
     timesteps: int,
     solver_failures: int,
     cost_usd: float | None,
+    diagnostics: dict | None = None,
 ) -> dict:
     """Merge the end-of-run fields into run_dir/manifest.json and return the result."""
     if status not in STATUSES:
@@ -136,6 +174,7 @@ def finish_manifest(
         timesteps=timesteps,
         solver_failures=solver_failures,
         cost_usd=cost_usd,
+        diagnostics=diagnostics,
         ended_at=datetime.now(UTC).isoformat(),
     )
     path.write_text(_dumps(manifest))

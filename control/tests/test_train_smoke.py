@@ -10,6 +10,10 @@ run needs --registered <row>: its arm (method and config), seed and timesteps mu
 registration, a run-shaping flag its arm doesn't name must be at its CLI default, and it writes
 <runs-dir>/<row>/<arm>/seed<S>, which must not exist yet.
 
+Issue #19 (part 19a): a remote run gets --remote '{"stamp": <manifest.code_stamp>, "registered":
+<row>}' and reads neither git nor the ledger; its manifest takes the stamp verbatim and, like every
+registered run's, carries the run's diagnostics.
+
 Known answers used throughout:
 - One day is 96 steps (86,400 s / 900 s), so --season-length 1 is a 96-step season and 2 is 192.
 - With --n-envs 1 a PPO rollout is n_steps = 2,048 env steps, so --timesteps 2048 is exactly one
@@ -23,6 +27,7 @@ ledger and control/runs/ are as they were when this module was collected.
 """
 
 import csv
+import hashlib
 import inspect
 import json
 import math
@@ -123,6 +128,7 @@ CLI_FLAGS = [
     "--smoke",
     "--registered",
     "--rb",
+    "--remote",  # #19a: only train_remote sets it
 ]
 # One arm, one seed, 2,048 steps: what the registered tests run, or refuse to. The arm names every
 # run-shaping flag the registered argv sets away from its CLI default (--rb is ignored for ppo).
@@ -548,7 +554,8 @@ def test_registered_run_records_its_run_and_run_end_rows(tmp_path, monkeypatch):
     issue, and appends a run row, then a finished run-end row. No smoke dir.
 
     Known answers: the run-end's timesteps are the registered 2,048; a local run costs None; one
-    PPO update logs a finite approx-KL, entropy and explained variance.
+    PPO update logs a finite approx-KL, entropy and explained variance. The manifest carries the
+    same diagnostics as the run-end (#19a: a remote run's run-end is written from its manifest).
     """
     import greenleaf_control.train as train
 
@@ -586,6 +593,7 @@ def test_registered_run_records_its_run_and_run_end_rows(tmp_path, monkeypatch):
         13,
     )
     assert (m["status"], m["timesteps"]) == ("finished", 2048)
+    assert m["diagnostics"] == diagnostics
     config = m["config"]
     assert (config["method"], config["seed"]) == ("ppo", 0)
     assert (config["penalty_weight"], config["season_length"]) == (1.0, 1)
@@ -788,7 +796,8 @@ def test_registered_run_that_crashes_records_crashed_and_propagates(tmp_path, mo
     run-end closing it. No final checkpoint or evaluation is written.
 
     Known answers: learn raised before any env step, so the run-end records 0 timesteps, 0 solver
-    failures and, with no PPO update, every diagnostic None.
+    failures and, with no PPO update, every diagnostic None; the manifest records the same
+    diagnostics (#19a).
     """
     import greenleaf_control.train as train
 
@@ -811,6 +820,7 @@ def test_registered_run_that_crashes_records_crashed_and_propagates(tmp_path, mo
     assert (end["kind"], end["run"], end["status"]) == ("run-end", run["row_id"], "crashed")
     assert (end["timesteps"], end["solver_failures"]) == (0, 0)
     assert end["diagnostics"] == dict.fromkeys(ledger.DIAGNOSTIC_KEYS)
+    assert m["diagnostics"] == end["diagnostics"]
     assert not (run_dir / "ckpt_final.zip").exists()
     assert not (run_dir / "final_eval.json").exists()
 
@@ -876,6 +886,298 @@ def test_registered_run_end_records_exact_solver_failures_and_update_diagnostics
         "final_entropy": updates[-1]["entropy"],
         "final_explained_variance": updates[-1]["explained_variance"],
     }
+
+
+# Issue #19, part 19a: a remote run's code stamp is passed in. The container that runs
+# `train --registered <row> --remote '{"stamp": ..., "registered": <row>}'` has no git checkout and
+# no ledger: the Mac computes manifest.code_stamp, passes it and the registered row, and writes the
+# run and run-end rows itself (19b).
+
+STAMP_KEYS = {"commit", "dirty", "fingerprints", "weather_hashes"}
+OTHER_ROW = "registered-0badc0de"  # an id no test registers
+
+
+def _outside_git(tmp_path: Path, monkeypatch) -> Path:
+    """manifest.REPO_ROOT becomes tmp_path/image, a directory in no git repo (like the container's
+    /root): git may not search above tmp_path for one."""
+    for var in ("GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE"):
+        monkeypatch.delenv(var, raising=False)
+    monkeypatch.setenv("GIT_CEILING_DIRECTORIES", str(tmp_path))
+    image = tmp_path / "image"
+    image.mkdir()
+    monkeypatch.setattr(manifest, "REPO_ROOT", image)
+    return image
+
+
+def _no_git_or_ledger(*args, **kwargs):
+    raise AssertionError("a --remote run read git or the ledger")
+
+
+def _remote(tmp_path: Path, monkeypatch) -> tuple[Path, dict, dict]:
+    """The container's side of a remote run: (tmp ledger path, the registered row, the stamp).
+
+    REPO_ROOT is outside any git repo. REGISTRATION is built dry, so the tmp ledger never exists.
+    The stamp is what the Mac would pass: a fake 40-hex commit, fake fingerprints (the sha256 of
+    each key's name, never of a file) and this checkout's real weather hashes. Then
+    manifest._git, ledger.rows and ledger.append all raise.
+    """
+    _outside_git(tmp_path, monkeypatch)
+    path = tmp_path / "ledger.jsonl"
+    row = ledger.register(**REGISTRATION, dry=True, path=path)
+    stamp = {
+        "commit": "0123456789abcdef" * 2 + "01234567",  # 40 hex, no commit anywhere
+        "dirty": False,
+        "fingerprints": {
+            key: hashlib.sha256(key.encode()).hexdigest() for key in manifest.FINGERPRINTED
+        },
+        "weather_hashes": scenarios.weather_hashes(),
+    }
+    for module, name in ((manifest, "_git"), (ledger, "rows"), (ledger, "append")):
+        monkeypatch.setattr(module, name, _no_git_or_ledger)
+    return path, row, stamp
+
+
+def _payload(stamp: dict, row: dict) -> str:
+    """--remote's JSON, as train_remote passes it."""
+    return json.dumps({"stamp": stamp, "registered": row})
+
+
+def test_remote_run_writes_the_passed_stamp_verbatim_and_never_reads_git_or_the_ledger(
+    tmp_path, monkeypatch
+):
+    """Done when (#19): train with passed-in fingerprints writes them to the manifest verbatim and
+    never calls git. With --remote, train reads neither git nor the ledger (both raise here) and
+    writes no ledger row: the tmp ledger is never created.
+
+    The manifest holds the stamp's commit, dirty, fingerprints and weather hashes exactly as
+    passed. It names the passed row and its issue (13), is finished at 0 steps (the no-op learn
+    never steps an env), and carries the run's diagnostics for the Mac's run-end. Known answer:
+    PPO.learn is a no-op here, so no update ran and every diagnostic is None (the same as a run
+    that crashed before training).
+    """
+    import greenleaf_control.train as train
+
+    _no_learning(monkeypatch)
+    path, row, stamp = _remote(tmp_path, monkeypatch)
+    runs = tmp_path / "runs"
+    argv = _registered_argv(row["row_id"], runs, remote=_payload(stamp, row))
+    assert train.main(argv, ledger_path=path) == 0
+
+    assert not path.exists()
+    assert [p.name for p in runs.iterdir()] == [row["row_id"]]
+    m = json.loads((runs / row["row_id"] / "a" / "seed0" / "manifest.json").read_text())
+    assert {key: m[key] for key in STAMP_KEYS} == stamp
+    assert (m["registered"], m["issue"], m["smoke"]) == (row["row_id"], 13, False)
+    # 0: the no-op learn never steps an env or calls the callback, whose count train records
+    assert (m["status"], m["timesteps"]) == ("finished", 0)
+    assert m["diagnostics"] == dict.fromkeys(ledger.DIAGNOSTIC_KEYS)
+
+
+STAMP_WEATHER = [
+    pytest.param(
+        lambda hashes: {**hashes, "Amsterdam/2010.csv": "0" * 64},
+        "Amsterdam/2010.csv",
+        id="one-hash-differs",
+    ),
+    pytest.param(
+        lambda hashes: {k: v for k, v in hashes.items() if k != "Amsterdam/2009.csv"},
+        "Amsterdam/2009.csv",
+        id="a-file-the-stamp-lacks",
+    ),
+]
+
+
+@pytest.mark.parametrize(("change", "named"), STAMP_WEATHER)
+def test_remote_run_refuses_weather_that_differs_from_the_stamp(
+    change, named, tmp_path, monkeypatch
+):
+    """The stamp's weather hashes are the Mac's; the container's weather files must hash the same
+    (scenarios.weather_hashes() here), or the run trains on other data than the manifest records.
+
+    One file differs (its hash, or it's missing from the stamp): a RuntimeError names that file
+    and no other, before any run dir exists, PPO trains nothing and no ledger is written.
+    """
+    import greenleaf_control.train as train
+
+    monkeypatch.setattr(PPO, "learn", _refused_before_training)
+    path, row, stamp = _remote(tmp_path, monkeypatch)
+    here = scenarios.weather_hashes()
+    assert named in here and here[named] != "0" * 64
+    stamp = {**stamp, "weather_hashes": change(here)}
+    runs = tmp_path / "runs"
+
+    with pytest.raises(RuntimeError, match=re.escape(named)) as excinfo:
+        argv = _registered_argv(row["row_id"], runs, remote=_payload(stamp, row))
+        train.main(argv, ledger_path=path)
+    others = [key for key in here if key != named and key in str(excinfo.value)]
+    assert not others, f"names files that don't differ: {others}"
+    assert _files(runs) == []
+    assert not path.exists()
+
+
+def test_remote_run_refuses_a_dirty_stamp(tmp_path, monkeypatch):
+    """A stamp from a dirty tree records code no commit holds; a registered run refuses it, as
+    write_manifest refuses a dirty tree, with a RuntimeError saying dirty, before any run dir."""
+    import greenleaf_control.train as train
+
+    monkeypatch.setattr(PPO, "learn", _refused_before_training)
+    path, row, stamp = _remote(tmp_path, monkeypatch)
+    runs = tmp_path / "runs"
+
+    with pytest.raises(RuntimeError, match="dirty"):
+        argv = _registered_argv(row["row_id"], runs, remote=_payload({**stamp, "dirty": True}, row))
+        train.main(argv, ledger_path=path)
+    assert _files(runs) == []
+    assert not path.exists()
+
+
+REMOTE_REFUSALS = [
+    pytest.param(
+        lambda runs, remote: _smoke_argv("ppo", runs, "--remote", remote),
+        ("--remote",),
+        id="with-smoke",
+    ),
+    pytest.param(
+        lambda runs, remote: _registered_argv(OTHER_ROW, runs, remote=remote),
+        ("--remote", OTHER_ROW),
+        id="for-another-row",
+    ),
+]
+
+
+@pytest.mark.parametrize(("make_argv", "named"), REMOTE_REFUSALS)
+def test_remote_flag_is_refused_with_smoke_and_for_another_row(
+    make_argv, named, tmp_path, monkeypatch, capsys
+):
+    """--remote needs --registered, so --smoke --remote refuses; and the row --remote carries
+    must be the one --registered names (here OTHER_ROW, not the passed row).
+
+    Each raises SystemExit (nonzero) or ValueError whose reason names --remote (and, for another
+    row, the --registered id), not argparse's unknown-flag error, before anything is written: no
+    file under runs/ and no ledger.
+    """
+    import greenleaf_control.train as train
+
+    monkeypatch.setattr(PPO, "learn", _refused_before_training)
+    path, row, stamp = _remote(tmp_path, monkeypatch)
+    runs = tmp_path / "runs"
+
+    with pytest.raises((SystemExit, ValueError)) as excinfo:
+        train.main(make_argv(runs, _payload(stamp, row)), ledger_path=path)
+    reason = _refusal(excinfo, capsys).split("error:")[-1]  # argparse's usage lists every flag
+    assert "unrecognized arguments" not in reason, reason
+    for text in named:
+        assert text in reason, reason
+    assert _files(runs) == []
+    assert not path.exists()
+
+
+@pytest.mark.parametrize(
+    ("flags", "named"),
+    [
+        pytest.param({"seed": "1"}, "seed 1", id="seed-not-in-the-row"),
+        pytest.param({"timesteps": "4096"}, "--timesteps 4096", id="timesteps-differ"),
+    ],
+)
+def test_remote_run_checks_its_flags_against_the_passed_row(
+    flags, named, tmp_path, monkeypatch, capsys
+):
+    """With --remote the registration check runs against the passed row, with the ledger never
+    read: REGISTRATION holds seed 0 and 2,048 steps, so --seed 1 and --timesteps 4096 each refuse
+    as they would locally, naming the value, before any run dir."""
+    import greenleaf_control.train as train
+
+    monkeypatch.setattr(PPO, "learn", _refused_before_training)
+    path, row, stamp = _remote(tmp_path, monkeypatch)
+    runs = tmp_path / "runs"
+    argv = _registered_argv(row["row_id"], runs, remote=_payload(stamp, row), **flags)
+
+    with pytest.raises((SystemExit, ValueError)) as excinfo:
+        train.main(argv, ledger_path=path)
+    reason = _refusal(excinfo, capsys).split("error:")[-1]
+    assert "unrecognized arguments" not in reason, reason
+    assert named in reason, reason
+    assert _files(runs) == []
+    assert not path.exists()
+
+
+def test_registered_run_outside_a_git_repo_refuses_without_the_remote_flag(tmp_path, monkeypatch):
+    """Done when (#19): without passed-in fingerprints, inside a non-repo, train refuses. A
+    registered run with no --remote and REPO_ROOT in no git repo raises (git's own error or a
+    RuntimeError) before any run dir or run row: the ledger holds only the registration."""
+    import greenleaf_control.train as train
+
+    _outside_git(tmp_path, monkeypatch)
+    path = tmp_path / "ledger.jsonl"
+    row = ledger.register(**REGISTRATION, path=path)
+    monkeypatch.setattr(PPO, "learn", _refused_before_training)
+    runs = tmp_path / "runs"
+
+    with pytest.raises((subprocess.CalledProcessError, RuntimeError)):
+        train.main(_registered_argv(row["row_id"], runs), ledger_path=path)
+    assert _files(runs) == []
+    assert ledger.rows(path=path) == [row]
+
+
+# A file written after the temp repo's commit, and whether the tree is then dirty. Run dirs under
+# control/runs/ and the ledger file itself don't count; anything else, in control/ledger/ too, does.
+CODE_STAMP_TREES = [
+    pytest.param("control/new.py", True, id="an-untracked-file"),
+    pytest.param("control/README.md", True, id="a-modified-file"),
+    pytest.param("control/ledger/notes.txt", True, id="another-file-in-the-ledger-dir"),
+    pytest.param("control/runs/r/a/seed0/manifest.json", False, id="a-run-dir"),
+    pytest.param("control/ledger/ledger.jsonl", False, id="the-ledger-file"),
+]
+
+
+@pytest.mark.parametrize(("written", "dirty"), CODE_STAMP_TREES)
+def test_code_stamp_refuses_a_dirty_tree_unless_smoke(written, dirty, tmp_path, monkeypatch):
+    """manifest.code_stamp(smoke=...) is write_manifest's git logic on its own, with the same
+    exemptions. In a temp repo laid out like this one (control/ledger/.gitkeep committed), a dirty
+    tree raises RuntimeError naming the file unless smoke, and smoke records dirty True; an exempt
+    file leaves the tree clean either way."""
+    repo = _make_repo(tmp_path, monkeypatch)
+    (repo / "control" / "ledger").mkdir()
+    (repo / "control" / "ledger" / ".gitkeep").write_text("")
+    _commit(repo)
+    file = repo / written
+    file.parent.mkdir(parents=True, exist_ok=True)
+    file.write_text("written after the commit\n")
+
+    if dirty:
+        with pytest.raises(RuntimeError, match=re.escape(written)):
+            manifest.code_stamp(smoke=False)
+    else:
+        assert manifest.code_stamp(smoke=False)["dirty"] is False
+    assert manifest.code_stamp(smoke=True)["dirty"] is dirty
+
+
+def test_code_stamp_matches_what_write_manifest_records(tmp_path, monkeypatch):
+    """code_stamp returns exactly {commit, dirty, fingerprints, weather_hashes} for this checkout,
+    and write_manifest with no stamp records those same four.
+
+    Known answers, in a clean temp repo whose one scorer file is docs/PROTOCOL.md = b"protocol\\n":
+    commit is its HEAD, dirty False, fingerprints the sha256 of those 9 bytes for PROTOCOL.md and
+    None for every other scorer file (not in the repo), and the weather hashes this checkout's.
+    """
+    repo = _make_repo(tmp_path, monkeypatch)
+    (repo / "docs").mkdir()
+    (repo / "docs" / "PROTOCOL.md").write_bytes(b"protocol\n")
+    _commit(repo)
+
+    stamp = manifest.code_stamp(smoke=False)
+    assert set(stamp) == STAMP_KEYS
+    assert (stamp["commit"], stamp["dirty"]) == (_git(repo, "rev-parse", "HEAD"), False)
+    protocol = hashlib.sha256(b"protocol\n").hexdigest()
+    assert stamp["fingerprints"] == {
+        key: protocol if key == "docs/PROTOCOL.md" else None for key in manifest.FINGERPRINTED
+    }
+    assert stamp["weather_hashes"] == scenarios.weather_hashes()
+
+    m = manifest.write_manifest(
+        tmp_path / "run", config=_config("ppo", tmp_path), issue=19, registered=None, smoke=False
+    )
+    assert {key: m[key] for key in STAMP_KEYS} == stamp
 
 
 @pytest.mark.parametrize("method", METHODS)

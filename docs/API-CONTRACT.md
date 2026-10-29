@@ -88,16 +88,25 @@ Paths are relative to `control/`. Scenario dicts are `{"location": str, "growth_
 - Stack order: `SubprocVecEnv → VecMonitor → VecLagrangianReward → VecNormalize`.
 
 ## `greenleaf_control.manifest`
-- `write_manifest(run_dir: Path, *, config: dict, issue: int, registered: str | None, smoke: bool) -> dict`
-  - Refuses an existing `run_dir`, and a dirty git tree unless `smoke`.
+- `code_stamp(*, smoke: bool) -> dict`: `{commit, dirty, fingerprints, weather_hashes}` of this checkout. It
+  refuses a dirty tree unless `smoke`, exempting `control/runs/` and `control/ledger/ledger.jsonl`.
+- `write_manifest(run_dir: Path, *, config: dict, issue: int, registered: str | None, smoke: bool,
+  stamp: dict | None = None) -> dict`
+  - Refuses an existing `run_dir`.
+  - Without `stamp`, takes the four fields from `code_stamp(smoke=smoke)`.
+  - With `stamp` (a remote run, stamped on the Mac):
+    - runs no git and takes the four fields verbatim;
+    - refuses, before any run dir exists, a dirty stamp unless `smoke`, and any weather file whose hash on this
+      machine differs from the stamp's (the RuntimeError names the files).
   - Writes `manifest.json` with:
     - `commit`, `dirty`;
     - `fingerprints` (sha256 of the scorer files and `configs/ppo.yml`), `weather_hashes`;
     - `versions` (python, gl-gym commit, stable-baselines3, torch, gymnasium, casadi, numpy);
     - `config`, `seeds` (`model`, `env`), `host`, `started_at`, `issue`, `registered`, `smoke`.
 - `finish_manifest(run_dir: Path, *, status: str, wall_s: float, timesteps: int, solver_failures: int,
-  cost_usd: float | None) -> dict`
+  cost_usd: float | None, diagnostics: dict | None = None) -> dict`
   - `status` is one of `finished`, `crashed`, `budget-stop`.
+  - A train run's `diagnostics` equal its run-end's.
 - `fingerprints() -> dict`: the scorer and config hashes alone (the ledger uses the same function).
 
 ## `greenleaf_control.ledger` (the only writer of `ledger/ledger.jsonl`)
@@ -125,9 +134,16 @@ Paths are relative to `control/`. Scenario dicts are `{"location": str, "growth_
 
 ## `greenleaf_control.train`
 - `python -m greenleaf_control.train --method M --seed S [--penalty-weight W] [--budget-frac B] [--timesteps N]
-  [--season-length D] [--n-envs 4] [--runs-dir runs] [--rb {tuned,default}] (--smoke | --registered <row>)`
+  [--season-length D] [--n-envs 4] [--runs-dir runs] [--rb {tuned,default}] (--smoke | --registered <row>)
+  [--remote JSON]`
 - `--smoke` caps timesteps at 20,000 and the season at 2 days, writes under `runs/smoke/`, and records no ledger row.
 - Without `--smoke`, `--registered` is required, and the arm and seed must be in that registration.
+- `--remote JSON` (set only by `modal_app.train_remote`) is `{"stamp": <code_stamp>, "registered": <the registered
+  row>}`.
+  - It's refused with `--smoke`, or when the row's id isn't `--registered`.
+  - With it, train reads neither git nor the ledger: the registration check runs against that row, the manifest
+    takes the stamp, and no `run` or `run-end` row is written (the Mac's run_grid records them).
+  - Without it, a registered run outside a git repo refuses before any run dir.
 - `--rb` picks the residual arms' RB params (`configs/rule_based_<rb>.yml`, default `tuned`); the resolved params are
   stored in the manifest as `config["rb_params"]`.
 - **Outputs:**

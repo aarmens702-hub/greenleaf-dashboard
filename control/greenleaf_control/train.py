@@ -10,6 +10,8 @@ model plays one deterministic PAPER season into final_eval.json.
   <runs-dir>/smoke/<method>-seed<S>-<UTC stamp>-<hex> and records no ledger row.
 - --registered <row> runs one cell of that registration (an arm, a seed, its timesteps) into
   <runs-dir>/<row>/<arm>/seed<S> and records its run and run-end rows.
+- --registered <row> --remote '{"stamp": ..., "registered": <row>}' is the same run where there's
+  no git or ledger: the manifest records the passed stamp and the Mac writes the ledger rows.
 
 build_vec_env and build_model are the one way to build a run's envs and model; the probes (S1-9,
 S1-10) will use them.
@@ -230,15 +232,21 @@ def _train(config: dict, run_dir: Path, callback: _RunCallback) -> None:
         venv.close()
 
 
-def _registration(row_id: str, config: dict, ledger_path: Path) -> tuple[dict, dict]:
+def _registration(
+    row_id: str, config: dict, ledger_path: Path, remote: dict | None
+) -> tuple[dict, dict]:
     """The registered row and the one arm this run is; refuses a run the row doesn't hold.
 
     An arm is its method and its config; a run-shaping flag the arm doesn't name must be where
-    leaving the flag out puts it.
+    leaving the flag out puts it. With --remote, the row it carries stands in for the ledger.
     """
-    found = [r for r in ledger.rows(kind="registered", path=ledger_path) if r["row_id"] == row_id]
+    if remote is None:
+        registered, source = ledger.rows(kind="registered", path=ledger_path), ledger_path
+    else:
+        registered, source = [remote["registered"]], "--remote"
+    found = [r for r in registered if r["row_id"] == row_id]
     if not found:
-        raise ValueError(f"--registered {row_id}: no registered row with that id in {ledger_path}")
+        raise ValueError(f"--registered {row_id}: no registered row with that id in {source}")
     [row] = found
     method = config["method"]
     unflagged = {
@@ -313,6 +321,13 @@ def _parser() -> argparse.ArgumentParser:
         "--smoke", action="store_true", help="20,000 steps, 2-day seasons, no ledger row"
     )
     mode.add_argument("--registered", metavar="ROW", help="the registered row this run belongs to")
+    p.add_argument(
+        "--remote",
+        type=json.loads,
+        metavar="JSON",
+        help='a remote registered run: {"stamp": <code_stamp>, "registered": <its row>}; no git,'
+        " no ledger rows",
+    )
     return p
 
 
@@ -326,6 +341,8 @@ def main(argv: list[str] | None = None, *, ledger_path: Path = ledger.LEDGER) ->
         parser.error(f"--budget-frac is for residual_lag only, not {args.method}")
     if lag and args.penalty_weight is not None:
         parser.error("--penalty-weight is refused for residual_lag: it trains with w = 0")
+    if args.smoke and args.remote is not None:
+        parser.error("--remote is for a registered run, not --smoke")
 
     residual = args.method in RESIDUAL
     timesteps, season_length = args.timesteps, args.season_length
@@ -351,7 +368,7 @@ def main(argv: list[str] | None = None, *, ledger_path: Path = ledger.LEDGER) ->
         name = f"{args.method}-seed{args.seed}-{stamp}-{secrets.token_hex(4)}"
         run_dir, row, arm = args.runs_dir / "smoke" / name, None, None
     else:
-        row, arm = _registration(args.registered, config, ledger_path)
+        row, arm = _registration(args.registered, config, ledger_path, args.remote)
         run_dir = args.runs_dir / row["row_id"] / arm["name"] / f"seed{args.seed}"
     config["run_dir"] = str(run_dir)
     if lag:
@@ -363,12 +380,13 @@ def main(argv: list[str] | None = None, *, ledger_path: Path = ledger.LEDGER) ->
         issue=0 if row is None else row["issue"],
         registered=None if row is None else row["row_id"],
         smoke=args.smoke,
+        stamp=None if args.remote is None else args.remote["stamp"],
     )
     callback = _RunCallback(run_dir)
     start = time.monotonic()
     run, status = None, "crashed"
     try:
-        if row is not None:
+        if row is not None and args.remote is None:  # a remote run's rows are the Mac's to write
             run = ledger.run_start(
                 registered=row["row_id"],
                 arm=arm["name"],
@@ -385,12 +403,11 @@ def main(argv: list[str] | None = None, *, ledger_path: Path = ledger.LEDGER) ->
             "timesteps": callback.num_timesteps,
             "solver_failures": callback.solver_failures,
             "cost_usd": None,
+            "diagnostics": callback.diagnostics(),
         }
         manifest.finish_manifest(run_dir, **end)
         if run is not None:
-            ledger.run_end(
-                run=run["row_id"], **end, diagnostics=callback.diagnostics(), path=ledger_path
-            )
+            ledger.run_end(run=run["row_id"], **end, path=ledger_path)
     return 0
 
 
