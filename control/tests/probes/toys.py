@@ -8,6 +8,11 @@ it. Random observations come from self.np_random, seeded by reset(seed=...).
 make(toy, method, *, seed, **_) stands in for greenleaf_control.envs.make_env: the probes patch
 functools.partial(make, Toy) over it, so train.build_vec_env builds its real stack on the toy.
 
+The new-piece probes (issue #15) add two toys. CostEqualsReward is one more make() toy, for the
+Lagrangian. ResidualTarget goes one level lower: make_raw(toy, **_) stands in for
+envs.make_raw_env, so the real envs.make_env puts its ResidualRBWrapper and SolverFailureFlag on
+it. Its action is the wrapper's absolute control, a Box(0, 1, (6,)).
+
 Known answers are stated in raw units (gamma = 0.9631, configs/ppo.yml). The stack trains on
 VecNormalize's rewards, r / sqrt(ret_rms.var + 1e-8) clipped to +-10, where ret_rms tracks the
 running discounted return R_t = gamma * R_{t-1} + r_t, zeroed at each episode end; each docstring
@@ -117,6 +122,58 @@ class ActionTimesObs(_Toy):
     def step(self, action):
         right = (action[0] > 0) == (self.x > 0)
         return self._obs(self.x), 1.0 if right else -1.0, True, False, {}
+
+
+class ResidualTarget(_Toy):
+    """One step, observation 0; the action u is 6 absolute controls in [0, 1], and the reward is
+    -sum_i (u_i - target)^2. info["controls"] is u as the toy received it.
+
+    Known answer: under ResidualRBWrapper with a base controller fixed at 0.30 and scale 0.15, the
+    toy gets u = clip(0.30 + 0.15 a, 0, 1) with a in [-1, 1] (SB3 clips it), so the reward peaks
+    at u = target on every dimension: a* = (target - 0.30) / 0.15, which is 1.0 for target 0.45
+    (on the action bound) and 2/3 for target 0.40 (interior).
+    """
+
+    def __init__(self, target: float):
+        super().__init__()
+        self.action_space = spaces.Box(0.0, 1.0, (6,), np.float32)
+        self.target = target
+
+    def reset(self, *, seed=None, options=None):
+        super().reset(seed=seed)
+        return self._obs(0.0), {}
+
+    def step(self, action):
+        u = np.array(action, dtype=np.float64)
+        reward = -float(np.sum((u - self.target) ** 2))
+        return self._obs(0.0), reward, True, False, {"controls": u}
+
+
+class CostEqualsReward(_Toy):
+    """One step, observation 0; u = (a + 1) / 2 in [0, 1] for a in [-1, 1]; reward u, and info
+    cost_co2 = u, cost_temp = cost_rh = 0 (all three keys, as constraint_costs reads each).
+
+    Known answer, under VecLagrangianReward with budget 0.3 on cost_co2: the reward PPO is shaped
+    with is (u - lambda u) / (1 + lambda) = u (1 - lambda) / (1 + lambda). It rises with u while
+    lambda < 1 and falls while lambda > 1, so u is pushed up or down until the PID's integral
+    stops moving, which needs the rollout's mean cost at the budget: u* = 0.3, and lambda_co2
+    settles near 1.0, the one value at which the shaped reward is flat in u.
+    """
+
+    def reset(self, *, seed=None, options=None):
+        super().reset(seed=seed)
+        return self._obs(0.0), {}
+
+    def step(self, action):
+        u = (float(np.clip(action[0], -1.0, 1.0)) + 1.0) / 2.0
+        info = {"cost_co2": u, "cost_temp": 0.0, "cost_rh": 0.0}
+        return self._obs(0.0), u, True, False, info
+
+
+def make_raw(toy, **_) -> gym.Env:
+    """make_raw_env's stand-in: FlattenObservation(toy()), toy a zero-argument callable; the weather,
+    season and penalty arguments are ignored. make_env resets and seeds what it wraps."""
+    return gym.wrappers.FlattenObservation(toy())
 
 
 def make(toy: type[_Toy], method: str, *, seed: int, **_) -> gym.Env:
