@@ -12,6 +12,10 @@ one "Blocked" line on stderr too; until guard_runs.py exists its tests fail on t
 Issue #26 makes the safety net fail closed: guard_tests.py and protect_secrets.py block a call they
 can't read, the Stop hook (stop_tests.py) sees a .py file inside a brand-new folder under control/,
 and control-ci.yml refuses a stale lockfile, reads the repo only and pins its uv.
+
+Issue #27 closes three gaps: guard_tests.py judges the resolved path, so `tests/..` or a symlink
+can't pass app code off as a test; protect_secrets.py reads a Grep's glob and type, not only its
+path; and stop_tests.py blocks (exit 2) when it can't read its input or git can't say what changed.
 """
 
 import json
@@ -472,6 +476,15 @@ UNREADABLE_CALL = [
         json.dumps({"tool_name": "Bash", "tool_input": {"command": ["cat", "README.md"]}}),
         id="command a list",
     ),
+    # Grep's glob and type pick the files it searches (#27), so they must be strings too.
+    pytest.param(
+        json.dumps({"tool_name": "Grep", "tool_input": {"pattern": "KEY", "glob": ["*.py"]}}),
+        id="Grep glob a list",
+    ),
+    pytest.param(
+        json.dumps({"tool_name": "Grep", "tool_input": {"pattern": "KEY", "type": 5}}),
+        id="Grep type an int",
+    ),
 ]
 
 # A file each guard_tests mode lets its agent edit.
@@ -637,21 +650,31 @@ def _stop_repo(tmp_path: Path) -> tuple[Path, dict]:
     return repo, env
 
 
-def _stop(repo: Path, env: dict) -> subprocess.CompletedProcess:
-    """Run the Stop hook as Claude Code does when a session in repo is about to finish."""
+def _stop(
+    repo: Path,
+    env: dict,
+    stdin: str | None = None,
+    stop_hook_active: bool = False,
+    timeout: float = 30,
+) -> subprocess.CompletedProcess:
+    """Run the Stop hook as Claude Code does when a session in repo is about to finish.
+
+    stdin, when given, is sent as is in place of Claude Code's payload. stop_hook_active says this
+    stop follows one the hook itself blocked.
+    """
     payload = {
         "session_id": "abc123",
         "transcript_path": str(repo.parent / "transcript.jsonl"),
         "cwd": str(repo),
         "hook_event_name": "Stop",
-        "stop_hook_active": False,
+        "stop_hook_active": stop_hook_active,
     }
     return subprocess.run(
         [sys.executable, "-S", str(HOOKS / "stop_tests.py")],
-        input=json.dumps(payload),
+        input=json.dumps(payload) if stdin is None else stdin,
         capture_output=True,
         text=True,
-        timeout=30,
+        timeout=timeout,
         cwd=repo,
         env=env,
     )
@@ -698,6 +721,230 @@ def test_stop_tests_skips_when_no_python_under_control_changed(tmp_path, rel):
         path.write_text("x\n")
     proc = _stop(repo, env)
     assert proc.returncode == 0 and "FAKE-UV-RAN" not in proc.stderr, (proc.returncode, proc.stderr)
+
+
+# ---------------------------------------------------------------------------------------------
+# guard_tests.py (#27): the path is resolved before the test-file rules apply
+# ---------------------------------------------------------------------------------------------
+
+# A scorer file reached through tests/..: it reads as a test but is app code. The relative form is
+# resolved against the project (CLAUDE_PROJECT_DIR, the repo root in _hook).
+SCORER_BEHIND_DOTDOT = [
+    pytest.param(str(CONTROL / "tests/../greenleaf_control/envs.py"), id="absolute"),
+    pytest.param("control/tests/../greenleaf_control/envs.py", id="relative"),
+]
+
+
+@pytest.mark.parametrize("path", SCORER_BEHIND_DOTDOT)
+def test_guard_tests_blocks_the_test_writer_from_app_code_behind_dotdot(path):
+    """`tests/../greenleaf_control/envs.py` is envs.py, a scorer file: the test-writer is blocked.
+    A real test file reached through `..` (control/tests/../tests/test_x.py) still passes.
+    """
+    payload = _file_call("Edit", path)
+    _assert_blocked(_hook("guard_tests.py", payload, "only-tests"), "Blocked: the test-writer")
+    real_test = _file_call("Edit", "control/tests/../tests/test_x.py")
+    _assert_allowed(_hook("guard_tests.py", real_test, "only-tests"))
+
+
+@pytest.mark.parametrize("path", SCORER_BEHIND_DOTDOT)
+def test_guard_tests_lets_the_builder_edit_app_code_behind_dotdot(path):
+    """The builder may edit envs.py however the path is spelt; a golden number reached through
+    `greenleaf_control/..` is still a test file, so the builder is blocked from it.
+    """
+    _assert_allowed(_hook("guard_tests.py", _file_call("Edit", path), "no-tests"))
+    golden = _file_call("Edit", "control/greenleaf_control/../tests/golden/x.json")
+    _assert_blocked(_hook("guard_tests.py", golden, "no-tests"), "Blocked: the builder")
+
+
+@pytest.mark.parametrize(
+    ("mode", "link", "target"),
+    [
+        pytest.param(
+            "only-tests", "tests/link.py", "greenleaf_control/envs.py", id="test-writer, tests/link"
+        ),
+        pytest.param(
+            "no-tests", "greenleaf_control/link.py", "tests/test_x.py", id="builder, package link"
+        ),
+    ],
+)
+def test_guard_tests_judges_a_symlink_by_its_target(tmp_path, mode, link, target):
+    """A symlink is the file it points at: tests/link.py pointing at app code is app code, so the
+    test-writer is blocked; greenleaf_control/link.py pointing at a test is a test, so the builder
+    is blocked.
+    """
+    (tmp_path / target).parent.mkdir(parents=True)
+    (tmp_path / target).write_text("x\n")
+    (tmp_path / link).parent.mkdir(parents=True, exist_ok=True)
+    (tmp_path / link).symlink_to(tmp_path / target)
+    _assert_blocked(_hook("guard_tests.py", _file_call("Edit", tmp_path / link), mode))
+
+
+# ---------------------------------------------------------------------------------------------
+# protect_secrets.py (#27): a Grep's glob and type pick files too
+# ---------------------------------------------------------------------------------------------
+
+# Grep filters (glob or ripgrep type) that select .env, .env.<suffix> or .modal.toml, bare or at any
+# depth. `*` and `.*` select them too and block: an accepted false positive. ripgrep's toml type is
+# *.toml, which takes in .modal.toml, and its all type is every file. A glob through a real folder
+# (control/*, **/control/*) reaches the secret files in it: ripgrep's -g overrides gitignore and
+# hidden-file skipping.
+SECRET_GREP_FILTERS = [
+    pytest.param("glob", ".env", id=".env"),
+    pytest.param("glob", "**/.env*", id="**/.env*"),
+    pytest.param("glob", "*.env", id="*.env"),
+    pytest.param("glob", "{.env,foo}", id="brace group"),
+    pytest.param("glob", "app/.env", id="app/.env"),
+    pytest.param("glob", "*.py .env", id="two globs in one field"),
+    pytest.param("glob", ".*", id=".*"),
+    pytest.param("glob", "*", id="*"),
+    pytest.param("glob", ".modal.toml", id=".modal.toml"),
+    pytest.param("glob", ".env.*", id=".env.*"),
+    pytest.param("glob", "control/*", id="control/*"),
+    pytest.param("glob", "control/.env*", id="control/.env*"),
+    pytest.param("glob", "x/y/z/.env*", id="x/y/z/.env*"),
+    pytest.param("glob", "**/control/*", id="**/control/*"),
+    pytest.param("type", "toml", id="type toml"),
+    pytest.param("type", "all", id="type all"),
+]
+
+# (field, a normal filter, its twin that selects a secret file).
+NORMAL_GREP_FILTERS = [
+    pytest.param("glob", "*.py", "*.env", id="*.py"),
+    pytest.param("glob", "*.{py,md}", "*.{py,env}", id="*.{py,md}"),
+    pytest.param("glob", "envs.py", ".env", id="envs.py"),
+    pytest.param("glob", ".env.example", ".env.local", id=".env.example"),
+    pytest.param("glob", "**/test_*.py", "**/.env*", id="**/test_*.py"),
+    pytest.param("glob", "control/**/*.py", "control/**/.env*", id="control/**/*.py"),
+    pytest.param("type", "py", "toml", id="type py"),
+]
+
+
+def _grep(**tool_input) -> dict:
+    """A Grep for KEY from the repo root, without a path, so only its filter picks the files."""
+    return _call("Grep", ROOT, pattern="KEY", output_mode="content", **tool_input)
+
+
+@pytest.mark.parametrize(("field", "value"), SECRET_GREP_FILTERS)
+def test_protect_secrets_blocks_a_grep_filtered_to_a_secret_file(field, value):
+    """A Grep whose glob or type selects a secret file would print its lines: blocked, like a Grep
+    whose path is one.
+    """
+    _assert_blocked(_hook("protect_secrets.py", _grep(**{field: value})))
+
+
+@pytest.mark.parametrize(("field", "normal", "secret"), NORMAL_GREP_FILTERS)
+def test_protect_secrets_lets_a_grep_with_a_normal_filter_through(field, normal, secret):
+    """A Grep filtered to Python, Markdown, envs.py, .env.example or test files passes, and its twin
+    filtered to a secret file is blocked, so the pass isn't the hook ignoring the filter.
+    """
+    _assert_allowed(_hook("protect_secrets.py", _grep(**{field: normal})))
+    _assert_blocked(_hook("protect_secrets.py", _grep(**{field: secret})))
+
+
+def test_protect_secrets_blocks_a_grep_globbed_to_the_repo_folder():
+    """A Grep of the repo by absolute path, globbed to **/<the repo's folder name>/*, selects every
+    file at the repo's top level, the root .env among them: blocked.
+    """
+    payload = _grep(path=str(ROOT), glob=f"**/{ROOT.name}/*")
+    _assert_blocked(_hook("protect_secrets.py", payload))
+
+
+def test_protect_secrets_blocks_a_brace_blow_up_in_time():
+    """30 empty {,} groups before x.py spell one glob 2**30 ways. Expanding every spelling runs past
+    any hook timeout, and Claude Code lets a call through when its hook times out, so the hook must
+    block a glob it can't judge, well inside _hook's 10 s. A TimeoutExpired here is the failure.
+    """
+    payload = _grep(glob="{,}" * 30 + "x.py")
+    _assert_blocked(_hook("protect_secrets.py", payload))
+
+
+# ---------------------------------------------------------------------------------------------
+# stop_tests.py (#27): input it can't read, or a git that fails, blocks the stop
+# ---------------------------------------------------------------------------------------------
+
+# stdin the Stop hook can't read. Before #27 the first two passed as an empty payload (exit 0) and
+# the rest crashed (exit 1); Claude Code lets the stop through on both. Only exit 2 blocks it.
+UNREADABLE_STOP = [
+    pytest.param("not json", id="not json"),
+    pytest.param("", id="empty"),
+    pytest.param("[]", id="a list"),
+    pytest.param("null", id="null"),
+    pytest.param(json.dumps({"cwd": 5}), id="cwd an int"),
+    pytest.param("[" * 100_000 + "]" * 100_000, id="nested past the recursion limit"),
+]
+
+# Stands in for a git that fails: says so on stderr and exits 128, as git does outside a repo.
+FAILING_GIT = '#!/bin/sh\necho "fatal: FAKE-GIT-FAILED" >&2\nexit 128\n'
+# Stands in for a git that hangs. exec, so the hook's timeout kills sleep itself: a sleep left behind
+# by a killed sh would hold the pipes open and the hook would wait on it.
+HANGING_GIT = "#!/bin/sh\nexec sleep 30\n"
+
+
+def _with_git(tmp_path: Path, env: dict, script: str | None) -> dict:
+    """env with git replaced, once _stop_repo has built the repo with the real one: script becomes
+    the only git on PATH, or, with None, PATH holds no git at all.
+    """
+    bin_dir = tmp_path / "fake-git-bin"
+    bin_dir.mkdir()
+    if script is None:
+        return {**env, "PATH": str(bin_dir)}
+    git = bin_dir / "git"
+    git.write_text(script)
+    git.chmod(0o755)
+    return {**env, "PATH": f"{bin_dir}{os.pathsep}{env['PATH']}"}
+
+
+@pytest.mark.parametrize("stdin", UNREADABLE_STOP)
+def test_stop_tests_fails_closed_on_unreadable_input(tmp_path, stdin):
+    """On a clean repo, where a readable payload passes, stdin that isn't a JSON object or whose cwd
+    isn't a string blocks the stop (exit 2) with the hook's own stop_tests message on stderr. A
+    missing script or an uncaught crash would say "python: can't open file" or "Traceback" instead.
+    """
+    repo, env = _stop_repo(tmp_path)
+    proc = _stop(repo, env, stdin=stdin)
+    assert proc.returncode == 2 and proc.stderr.startswith("stop_tests"), (
+        proc.returncode,
+        proc.stderr,
+    )
+
+
+@pytest.mark.parametrize(
+    "script", [pytest.param(FAILING_GIT, id="git exits 128"), pytest.param(None, id="no git")]
+)
+def test_stop_tests_blocks_when_git_cant_say_what_changed(tmp_path, script):
+    """A git that fails or isn't there can't tell a clean tree from a changed one, so the stop is
+    blocked (exit 2) with the hook's own stop_tests message naming git, not passed as "nothing
+    changed". The stop that follows, stop_hook_active, still passes (exit 0), so the hook can't
+    trap the session in a loop.
+    """
+    repo, env = _stop_repo(tmp_path)
+    env = _with_git(tmp_path, env, script)
+    proc = _stop(repo, env)
+    assert proc.returncode == 2 and proc.stderr.startswith("stop_tests"), (
+        proc.returncode,
+        proc.stderr,
+    )
+    # A whole word: tmp_path's folder (test_..._when_git_c0) doesn't count.
+    assert re.search(r"\bgit\b", proc.stderr, re.IGNORECASE), proc.stderr
+    again = _stop(repo, env, stop_hook_active=True)
+    assert again.returncode == 0, (again.returncode, again.stderr)
+
+
+@pytest.mark.slow
+def test_stop_tests_blocks_when_git_times_out(tmp_path):
+    """A git that hangs past the hook's 20 s timeout blocks the stop (exit 2) with the hook's own
+    stop_tests message naming git. Takes 20 to 40 s: one or two git calls time out before the hook
+    decides.
+    """
+    repo, env = _stop_repo(tmp_path)
+    env = _with_git(tmp_path, env, HANGING_GIT)
+    proc = _stop(repo, env, timeout=90)
+    assert proc.returncode == 2 and proc.stderr.startswith("stop_tests"), (
+        proc.returncode,
+        proc.stderr,
+    )
+    # A whole word: tmp_path's folder (test_..._when_git_t0) doesn't count.
+    assert re.search(r"\bgit\b", proc.stderr, re.IGNORECASE), proc.stderr
 
 
 # ---------------------------------------------------------------------------------------------
