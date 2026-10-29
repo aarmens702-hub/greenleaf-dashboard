@@ -11,7 +11,8 @@ model plays one deterministic PAPER season into final_eval.json.
 - --registered <row> runs one cell of that registration (an arm, a seed, its timesteps) into
   <runs-dir>/<row>/<arm>/seed<S> and records its run and run-end rows.
 - --registered <row> --remote '{"stamp": ..., "registered": <row>}' is the same run where there's
-  no git or ledger: the manifest records the passed stamp and the Mac writes the ledger rows.
+  no git or ledger: the manifest records the passed stamp and the Mac writes the ledger rows. It's
+  refused wherever manifest.REPO_ROOT holds a .git, so a checkout can't skip the dirty-tree check.
 
 build_vec_env and build_model are the one way to build a run's envs and model; the probes (S1-9,
 S1-10) will use them.
@@ -343,6 +344,12 @@ def main(argv: list[str] | None = None, *, ledger_path: Path = ledger.LEDGER) ->
         parser.error("--penalty-weight is refused for residual_lag: it trains with w = 0")
     if args.smoke and args.remote is not None:
         parser.error("--remote is for a registered run, not --smoke")
+    # A file check, not a git call: only the container, which has no checkout, may pass a stamp.
+    if args.remote is not None and (manifest.REPO_ROOT / ".git").exists():
+        parser.error(
+            f"--remote is the container's alone: {manifest.REPO_ROOT} is a git checkout, where a"
+            " run stamps its own code (and refuses a dirty tree)"
+        )
 
     residual = args.method in RESIDUAL
     timesteps, season_length = args.timesteps, args.season_length

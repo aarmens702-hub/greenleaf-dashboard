@@ -1,4 +1,5 @@
-"""Tests for greenleaf_control.run_grid and greenleaf_control.modal_app (issue #17, part 17a).
+"""Tests for greenleaf_control.run_grid and greenleaf_control.modal_app (issue #17, part 17a; issue
+#19, part 19b).
 
 run_grid (docs/API-CONTRACT.md):
 - --dry takes the Measurement's shape as flags, before any registration exists, in ledger
@@ -9,8 +10,20 @@ run_grid (docs/API-CONTRACT.md):
   hands one train argv per arm x seed (what train.main(argv) takes) to the module-level seam
   _run_local(argvs, parallel), which returns each argv's exit code in argvs order. Tests replace
   that seam, so nothing trains here.
-- --backend modal refuses until issue #19 (Record Modal runs): remote runs can't record their
-  ledger rows yet.
+- --registered <row> --backend modal [--parallel 2] (#19b) makes the same checks, then refuses a
+  dirty tree (manifest.code_stamp(smoke=False)) and any cell whose local run dir
+  run_grid.RUNS/<row>/<arm>/seed<S> already exists, before any call. Then, inside one session from
+  the module-level seam _run_remote() (a context manager yielding call(argv, meta) -> the finished
+  manifest, as a dict), --parallel cells at a time: a run row, call(argv, {"stamp": code_stamp,
+  "registered": row}), then a run-end, crashed if the call raised. The Mac is the only ledger
+  writer, and a run-end's cost_usd is its wall_s x the hard limits' price per second. Tests
+  replace _run_remote with a fake session, and tests/conftest.py's autouse fixture makes the real
+  one raise, so nothing here can reach Modal or spend.
+- Before any call it also refuses a cell that already has a run row for the registration (its
+  run dir may be only on the volume, not yet downloaded). call(argv, meta, run_rel) gets
+  run_rel = "<row>/<arm>/seed<S>", the run dir under the volume's /runs. Ctrl-C mid-grid cancels
+  the cells not yet launched (they get no rows), names them, closes the in-flight runs and
+  re-raises.
 
 Print format pinned here (loosely, by regex on stdout):
 - "<n> runs"; "<h> CPU-h" (or CPU-hours); "$<usd>" to the cent;
@@ -21,32 +34,52 @@ Known answers (Modal prices as of 2026-10-28: $0.0000131 per physical core-secon
 per GiB-second; a run is capped at 4 cores, 8,192 MiB = 8 GiB, 4 h = 14,400 s):
 - worst case per run = 14,400 s x (4 x 0.0000131 + 8 x 0.00000222) $/s = 14,400 x 0.00007016 =
   $1.010304; 3 arms x 5 seeds = 15 runs: 15 x 4 h x 4 cores = 240 CPU-h and $15.15456 -> $15.15.
+- one remote run at its hard limits costs 4 x 0.0000131 + 8 x 0.00000222 = 0.0000524 + 0.00001776
+  = $0.00007016 per second of wall clock, so a run-end's cost_usd = wall_s x 0.00007016.
 
-modal_app is imported only in a subprocess with the network blocked and the SDK's config pointed
-at an absent file, so ~/.modal.toml is never read and nothing can reach Modal.
+modal_app (and the SDK) is imported only in a subprocess with the network blocked and the SDK's
+config pointed at an absent file, so ~/.modal.toml is never read and nothing can reach Modal; the
+pytest process never imports either.
 
 greenleaf_control.run_grid and modal_app are imported inside each test body, so while they are
 missing each test FAILS rather than ERRORs at collection. Nothing here may write the real ledger or
 control/runs/; the last test checks both are as they were when this module was collected.
 """
 
+import contextlib
 import inspect
 import json
 import os
 import re
+import signal
 import subprocess
 import sys
 import textwrap
-from pathlib import Path
+import threading
+import time
+from concurrent.futures import CancelledError
+from pathlib import Path, PurePosixPath
 
 import pytest
 
 import greenleaf_control
-from greenleaf_control import ledger, scenarios, train
+from greenleaf_control import ledger, manifest, rule_based, scenarios, train
 
 CONTROL = Path(__file__).resolve().parents[1]
 REAL_LEDGER = CONTROL / "ledger" / "ledger.jsonl"
 REAL_RUNS = CONTROL / "runs"
+SCRIPT = CONTROL / "scripts" / "check_locks.py"
+# One remote run at its hard limits, $ per second of wall clock: 4 cores x $0.0000131 = $0.0000524,
+# plus 8 GiB x $0.00000222 = $0.00001776, so $0.00007016.
+USD_PER_S = 0.00007016
+# CI has no git identity and may sign commits globally; no hook may run in a temp repo.
+COMMIT_CONFIG = (
+    *("-c", "user.name=t", "-c", "user.email=t@t"),
+    *("-c", "commit.gpgsign=false", "-c", "core.hooksPath=/dev/null"),
+)
+CONTAINER_WALL_S = 12_345.0  # a fake manifest's wall_s (the container's), never the Mac's
+PARTNER_WAIT_S = 2.0  # how long a fake call waits for --parallel calls to be in flight
+STOP_WAIT_S = 10.0  # how long an interrupted fake call waits for its session to close
 
 
 def _stat(path: Path) -> tuple[int, int] | None:
@@ -82,6 +115,8 @@ ARM_FLAGS = {
     + ["--season-length", "1", "--n-envs", "1"],
 }
 SEEDS = [3, 7]
+METHOD = {arm["name"]: arm["method"] for arm in ARMS}
+CELLS = [(arm["method"], seed) for arm in ARMS for seed in SEEDS]  # (method, seed), as _cell reads
 REGISTRATION = {
     "issue": 17,
     "hypothesis": "plumbing: run_grid launches every registered cell",
@@ -212,7 +247,8 @@ def _fake_launch(monkeypatch, run_grid, fails=lambda args: False) -> list:
 
 
 def _refused(run_grid, argv: list[str], path: Path, capsys) -> str:
-    """main(argv) must refuse: a ValueError, a nonzero SystemExit or a nonzero return.
+    """main(argv) must refuse: a ValueError, a RuntimeError (code_stamp's dirty tree), a
+    FileExistsError, a nonzero SystemExit or a nonzero return.
 
     Returns the refusal's text: the exception's message (or exit code) plus stdout and stderr.
     """
@@ -222,7 +258,7 @@ def _refused(run_grid, argv: list[str], path: Path, capsys) -> str:
     except SystemExit as exc:
         assert exc.code not in (0, None), "a refusal must exit nonzero"
         text = str(exc.code)
-    except ValueError as exc:
+    except (ValueError, RuntimeError, FileExistsError) as exc:
         text = str(exc)
     else:
         assert code not in (0, None), f"main returned {code!r}; expected a refusal"
@@ -231,15 +267,193 @@ def _refused(run_grid, argv: list[str], path: Path, capsys) -> str:
     return text + captured.out + captured.err
 
 
+def _main(run_grid, argv: list[str], path: Path, capsys) -> tuple[int | None, str]:
+    """main(argv): (its return value, or a SystemExit's code; its stdout plus stderr)."""
+    capsys.readouterr()
+    try:
+        code = run_grid.main(argv, ledger_path=path)
+    except SystemExit as exc:
+        code = exc.code
+    captured = capsys.readouterr()
+    return code, captured.out + captured.err
+
+
+def _git(repo: Path, *args: str) -> str:
+    out = subprocess.run(["git", *args], check=True, cwd=repo, capture_output=True, text=True)
+    return out.stdout.strip()
+
+
+def _commit(repo: Path, message: str) -> None:
+    _git(repo, "add", "-A")
+    _git(repo, *COMMIT_CONFIG, "commit", "-q", "-m", message)
+
+
+def _clean_repo(tmp_path: Path, monkeypatch) -> Path:
+    """A temp git repo laid out like this one (docs/PROTOCOL.md and control/ledger/.gitkeep
+    committed) as manifest.REPO_ROOT, so code_stamp(smoke=False) gives its HEAD, clean."""
+    # A git hook's environment would point these git calls at the real repo.
+    for var in ("GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE"):
+        monkeypatch.delenv(var, raising=False)
+    repo = tmp_path / "repo"
+    (repo / "control" / "ledger").mkdir(parents=True)
+    (repo / "control" / "ledger" / ".gitkeep").write_text("")
+    (repo / "docs").mkdir()
+    (repo / "docs" / "PROTOCOL.md").write_text("protocol\n")
+    _git(repo, "init", "-q")
+    _commit(repo, "init")
+    monkeypatch.setattr(manifest, "REPO_ROOT", repo)
+    return repo
+
+
+def _runs_at(monkeypatch, run_grid, runs: Path) -> None:
+    """runs (not made) becomes run_grid.RUNS and train.RUNS, where a remote run's dir lands."""
+    monkeypatch.setattr(run_grid, "RUNS", runs, raising=False)
+    monkeypatch.setattr(train, "RUNS", runs)
+
+
+def _remote_grid(tmp_path: Path, monkeypatch, run_grid, **over) -> tuple[Path, dict, Path]:
+    """A remote grid's Mac side: a clean temp repo (tmp_path/repo) as REPO_ROOT, tmp_path/runs as
+    the runs dir, and a tmp ledger outside the repo holding REGISTRATION with over replacing its
+    fields. Returns (ledger path, row, runs dir)."""
+    _clean_repo(tmp_path, monkeypatch)
+    runs = tmp_path / "runs"
+    _runs_at(monkeypatch, run_grid, runs)
+    path, row = _registered(tmp_path, **over)
+    return path, row, runs
+
+
+def _cell_diagnostics(seed: int) -> dict:
+    return {"min_approx_kl": seed / 1000, "final_entropy": -1.5, "final_explained_variance": 0.8}
+
+
+def _finished_manifest(args: dict, meta: dict) -> dict:
+    """What train_remote returns for a finished run: its manifest.json, as a dict.
+
+    Its numbers are the cell's own (solver_failures = its seed, min_approx_kl = seed / 1000), so a
+    run-end written from another cell's manifest shows. Its wall_s is the container's
+    (CONTAINER_WALL_S) and its cost_usd None: neither is the Mac's.
+    """
+    seed = args["seed"]
+    return {
+        **meta["stamp"],
+        "config": {"method": args["method"], "seed": seed, "timesteps": args["timesteps"]},
+        "registered": meta["registered"]["row_id"],
+        "issue": meta["registered"]["issue"],
+        "smoke": False,
+        "status": "finished",
+        "wall_s": CONTAINER_WALL_S,
+        "timesteps": args["timesteps"],
+        "solver_failures": seed,
+        "cost_usd": None,
+        "diagnostics": _cell_diagnostics(seed),
+    }
+
+
+def _fake_session(
+    monkeypatch, run_grid, *, error=None, fails=lambda args: False, parallel=2, total=4
+) -> dict:
+    """Replace run_grid._run_remote with a fake session: a context manager yielding
+    call(argv, meta, run_rel), which stands in for train_remote.remote and contacts nothing.
+
+    Each call records (argv, meta, run_rel) and a ("call", (method, seed)) event, waits until
+    `parallel` calls are in flight (or all `total` have started; PARTNER_WAIT_S at most), sleeps
+    0.01 s, then raises error if fails(its train args), else returns the cell's finished manifest.
+
+    Returns the fake's state: opened and closed (session entries and exits), calls, events, peak
+    (the most calls in flight at once), outside (calls made with no session open) and lock.
+    """
+    lock = threading.Condition()
+    state = {
+        **{"opened": 0, "closed": 0, "calls": [], "events": []},
+        **{"in_flight": 0, "peak": 0, "outside": 0, "lock": lock},
+    }
+
+    def started_enough() -> bool:
+        return state["in_flight"] >= parallel or len(state["calls"]) >= total
+
+    def call(argv, meta, run_rel):
+        args = _train_args(argv)
+        with lock:
+            if state["opened"] <= state["closed"]:
+                state["outside"] += 1
+            state["calls"].append((list(argv), meta, run_rel))
+            state["events"].append(("call", _cell(args)))
+            state["in_flight"] += 1
+            state["peak"] = max(state["peak"], state["in_flight"])
+            lock.notify_all()
+            lock.wait_for(started_enough, timeout=PARTNER_WAIT_S)
+        try:
+            time.sleep(0.01)
+            if fails(args):
+                raise error
+            return _finished_manifest(args, meta)
+        finally:
+            with lock:
+                state["in_flight"] -= 1
+
+    @contextlib.contextmanager
+    def run_remote():
+        state["opened"] += 1
+        try:
+            yield call
+        finally:
+            state["closed"] += 1
+
+    monkeypatch.setattr(run_grid, "_run_remote", run_remote, raising=False)
+    return state
+
+
+def _record_appends(monkeypatch, state: dict) -> None:
+    """ledger.append also logs ("append", row) to the fake session's events once the row is
+    written, so each cell's order of run row, call and run-end row can be read off."""
+    inner = ledger.append
+
+    def append(row: dict, path: Path = ledger.LEDGER) -> None:
+        inner(row, path)
+        with state["lock"]:
+            state["events"].append(("append", row))
+
+    monkeypatch.setattr(ledger, "append", append)
+
+
+def _cell_order(events: list) -> dict:
+    """{(method, seed): what happened to that cell, in order}: "run", "call" and "run-end"."""
+    runs, order = {}, {}
+    for event, what in events:
+        if event == "call":
+            cell, kind = what, "call"
+        elif what["kind"] in ("run", "run-end"):
+            kind = what["kind"]
+            run = what if kind == "run" else runs[what["run"]]
+            runs[run["row_id"]] = run
+            cell = (METHOD[run["arm"]], run["seed"])
+        else:
+            continue
+        order.setdefault(cell, []).append(kind)
+    return order
+
+
+def _ends_by_cell(path: Path) -> dict:
+    """{(arm, seed): its run-end} from the ledger at path, through each run-end's run row."""
+    runs = {r["row_id"]: r for r in ledger.rows(kind="run", path=path)}
+    return {
+        (runs[end["run"]]["arm"], runs[end["run"]]["seed"]): end
+        for end in ledger.rows(kind="run-end", path=path)
+    }
+
+
 def test_remote_resources_and_prices_are_module_constants():
     """One remote run's caps and Modal's prices are module constants, read by --dry and by
     modal_app: 4.0 physical cores, 8,192 MiB, 4 h = 14,400 s; $0.0000131 per core-second and
-    $0.00000222 per GiB-second, as of 2026-10-28 (modal.com/pricing; one core is 2 vCPU)."""
+    $0.00000222 per GiB-second, as of 2026-10-28 (modal.com/pricing; one core is 2 vCPU). And
+    run_grid.RUNS, where a remote run's dir lands, is train.RUNS (control/runs): run_grid states it
+    rather than import train (torch, gl_gym)."""
     from greenleaf_control import run_grid
 
     assert (run_grid.CPU, run_grid.MEMORY_MB, run_grid.TIMEOUT_S) == (4.0, 8192, 14_400)
     assert (run_grid.USD_PER_CORE_S, run_grid.USD_PER_GIB_S) == (0.0000131, 0.00000222)
     assert run_grid.PRICES_AS_OF == "2026-10-28"
+    assert run_grid.RUNS == train.RUNS == REAL_RUNS
 
 
 DRY_CASES = [
@@ -476,45 +690,416 @@ REGISTERED_REFUSALS = [
 ]
 
 
+@pytest.mark.parametrize("backend", ["local", "modal"], ids=["local", "remote"])
 @pytest.mark.parametrize(("over", "row_id", "named"), REGISTERED_REFUSALS)
 def test_registered_refuses_before_launching_anything(
-    over, row_id, named, tmp_path, monkeypatch, capsys
+    over, row_id, named, backend, tmp_path, monkeypatch, capsys
 ):
-    """run_grid checks every cell before it launches any: an unknown row, an arm whose method isn't
-    in envs.METHODS, an arm config key that isn't a train flag, or a 2012 TEST split among the
-    registration's scenarios (PROTOCOL §8) each refuse naming what's wrong. The bad arm is the
-    second, after a good one. _run_local is never called and the ledger is byte-identical."""
+    """run_grid checks every cell before it launches any, on either backend: an unknown row, an
+    arm whose method isn't in envs.METHODS, an arm config key that isn't a train flag, or a 2012
+    TEST split among the registration's scenarios (PROTOCOL §8) each refuse naming what's wrong.
+    The bad arm is the second, after a good one. _run_local is never called, no remote session is
+    opened and the ledger is byte-identical. The remote grid has a clean temp repo and an empty
+    runs dir, so only the registration can be what's refused."""
     from greenleaf_control import run_grid
 
+    if backend == "modal":
+        _clean_repo(tmp_path, monkeypatch)
+        _runs_at(monkeypatch, run_grid, tmp_path / "runs")
     path, row = _registered(tmp_path, **over)
     monkeypatch.setattr(run_grid, "_run_local", _no_launch, raising=False)
+    session = _fake_session(monkeypatch, run_grid)
     before = path.read_bytes()
 
-    argv = ["--registered", row_id or row["row_id"], "--backend", "local"]
+    argv = ["--registered", row_id or row["row_id"], "--backend", backend]
     assert named in _refused(run_grid, argv, path, capsys)
     assert path.read_bytes() == before
+    assert (session["opened"], session["calls"]) == (0, [])
 
 
-def test_remote_backend_refuses_until_issue_19_without_importing_the_remote_app(
+def test_registered_remote_records_a_run_and_run_end_per_cell_with_its_cost(
     tmp_path, monkeypatch, capsys
 ):
-    """--backend modal refuses, nonzero, naming issue #19 (Record Modal runs): a remote run can't
-    record its run and run-end rows yet. It refuses before building anything: run_grid is imported
-    afresh here, and neither that import nor the refusal imports greenleaf_control.modal_app.
-    Nothing is launched and the ledger is byte-identical."""
-    path, row = _registered(tmp_path)
+    """Done when (#19): with _run_remote patched to a fake, run_grid --registered <row> --backend
+    modal writes one run and one run-end per arm x seed to a tmp ledger, each run-end with
+    cost_usd > 0.
+
+    The Mac is the only ledger writer. Inside one session, --parallel (default 2) cells at a time,
+    each cell gets a run row, then call(argv, meta, run_rel), then a run-end row. The argv is
+    exactly what the local backend hands train for that cell; meta is {"stamp":
+    manifest.code_stamp(smoke=False) of the clean temp repo, "registered": the row}, and survives
+    JSON as it is (train_remote passes it as --remote); run_rel is the str "<row>/<arm>/seed<S>",
+    the cell's run dir under the volume's /runs, so train_remote reads that manifest and no other.
+    A run row's run_dir is the absolute run_grid.RUNS/run_rel, where the volume's copy lands from
+    control/; run_grid writes nothing there itself. run_grid.RUNS, unpatched, is train's
+    control/runs.
+
+    Known answers: the fake returns each cell's finished manifest, solver_failures = its seed (3 or
+    7) and min_approx_kl = seed / 1000, so a run-end written from another cell's manifest shows.
+    A run-end's wall_s is the Mac's monotonic wall around its call (at least the fake's 0.01 s
+    sleep), not the manifest's 12,345 s, and its cost_usd = wall_s x $0.00007016 per s.
+    """
+    from greenleaf_control import run_grid
+
+    default_runs = getattr(run_grid, "RUNS", None)
+    path, row, runs = _remote_grid(tmp_path, monkeypatch, run_grid)
+    local = _fake_launch(monkeypatch, run_grid)
+    assert (
+        run_grid.main(["--registered", row["row_id"], "--backend", "local"], ledger_path=path) == 0
+    )
+    [(local_argvs, _)] = local
+    stamp = manifest.code_stamp(smoke=False)
+    session = _fake_session(monkeypatch, run_grid)
+    _record_appends(monkeypatch, session)
+
+    argv = ["--registered", row["row_id"], "--backend", "modal"]
+    code, text = _main(run_grid, argv, path, capsys)
+
+    assert code == 0, text
+    argvs = [call_argv for call_argv, _, _ in session["calls"]]
+    assert sorted(argvs) == sorted(local_argvs)
+    assert sorted(map(_train_args, argvs), key=_cell) == _expected_cells(row["row_id"])
+    for _, meta, _ in session["calls"]:
+        assert meta == {"stamp": stamp, "registered": row}
+        assert json.loads(json.dumps(meta)) == meta
+    run_rels = {_cell(_train_args(a)): run_rel for a, _, run_rel in session["calls"]}
+    assert run_rels == {
+        (arm["method"], seed): f"{row['row_id']}/{arm['name']}/seed{seed}"
+        for arm in ARMS
+        for seed in SEEDS
+    }
+    assert all(type(run_rel) is str for run_rel in run_rels.values())
+    # one session, every call inside it, --parallel 2 calls at a time
+    assert (session["opened"], session["closed"], session["outside"]) == (1, 1, 0)
+    assert session["peak"] == 2
+    assert _cell_order(session["events"]) == {cell: ["run", "call", "run-end"] for cell in CELLS}
+
+    reg, *rest = ledger.rows(path=path)
+    assert reg == row
+    assert sorted(r["kind"] for r in rest) == ["run"] * 4 + ["run-end"] * 4
+    for run in ledger.rows(kind="run", path=path):
+        assert (run["registered"], run["status"]) == (row["row_id"], "running")
+        assert Path(run["run_dir"]).is_absolute()
+        assert Path(run["run_dir"]) == runs / row["row_id"] / run["arm"] / f"seed{run['seed']}"
+    ends = _ends_by_cell(path)
+    assert sorted(ends) == sorted((arm["name"], seed) for arm in ARMS for seed in SEEDS)
+    for (_, seed), end in ends.items():
+        assert (end["status"], end["timesteps"], end["solver_failures"]) == ("finished", 2048, seed)
+        assert end["diagnostics"] == _cell_diagnostics(seed)
+        assert 0.009 <= end["wall_s"] < 60, end  # >= the 0.01 s sleep; not the container's 12,345 s
+        assert end["cost_usd"] == pytest.approx(end["wall_s"] * USD_PER_S, rel=1e-9)
+        assert end["cost_usd"] > 0
+    assert not runs.exists()
+    assert default_runs == REAL_RUNS
+
+
+class _Cancelled(BaseException):  # noqa: N818  (named for what it stands in for)
+    """Like a remote input's cancellation: a BaseException, so `except Exception` misses it."""
+
+
+FAILED_CALLS = [
+    pytest.param(RuntimeError("remote train crashed"), id="crash"),
+    pytest.param(TimeoutError("remote call timed out"), id="timeout"),
+    pytest.param(_Cancelled("remote input cancelled"), id="cancelled"),
+]
+
+
+@pytest.mark.parametrize("error", FAILED_CALLS)
+def test_registered_remote_records_a_failed_call_as_crashed(error, tmp_path, monkeypatch, capsys):
+    """Done when (#19): a fake remote crash yields a run-end with status crashed.
+
+    lag_half seed 7's call raises: an error, a timeout, or a BaseException like a cancellation,
+    which `except Exception` would miss. Every cell is still called. main exits nonzero (it may not
+    let the exception escape), with a line naming the failure's arm (or method) and seed 7, and no
+    failure line naming ppo_low_w. That run-end is crashed with timesteps, solver_failures and
+    every diagnostic null (no manifest came back); its wall_s is the Mac's wall around the call
+    and cost_usd = wall_s x $0.00007016 > 0, since a failed call still bills. The other three
+    run-ends are finished.
+    """
+    from greenleaf_control import run_grid
+
+    path, row, _ = _remote_grid(tmp_path, monkeypatch, run_grid)
+    session = _fake_session(
+        monkeypatch, run_grid, error=error, fails=lambda a: _cell(a) == ("residual_lag", 7)
+    )
+
+    argv = ["--registered", row["row_id"], "--backend", "modal"]
+    try:
+        code, text = _main(run_grid, argv, path, capsys)
+    except type(error) as exc:
+        pytest.fail(f"main let {exc!r} escape instead of recording a crashed run-end and exiting 1")
+
+    assert code not in (0, None), text
+    assert len(session["calls"]) == 4
+    failures = [line for line in text.splitlines() if "fail" in line.lower()]
+    assert any(
+        ("lag_half" in line or "residual_lag" in line) and re.search(r"(?<![\d.])7\b", line)
+        for line in failures
+    ), text
+    assert not any("ppo_low_w" in line for line in failures), text
+    ends = _ends_by_cell(path)
+    assert sorted(ends) == sorted((arm["name"], seed) for arm in ARMS for seed in SEEDS)
+    crashed = ends.pop(("lag_half", 7))
+    assert crashed["status"] == "crashed"
+    assert (crashed["timesteps"], crashed["solver_failures"]) == (None, None)
+    assert crashed["diagnostics"] == dict.fromkeys(ledger.DIAGNOSTIC_KEYS)
+    assert crashed["wall_s"] >= 0.009  # the fake sleeps 0.01 s before it raises
+    assert crashed["cost_usd"] == pytest.approx(crashed["wall_s"] * USD_PER_S, rel=1e-9)
+    assert crashed["cost_usd"] > 0
+    assert [end["status"] for end in ends.values()] == ["finished"] * 3
+
+
+def test_a_remote_grid_with_a_crash_passes_check_locks(tmp_path, monkeypatch):
+    """Done when (#19): a fake remote crash yields a run-end with status crashed, and the ledger
+    passes check_locks.
+
+    Laid out like this repo: the ledger is control/ledger/ledger.jsonl in a temp repo, its
+    registration committed. lag_half seed 7's call raises RuntimeError; the grid exits nonzero
+    with every run closed (one crashed run-end, three finished); its rows are committed; then
+    scripts/check_locks.py --repo <the temp repo> exits 0 with one line starting "check_locks:
+    clean": every run has its run-end and the ledger only grew.
+    """
+    from greenleaf_control import run_grid
+
+    repo = _clean_repo(tmp_path, monkeypatch)
+    path = repo / "control" / "ledger" / "ledger.jsonl"
+    row = ledger.register(**REGISTRATION, path=path)
+    _commit(repo, "register")
+    _runs_at(monkeypatch, run_grid, tmp_path / "runs")
+    _fake_session(
+        monkeypatch,
+        run_grid,
+        error=RuntimeError("remote train crashed"),
+        fails=lambda a: _cell(a) == ("residual_lag", 7),
+    )
+
+    try:
+        code = run_grid.main(
+            ["--registered", row["row_id"], "--backend", "modal"], ledger_path=path
+        )
+    except SystemExit as exc:
+        code = exc.code
+    assert code not in (0, None)
+    runs = ledger.rows(kind="run", path=path)
+    ends = ledger.rows(kind="run-end", path=path)
+    assert len(runs) == 4
+    assert sorted(end["run"] for end in ends) == sorted(run["row_id"] for run in runs)
+    assert sorted(end["status"] for end in ends) == ["crashed"] + ["finished"] * 3
+    _commit(repo, "runs and run-ends")
+
+    out = subprocess.run(
+        [sys.executable, str(SCRIPT), "--repo", str(repo)],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert out.returncode == 0, out.stdout + out.stderr
+    lines = out.stdout.splitlines()
+    assert len(lines) == 1 and lines[0].startswith("check_locks: clean"), out.stdout
+
+
+def test_registered_remote_refuses_a_dirty_tree_before_any_call(tmp_path, monkeypatch, capsys):
+    """A remote run's manifest records the Mac's stamp, so the tree must be clean before anything
+    starts: with an untracked control/new.py in the temp repo, --backend modal refuses (code_stamp's
+    RuntimeError or its own) saying dirty and naming the file, before any session opens or any
+    call; the ledger is byte-identical and nothing is written under the runs dir."""
+    from greenleaf_control import run_grid
+
+    path, row, runs = _remote_grid(tmp_path, monkeypatch, run_grid)
+    (manifest.REPO_ROOT / "control" / "new.py").write_text("written after the commit\n")
+    session = _fake_session(monkeypatch, run_grid)
+    before = path.read_bytes()
+
+    text = _refused(run_grid, ["--registered", row["row_id"], "--backend", "modal"], path, capsys)
+    assert "dirty" in text, text
+    assert "control/new.py" in text, text
+    assert (session["opened"], session["calls"]) == (0, [])
+    assert path.read_bytes() == before
+    assert not runs.exists()
+
+
+def test_registered_remote_refuses_an_existing_local_run_dir_before_any_call(
+    tmp_path, monkeypatch, capsys
+):
+    """A remote run's dir comes back to run_grid.RUNS/<row>/<arm>/seed<S> (PROTOCOL §5: written
+    once, never resumed), so an existing one refuses the whole grid before any session opens or
+    any call. Here the last cell's, lag_half seed 7, exists: the refusal names it
+    (<row>/lag_half/seed7), the ledger is byte-identical and the dir is as it was."""
+    from greenleaf_control import run_grid
+
+    path, row, runs = _remote_grid(tmp_path, monkeypatch, run_grid)
+    existing = runs / row["row_id"] / "lag_half" / "seed7"
+    existing.mkdir(parents=True)
+    (existing / "notes.txt").write_text("an earlier run\n")
+    session = _fake_session(monkeypatch, run_grid)
+    before = path.read_bytes()
+
+    text = _refused(run_grid, ["--registered", row["row_id"], "--backend", "modal"], path, capsys)
+    assert f"{row['row_id']}/lag_half/seed7" in text, text
+    assert (session["opened"], session["calls"]) == (0, [])
+    assert path.read_bytes() == before
+    assert _files(runs) == {f"{row['row_id']}/lag_half/seed7/notes.txt": b"an earlier run\n"}
+
+
+def test_registered_remote_refuses_cells_that_already_ran_before_any_call(
+    tmp_path, monkeypatch, capsys
+):
+    """Regression for #19 (19b review): a remote run's dir is only on the volume until `modal
+    volume get` copies it into control/runs, so the local run-dir check misses it, and a second
+    --backend modal on the same registration relaunched every cell into its existing dir on the
+    volume (train refuses it) and recorded each as crashed.
+
+    run_grid refuses any cell that already has a run row for this registration in the ledger,
+    before any session opens or any call, naming the cell. Here lag_half seed 7 ran (its run and
+    run-end rows are in the ledger) and nothing is in the local runs dir: the refusal has a line
+    naming lag_half and seed 7, and the ledger is byte-identical.
+    """
+    from greenleaf_control import run_grid
+
+    path, row, runs = _remote_grid(tmp_path, monkeypatch, run_grid)
+    _run_end(path, row, "lag_half", 7, "finished", wall_s=99.0, timesteps=2048)
+    session = _fake_session(monkeypatch, run_grid)
+    before = path.read_bytes()
+
+    text = _refused(run_grid, ["--registered", row["row_id"], "--backend", "modal"], path, capsys)
+    # first: a grid whose calls all failed also exits nonzero naming lag_half seed 7
+    assert (session["opened"], session["calls"]) == (0, []), text
+    assert any(
+        "lag_half" in line and re.search(r"seed\s?7(?!\d)", line) for line in text.splitlines()
+    ), text
+    assert path.read_bytes() == before
+    assert not runs.exists()
+
+
+def _interrupting_session(monkeypatch, run_grid, *, swallows: bool) -> dict:
+    """A fake session whose first call is where Ctrl-C lands mid-grid.
+
+    That call sends SIGINT to the main thread, as Ctrl-C does: a real signal, so a main thread
+    blocked waiting on the cells wakes at once (_thread.interrupt_main() wouldn't wake it until a
+    cell finished, by when the pool has started the next). It then stays in flight until the
+    session closes (STOP_WAIT_S at most) and raises, as a real call does when its app stops. A
+    later call raises at once.
+
+    With swallows, a KeyboardInterrupt reaching the session's exit is caught there and the session
+    returns normally, as the real one does (the SDK's _run_app catches the first KeyboardInterrupt,
+    disconnects and returns, so `with app.run()` suppresses it); otherwise it propagates. Returns
+    its state: run_rel of each call, in order, sigints, and swallowed (interrupts it caught).
+    """
+    closed = threading.Event()
+    state = {"calls": [], "sigints": 0, "swallowed": 0}
+    lock = threading.Lock()
+
+    def call(argv, meta, run_rel):
+        with lock:
+            state["calls"].append(run_rel)
+            first = len(state["calls"]) == 1
+        if first:
+            state["sigints"] += 1
+            signal.pthread_kill(threading.main_thread().ident, signal.SIGINT)
+            closed.wait(timeout=STOP_WAIT_S)
+        raise RuntimeError("the remote app stopped: input cancelled")
+
+    @contextlib.contextmanager
+    def run_remote():
+        try:
+            yield call
+        except KeyboardInterrupt:
+            if not swallows:
+                raise
+            state["swallowed"] += 1  # disconnect and return normally, as _run_app does
+        finally:
+            closed.set()
+
+    monkeypatch.setattr(run_grid, "_run_remote", run_remote)
+    return state
+
+
+@pytest.mark.parametrize("swallows", [True, False], ids=["session-swallows", "session-reraises"])
+def test_ctrl_c_mid_grid_launches_no_queued_cell_and_closes_the_one_in_flight(
+    swallows, tmp_path, monkeypatch, capsys
+):
+    """Regression for #19 (19b review): on Ctrl-C mid-grid, the pool still ran every queued cell
+    after shutdown began, so each wrote a run row, failed at once against the stopped app and got
+    a crashed run-end: runs that never trained, recorded as crashes. And the real session swallows
+    the interrupt (the SDK's _run_app catches it, disconnects and returns), after which asking a
+    cancelled cell's future for its exception raised CancelledError.
+
+    --parallel 1 over the 4 cells: the first cell's call is in flight when Ctrl-C (a SIGINT to the
+    main thread) lands, and the other 3 are queued. The outcome is the same whether the session
+    swallows the interrupt or lets it through. Pinned: KeyboardInterrupt propagates out of main
+    (run_grid re-raises it after the session and the pool close; never a CancelledError, never an
+    exit code). Known answers: exactly one call and one run row, closed by a crashed run-end (no
+    open run); the 3 queued cells get no row and are never called; the output has a line saying
+    "not launched" (any case) naming each queued cell's arm and seed.
+    """
+    from greenleaf_control import run_grid
+
+    path, row, _ = _remote_grid(tmp_path, monkeypatch, run_grid)
+    session = _interrupting_session(monkeypatch, run_grid, swallows=swallows)
+    argv = ["--registered", row["row_id"], "--backend", "modal", "--parallel", "1"]
+    threads_before = set(threading.enumerate())
+    capsys.readouterr()
+
+    old_handler = signal.signal(signal.SIGINT, signal.default_int_handler)  # SIGINT is Ctrl-C
+    try:
+        outcome = f"main returned {run_grid.main(argv, ledger_path=path)!r}"
+    except KeyboardInterrupt:
+        outcome = "KeyboardInterrupt"
+    except CancelledError as exc:  # a cancelled cell's future asked for its result or exception
+        outcome = f"CancelledError {exc!r}"
+    finally:
+        signal.signal(signal.SIGINT, old_handler)
+    # A main that waits for its pool leaves no thread; one that doesn't may leave workers still
+    # writing rows, joined here where they're still listed (best effort, for a wrong build only).
+    for thread in set(threading.enumerate()) - threads_before:
+        thread.join(timeout=STOP_WAIT_S)
+    captured = capsys.readouterr()
+    text = captured.out + captured.err
+
+    assert session["sigints"] == 1
+    assert outcome == "KeyboardInterrupt", outcome
+    runs = ledger.rows(kind="run", path=path)
+    assert len(runs) == 1, [(r["arm"], r["seed"]) for r in runs]
+    [run] = runs
+    assert len(session["calls"]) == 1, session["calls"]
+    ends = _ends_by_cell(path)
+    assert list(ends) == [(run["arm"], run["seed"])]
+    assert ends[(run["arm"], run["seed"])]["status"] == "crashed"
+    queued = sorted({(arm["name"], seed) for arm in ARMS for seed in SEEDS} - set(ends))
+    assert len(queued) == 3
+    lines = [line for line in text.splitlines() if "not launched" in line.lower()]
+    for arm, seed in queued:
+        assert any(arm in line and re.search(rf"(?<![\d.]){seed}\b", line) for line in lines), (
+            arm,
+            seed,
+            text,
+        )
+
+
+def test_remote_grid_with_a_faked_session_never_imports_the_remote_app(
+    tmp_path, monkeypatch, capsys
+):
+    """run_grid imports the remote app (and with it the SDK) only inside the real _run_remote, so
+    neither importing run_grid nor a grid whose session is faked imports greenleaf_control.modal_app
+    or modal: the pytest process never holds the SDK. run_grid is imported afresh here and its own
+    _run_remote replaced by the fake; the grid calls all 4 cells and exits 0."""
+    assert "modal" not in sys.modules, "an earlier test imported the SDK into the pytest process"
     for name in ("run_grid", "modal_app"):
         monkeypatch.delitem(sys.modules, f"greenleaf_control.{name}", raising=False)
         monkeypatch.delattr(greenleaf_control, name, raising=False)
     import greenleaf_control.run_grid as run_grid
 
-    monkeypatch.setattr(run_grid, "_run_local", _no_launch, raising=False)
-    before = path.read_bytes()
+    path, row, _ = _remote_grid(tmp_path, monkeypatch, run_grid)
+    session = _fake_session(monkeypatch, run_grid)
 
-    argv = ["--registered", row["row_id"], "--backend", "modal"]
-    assert "#19" in _refused(run_grid, argv, path, capsys)
+    code, text = _main(
+        run_grid, ["--registered", row["row_id"], "--backend", "modal"], path, capsys
+    )
+
+    assert code == 0, text
+    assert len(session["calls"]) == 4
     assert "greenleaf_control.modal_app" not in sys.modules
-    assert path.read_bytes() == before
+    assert "modal" not in sys.modules
 
 
 CLI_REFUSALS = [
@@ -621,6 +1206,9 @@ _OFFLINE_IMPORT = textwrap.dedent(
         "cpu": info.cpu,
         "memory_mib": info.memory_mib,
         "timeout": info.timeout,
+        "max_retries": info.max_retries,
+        "single_use_containers": info.single_use_containers,
+        "nonpreemptible": info.nonpreemptible,
         "volumes": {path: mount.name for path, mount in info.volumes.items()},
         "calls": calls,
         "attempts": attempts,
@@ -700,6 +1288,24 @@ def test_remote_function_caps_cpu_and_memory_at_hard_limits(remote_import):
     assert report["memory_mib"] == [8192, 8192]
 
 
+def test_remote_function_runs_each_input_once_in_its_own_container(remote_import):
+    """A remote run is attempted once: train_remote has retries=0, so a failed or preempted input
+    isn't rerun (a rerun would meet train's refusal of its existing run dir on the volume, or bill
+    twice) and the Mac records it as crashed. single_use_containers=True: a container takes one
+    input and shuts down, so no run inherits another's process.
+
+    Known answer: modal 1.6.3's Function.info() holds, offline, max_retries = the retry policy's
+    retries (0 for retries=0, None when retries is unset) and single_use_containers as given.
+    nonpreemptible is reported, not pinned: it stays the SDK's default (False) until Aarmen's call
+    on spend.
+    """
+    _, result = remote_import
+    report = _report(result)
+
+    shown = {k: report[k] for k in ("max_retries", "single_use_containers", "nonpreemptible")}
+    assert (report["max_retries"], report["single_use_containers"]) == (0, True), shown
+
+
 def _flat(values) -> list:
     """apt_install and add_local_python_source take strings or lists of strings."""
     return [v for item in values for v in (item if isinstance(item, list) else [item])]
@@ -741,6 +1347,169 @@ def test_remote_image_is_the_frozen_uv_lock_with_cpu_torch_and_the_source(remote
         r"marker = \"sys_platform == 'linux'\" \}"
     )
     assert re.search(cpu_torch, (CONTROL / "uv.lock").read_text())
+
+
+def test_remote_image_carries_the_configs_and_the_weather(remote_import):
+    """train reads configs/ (ppo.yml, the rule-based YAMLs) and data/weather/ (hashed into the
+    manifest, which must match the Mac's stamp) next to the package: rule_based.CONFIGS is
+    control/configs and scenarios.WEATHER_DIR control/data/weather. The image puts the
+    greenleaf_control source at /root/greenleaf_control, so the image adds control/configs at
+    /root/configs and control/data/weather at /root/data/weather with add_local_dir, and train
+    finds both there. (uv sync installs dependencies only, so neither comes with it.)"""
+    assert rule_based.CONFIGS == CONTROL / "configs"
+    assert scenarios.WEATHER_DIR == CONTROL / "data" / "weather"
+    _, result = remote_import
+    calls = _report(result)["calls"]
+
+    added = {
+        Path(call["args"]["local_path"]).resolve(): PurePosixPath(call["args"]["remote_path"])
+        for call in calls
+        if call["name"] == "add_local_dir"
+    }
+    assert added.get((CONTROL / "configs").resolve()) == PurePosixPath("/root/configs"), calls
+    weather = (CONTROL / "data" / "weather").resolve()
+    assert added.get(weather) == PurePosixPath("/root/data/weather"), calls
+
+
+# train_remote's body, run offline in a fresh interpreter (sockets blocked, the SDK's config an
+# absent file) through the SDK's Function.local(), which runs the decorated function here (1.6.3
+# has no get_raw_f). modal_app.RUNS is a tmp dir already holding an OLDER run's manifest;
+# modal_app.vol is a fake whose commit() writes ANOTHER concurrent run's manifest (what the
+# volume's reload on commit exposes); greenleaf_control.train is a fake module whose main writes
+# THIS run's manifest under --runs-dir, then returns or raises. Prints, per scenario, what
+# train_remote returned or raised, the order of train and commit, and the argv train got.
+BODY = {
+    "argv": ["--method", "ppo", "--seed", "0", "--timesteps", "2048"]
+    + ["--registered", "registered-0badc0de"],
+    "meta": {
+        "stamp": {"commit": "0" * 40, "dirty": False},
+        "registered": {"row_id": "registered-0badc0de"},
+    },
+    "this": "registered-0badc0de/a/seed0",  # this run's run_rel
+    "older": "registered-00000000/a/seed0",  # a run already on the volume
+    "other": "registered-0badc0de/b/seed1",  # a concurrent run's, exposed by commit's reload
+}
+_OFFLINE_BODY = textwrap.dedent(
+    """
+    import json
+    import pathlib
+    import socket
+    import sys
+    import types
+
+    attempts = []
+
+    def blocked(*args, **kwargs):
+        attempts.append(repr(args)[:200])
+        raise OSError("the network is blocked in this test")
+
+    socket.socket.connect = blocked
+    socket.socket.connect_ex = blocked
+    socket.create_connection = blocked
+    socket.getaddrinfo = blocked
+
+    import greenleaf_control
+    from greenleaf_control import modal_app
+
+    tmp, body = pathlib.Path(sys.argv[1]), json.loads(sys.argv[2])
+
+    def write(runs, rel, who, status):
+        path = runs / rel / "manifest.json"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps({"who": who, "status": status}))
+
+    def scenario(name, crash):
+        runs = tmp / name
+        write(runs, body["older"], "older", "finished")
+        seen = {"events": [], "argv": None}
+
+        class Volume:
+            def commit(self):
+                seen["events"].append("commit")
+                write(runs, body["other"], "other", "finished")
+
+        def main(argv):
+            seen["events"].append("train")
+            seen["argv"] = list(argv)
+            runs_dir = pathlib.Path(argv[argv.index("--runs-dir") + 1])
+            write(runs_dir, body["this"], "this", "crashed" if crash else "finished")
+            if crash:
+                raise RuntimeError("train crashed")
+            return 0
+
+        train = types.ModuleType("greenleaf_control.train")
+        train.main = main
+        sys.modules["greenleaf_control.train"] = train
+        greenleaf_control.train = train
+        modal_app.RUNS = runs
+        modal_app.vol = Volume()
+        try:
+            # .local() runs the decorated function here, as calling it directly would
+            returned = modal_app.train_remote.local(body["argv"], body["meta"], body["this"])
+            error = None
+        except Exception as exc:
+            returned, error = None, f"{type(exc).__name__}: {exc}"
+        return {**seen, "returned": returned, "error": error, "runs": str(runs)}
+
+    print(json.dumps({
+        "finished": scenario("finished", crash=False),
+        "crashed": scenario("crashed", crash=True),
+        "attempts": attempts,
+    }))
+    """
+)
+
+
+@pytest.fixture(scope="module")
+def remote_body(tmp_path_factory) -> subprocess.CompletedProcess:
+    """One offline run of train_remote's body in a subprocess, both scenarios; asserts nothing."""
+    tmp = tmp_path_factory.mktemp("remote-body")
+    env = {k: v for k, v in os.environ.items() if not k.upper().startswith("MODAL_")}
+    env["MODAL_CONFIG_PATH"] = str(tmp / "absent.toml")
+    return subprocess.run(
+        [sys.executable, "-c", _OFFLINE_BODY, str(tmp), json.dumps(BODY)],
+        env=env,
+        cwd=tmp,
+        capture_output=True,
+        text=True,
+        timeout=600,
+        check=False,
+    )
+
+
+def test_train_remote_returns_its_own_runs_manifest_after_one_commit(remote_body):
+    """Regression for #19 (19b review): vol.commit() reloads the volume, so after it the volume
+    shows other containers' new manifests too, and train_remote's "the one new manifest.json"
+    glob raised on a finished, paid run.
+
+    train_remote(argv, meta, run_rel) runs train with argv + --runs-dir <RUNS> + --remote
+    <json of meta>, commits the volume once, after train, and returns the manifest at
+    RUNS/run_rel/manifest.json, found by its path. Known answer: {"who": "this", "status":
+    "finished"}, not the older run's or the concurrent one the commit exposed. Nothing reaches the
+    network.
+    """
+    report = _report(remote_body)
+    finished = report["finished"]
+
+    assert report["attempts"] == []
+    assert finished["error"] is None, finished["error"]
+    assert finished["returned"] == {"who": "this", "status": "finished"}
+    assert finished["events"] == ["train", "commit"]
+    argv = finished["argv"]
+    assert argv[: len(BODY["argv"])] == BODY["argv"]
+    assert argv[argv.index("--runs-dir") + 1] == finished["runs"]
+    assert json.loads(argv[argv.index("--remote") + 1]) == BODY["meta"]
+
+
+def test_train_remote_commits_once_and_reraises_when_train_crashes(remote_body):
+    """A crashed run's manifest and checkpoints must reach the volume too: when train raises
+    RuntimeError("train crashed"), train_remote commits the volume once, after train, and the
+    error propagates as it was, so the Mac's call raises and records the run as crashed."""
+    report = _report(remote_body)
+    crashed = report["crashed"]
+
+    assert crashed["error"] == "RuntimeError: train crashed", crashed
+    assert crashed["events"] == ["train", "commit"], crashed
 
 
 @pytest.mark.slow

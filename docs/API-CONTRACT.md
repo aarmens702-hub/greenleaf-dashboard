@@ -140,7 +140,8 @@ Paths are relative to `control/`. Scenario dicts are `{"location": str, "growth_
 - Without `--smoke`, `--registered` is required, and the arm and seed must be in that registration.
 - `--remote JSON` (set only by `modal_app.train_remote`) is `{"stamp": <code_stamp>, "registered": <the registered
   row>}`.
-  - It's refused with `--smoke`, or when the row's id isn't `--registered`.
+  - It's refused with `--smoke`, when the row's id isn't `--registered`, and wherever `REPO_ROOT/.git` exists (a file
+    check, not a git call), so a local caller can't skip the dirty-tree check.
   - With it, train reads neither git nor the ledger: the registration check runs against that row, the manifest
     takes the stamp, and no `run` or `run-end` row is written (the Mac's run_grid records them).
   - Without it, a registered run outside a git repo refuses before any run dir.
@@ -294,8 +295,25 @@ Paths are relative to `control/`. Scenario dicts are `{"location": str, "growth_
       (train's `penalty_weight, budget_frac, season_length, n_envs, rb`) and any scenario in `scenarios.TEST`.
     - Then runs `python -m greenleaf_control.train --method M [--<key> V ...] --seed S --timesteps T --registered
       <row>` once per arm × seed, `--parallel` at a time, and exits 1 naming the arm and seed of any failure.
-    - run_grid writes no ledger row; each train run records its own.
-    - `--backend modal` refuses until #19 (remote runs can't record ledger rows, fingerprints or cost yet).
+    - Locally, run_grid writes no ledger row; each train run records its own.
+    - `--backend modal`: the Mac is the only ledger writer.
+      - It runs the same pre-launch refusals, then stamps the code with `manifest.code_stamp(smoke=False)` (refusing a
+        dirty tree), and refuses any cell whose local run dir `RUNS/<row>/<arm>/seed<S>` already exists. All of this
+        happens before any call.
+      - It opens one remote session (`_run_remote()`) and runs the cells `--parallel` at a time. For each cell it
+        writes a `run` row (run_dir = that absolute local path, where `modal volume get greenleaf-runs <row> runs`
+        from `control/` lands it), calls `train_remote(argv, {"stamp", "registered": row}, "<row>/<arm>/seed<S>")`,
+        then writes a `run-end`:
+        - the returned manifest's status, timesteps, solver_failures and diagnostics;
+        - `crashed` with null fields if the call raised anything (a crash, OOM at the hard memory limit, the 4 h
+          timeout, a cancellation, a preemption rerun hitting the existing run dir).
+      - `wall_s` is the Mac's monotonic wall around the call, and `cost_usd = wall_s × (CPU × USD_PER_CORE_S +
+        MEMORY_MB/1024 × USD_PER_GIB_S)` ($0.00007016/s).
+      - Also refused before any call: any cell that already has a `run` row for this registration (a remote run dir
+        lives only on the volume until it's downloaded).
+      - The pool outlives the session. On a Ctrl-C or any early exit, cells still queued are cancelled (no ledger
+        rows, listed as not launched), and the error re-raises.
+      - It exits 1 naming the failed cells.
   - `--issue N --arms '<JSON list of {name, method, config}>' --seeds S [S ...] --timesteps T --dry [--parallel 2]`,
     run before registering. It writes nothing and prints:
     - the run count;
@@ -304,10 +322,16 @@ Paths are relative to `control/`. Scenario dicts are `{"location": str, "growth_
       `train_remote`'s limits equal its requests;
     - the wall clock from the newest `finished` run-end with timesteps > 0, so never a tune_rb run (wall_s / timesteps
       × T, × ceil(runs / parallel) locally); with none, "no measured run".
-- `modal_app` (import contacts nothing; nothing calls it before #19):
+- `modal_app` (import contacts nothing; only run_grid's `_run_remote` calls it):
   - `app = modal.App("greenleaf")`;
   - image: `debian_slim(python_version="3.12")` + `apt_install("git")` + `uv_sync(<absolute control/>, frozen=True)` +
-    `add_local_python_source("greenleaf_control")`;
-  - `train_remote(argv: list[str]) -> str`, with hard limits `cpu=(4.0, 4.0)`, `memory=(8192, 8192)` ((request,
-    limit) pairs) and `timeout=4*3600`;
+    `add_local_python_source("greenleaf_control")` + `add_local_dir(control/configs, "/root/configs")` +
+    `add_local_dir(control/data/weather, "/root/data/weather")`. Every weather file ships, the sealed 2012 included:
+    they're hashed against the stamp, never trained on.
+  - `train_remote(argv: list[str], meta: dict, run_rel: str) -> dict`:
+    - hard limits `cpu=(4.0, 4.0)`, `memory=(8192, 8192)` ((request, limit) pairs), `timeout=4*3600`, `retries=0`,
+      `single_use_containers=True` (`nonpreemptible` stays False, pending Aarmen's spend call);
+    - runs `train.main([*argv, "--runs-dir", "/runs", "--remote", json.dumps(meta)])`, commits the volume in a
+      `finally`, and returns `/runs/<run_rel>/manifest.json`, read by its own path (the commit reloads the volume, so
+      other containers' manifests are visible).
   - volume `greenleaf-runs` (`create_if_missing=True`) mounted at `/runs`.

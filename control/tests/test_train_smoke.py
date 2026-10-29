@@ -12,7 +12,8 @@ registration, a run-shaping flag its arm doesn't name must be at its CLI default
 
 Issue #19 (part 19a): a remote run gets --remote '{"stamp": <manifest.code_stamp>, "registered":
 <row>}' and reads neither git nor the ledger; its manifest takes the stamp verbatim and, like every
-registered run's, carries the run's diagnostics.
+registered run's, carries the run's diagnostics. Part 19b: only the container may pass --remote,
+so train refuses it where manifest.REPO_ROOT holds a .git (a checkout).
 
 Known answers used throughout:
 - One day is 96 steps (86,400 s / 900 s), so --season-length 1 is a 96-step season and 2 is 192.
@@ -913,15 +914,19 @@ def _no_git_or_ledger(*args, **kwargs):
     raise AssertionError("a --remote run read git or the ledger")
 
 
-def _remote(tmp_path: Path, monkeypatch) -> tuple[Path, dict, dict]:
+def _remote(tmp_path: Path, monkeypatch, *, checkout: bool = False) -> tuple[Path, dict, dict]:
     """The container's side of a remote run: (tmp ledger path, the registered row, the stamp).
 
-    REPO_ROOT is outside any git repo. REGISTRATION is built dry, so the tmp ledger never exists.
-    The stamp is what the Mac would pass: a fake 40-hex commit, fake fingerprints (the sha256 of
-    each key's name, never of a file) and this checkout's real weather hashes. Then
-    manifest._git, ledger.rows and ledger.append all raise.
+    REPO_ROOT is outside any git repo (with checkout, a clean temp git repo, as on the Mac).
+    REGISTRATION is built dry, so the tmp ledger never exists. The stamp is what the Mac would
+    pass: a fake 40-hex commit, fake fingerprints (the sha256 of each key's name, never of a file)
+    and this checkout's real weather hashes. Then manifest._git, ledger.rows and ledger.append all
+    raise.
     """
-    _outside_git(tmp_path, monkeypatch)
+    if checkout:
+        _make_repo(tmp_path, monkeypatch)
+    else:
+        _outside_git(tmp_path, monkeypatch)
     path = tmp_path / "ledger.jsonl"
     row = ledger.register(**REGISTRATION, dry=True, path=path)
     stamp = {
@@ -984,6 +989,12 @@ STAMP_WEATHER = [
         "Amsterdam/2009.csv",
         id="a-file-the-stamp-lacks",
     ),
+    # The Mac has a weather file the container doesn't: the image didn't ship it.
+    pytest.param(
+        lambda hashes: {**hashes, "Amsterdam/2013.csv": "0" * 64},
+        "Amsterdam/2013.csv",
+        id="a-file-this-machine-lacks",
+    ),
 ]
 
 
@@ -994,15 +1005,16 @@ def test_remote_run_refuses_weather_that_differs_from_the_stamp(
     """The stamp's weather hashes are the Mac's; the container's weather files must hash the same
     (scenarios.weather_hashes() here), or the run trains on other data than the manifest records.
 
-    One file differs (its hash, or it's missing from the stamp): a RuntimeError names that file
-    and no other, before any run dir exists, PPO trains nothing and no ledger is written.
+    One file differs (its hash, it's missing from the stamp, or it's missing here because the image
+    didn't ship it): a RuntimeError names that file and no other, before any run dir exists, PPO
+    trains nothing and no ledger is written.
     """
     import greenleaf_control.train as train
 
     monkeypatch.setattr(PPO, "learn", _refused_before_training)
     path, row, stamp = _remote(tmp_path, monkeypatch)
     here = scenarios.weather_hashes()
-    assert named in here and here[named] != "0" * 64
+    assert change(here).get(named) != here.get(named)  # the change is to that file
     stamp = {**stamp, "weather_hashes": change(here)}
     runs = tmp_path / "runs"
 
@@ -1068,6 +1080,33 @@ def test_remote_flag_is_refused_with_smoke_and_for_another_row(
     assert "unrecognized arguments" not in reason, reason
     for text in named:
         assert text in reason, reason
+    assert _files(runs) == []
+    assert not path.exists()
+
+
+def test_remote_flag_is_refused_inside_a_git_repo(tmp_path, monkeypatch, capsys):
+    """#19b: --remote takes a passed stamp instead of reading git, so only the container, which has
+    no git checkout, may use it; on the Mac it would skip the dirty-tree check. train refuses
+    --remote where manifest.REPO_ROOT holds a .git, and checks the filesystem for it, not git:
+    here git, the ledger and PPO.learn all raise.
+
+    REPO_ROOT is a clean temp git repo and the payload is the one the container's run accepts, so
+    the .git is the only reason to refuse: SystemExit (nonzero), ValueError or RuntimeError whose
+    reason names --remote, before any run dir, and no ledger is written.
+    """
+    import greenleaf_control.train as train
+
+    monkeypatch.setattr(PPO, "learn", _refused_before_training)
+    path, row, stamp = _remote(tmp_path, monkeypatch, checkout=True)
+    assert (manifest.REPO_ROOT / ".git").exists()
+    runs = tmp_path / "runs"
+
+    with pytest.raises((SystemExit, ValueError, RuntimeError)) as excinfo:
+        train.main(
+            _registered_argv(row["row_id"], runs, remote=_payload(stamp, row)), ledger_path=path
+        )
+    reason = _refusal(excinfo, capsys).split("error:")[-1]  # argparse's usage lists every flag
+    assert "--remote" in reason, reason
     assert _files(runs) == []
     assert not path.exists()
 
