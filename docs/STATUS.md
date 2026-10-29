@@ -22,11 +22,13 @@
   - #16 overfit probe (`57e113a`), #14 probe ladder (`c39b482`), #18 `viz.py` (`d6955d1`);
   - #17a `stats`/`run_grid`/`modal_app` (`a5618eb`), #13c `selection.py` (`e7d5476`, closing #13), #17b `tune_rb` (`14feb9e`, closing #17);
   - #19a passed-in code stamp for remote runs (`d8caeee`), #20 the selection CLI and per-arm numbers (`d84dbff`), #19b remote runs recorded from the Mac (`78f04d5`, closing #19).
-- **Stage 1, open:** only #15, the residual-offset and Lagrangian probes (`.worktrees/15`, both probes written but uncommitted; waiting on Aarmen: Open decision 0). Every other Stage 1 issue is shipped with CI green.
+- **Stage 1 is done** (2026-10-28): #15 shipped as `6d86993`, and the whole ladder (27 slow tests) is green.
+- **Stage 4, free parts:** #23 dashboard cleanup (`c87bdf9`: fresh clone starts, screenshots, root CI fixed); #21 media (in review).
+- **E1 (#22)** is written up with a proposed Measurement and waits for Aarmen's yes before registration (the decision rule is his).
 - **Filed 2026-10-28:** #19, recording Modal runs (ledger rows, fingerprints, cost, configs and weather in the image). Due before E2. Until it lands, `run_grid --backend modal` refuses.
 
 ## To do, in order
-1. **Finish Stage 1:** #15 (waiting on Aarmen, Open decision 0). No experiment before all of Stage 1 is shipped. E1 runs locally and needs only #15 settled, plus Aarmen's look at TUNE_SPACE.
+1. **E1 (#22):** Aarmen confirms or edits the Measurement (TUNE_SPACE, decision rule), then it registers and runs locally (~1.5 h, $0).
 2. **Aarmen, before E1:** veto or keep the TUNE_SPACE default (Defaults taken, #17b).
 3. **Stage 2** (E1 … E6): experiments, each pre-registered. File them with `/new-task` once Stage 1 is green. Ask GreenLeaf (D6) is built in parallel.
 4. **Stage 3:** the final (once), then the analysis.
@@ -38,14 +40,15 @@
 
 ## Open decisions for Aarmen
 ### Decide before the stage that needs it
-0. **#15's Lagrangian probe (blocks shipping #15; matters for E5).**
-   - What holds: on the toy (reward = cost = u, budget 0.3), the PID-Lagrangian holds mean cost in 0.3 ± 0.05 at both seeds (0.319, 0.295).
-   - What fails: λ_co2 never settles. It cycles 0.72 to 1.20 around ≈1.0 with a period of about 6 to 7 updates, so the issue's "std of the last 10 updates < 10% of the mean" gives 0.098 (seed 0) and 0.105 (seed 1, fail).
-   - The likely cause: PPO moves cost a roughly fixed step per update (an on/off switch), and the PID integral cycles around it.
-   - Options: (a) judge "settled" over whole cycles (the drift of λ's 30-update mean); (b) change kp/ki (contract defaults; an E5 call); (c) accept "cost held, λ cycles ±20%" as the known answer.
-   - Default: none taken. Changing a probe's criterion is yours.
-   - The residual probe passes. Details are on #15; the worktree `.worktrees/15` holds both probes uncommitted.
-1. **Root CI breaks `master` on the first `/promote`.** `.github/workflows/ci.yml:33` runs a bare `pytest -q` from the root, which collects `control/tests/` (import-file mismatch with the root `tests/test_smoke.py`, and no `gl_gym` there). The PR path filter hides it, so the PR looks green and master goes red on merge. Fix: `pytest -q tests`. It's a dashboard file, so it needs an issue and a yes.
+0. **#15's replaced "settled" criterion (shipped 2026-10-28 as `6d86993`; veto open).**
+   - The issue's "std of the last 10 λ updates < 10% of the mean" failed at seed 1 (0.105): λ settles into a limit cycle (0.72 to 1.20, period ~6-7) around ≈1.0.
+   - Under your "complete everything that costs no money", I took option (a), over the last 30 of 120 updates:
+     - (3) drift between consecutive 30-update means < 10%;
+     - (4) mean λ = 1.0 ± 0.15 (the known answer);
+     - (5) every λ within 1.0 ± 0.5 (that value chosen after seeing the traces).
+   - Measured: mean λ 1.0018 / 1.0011, drift 1.6% / 0.9%, λ 0.80-1.17 / 0.83-1.17. A fast synthetic-log test shows the criterion rejects a climb, the cap, 0, 1.3 and a 0/2 swing.
+   - Veto or keep. If you veto, tell me which criterion you want, and the probe changes before E5.
+1. ~~Root CI breaks `master` on the first `/promote`.~~ Fixed in #23 (`c87bdf9`): `pytest -q tests`, with derived data built first.
 2. **The probe bar vs rung 7.** AGENTS.md says a probe runs "in under ~2 min on the Mac", but #16's overfit probe needs the issue's ~200k steps: `model.learn` alone took 130 s at load 7 to 10, and the whole test 118 to 280 s depending on load. Default: accept it for rung 7 (it's `@slow`, so off the Stop hook and CI) and add "rung 7 excepted" to the bar.
 3. **The `final` reviewer can't read `control/results/final/`** (blocked in every guard_runs mode). Decide how the final's review reads its results before the final issue.
 4. **PID recovery speed (before E5).** Decided 2026-10-28: the integral is clamped to [0, `lambda_max`] (#12). That stops unbounded windup, but it does not make λ recover within a run at the defaults: costs are ≥ 0, so the integral drops by at most `ki` per update, and from the cap λ needs (`lambda_max` − `kp`)/`ki` updates to reach 0 at zero cost: 1,990 at the defaults (100, 0.5, 0.05), against ~244 updates per run. A budget of 0 sends λ to the cap on the first violation. Prompt recovery needs a smaller `lambda_max` or a larger `ki`, both per-run settings; choose them when registering E5.
