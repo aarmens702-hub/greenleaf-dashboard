@@ -118,14 +118,14 @@ Paths are relative to `control/`. Scenario dicts are `{"location": str, "growth_
   | `registered` | `hypothesis`, `arms` (list of {name, method, config}), `seeds`, `timesteps`, `scenarios` (split names), `primary`, `guards`, `rule`, `budget` ({cpu_hours, usd, backend}), `owner_ok` |
   | `run` | `registered`, `arm`, `seed`, `run_dir`, `status: "running"` |
   | `run-end` | `run`, `status`, `wall_s`, `timesteps`, `solver_failures`, `cost_usd`, `diagnostics` ({min_approx_kl, final_entropy, final_explained_variance}) |
-  | `result` | `registered`, `per_arm` ({iqm, ci_low, ci_high, guards, crashed, invalid_episodes, spend_usd}), `selected` ({run → checkpoint}) |
+  | `result` | `registered`, `per_arm` ({iqm, ci_low, ci_high (null when no run was scored), guards ({guard: {iqm, ci_low, ci_high}}), crashed, invalid_episodes, spend_usd (the arm's run-ends' cost_usd, null as 0)}), `selected` ({run row_id → `"<steps>"` \| `"final"`}, learning runs only) |
   | `decision` | `result`, `decision` (adopted or dropped), `note` |
   | `final-registered` | `checkpoints`, `baselines`, `approved_by`, `approved_at` |
   | `final-result` | `final-registered`, `per_split` |
 
 - **CLI** (`python -m greenleaf_control.ledger`):
   - `register ... [--dry]`
-  - `result --registered <row>`
+  - `result --registered <row> --numbers <file>`: `<file>` is `{per_arm, selected}` as `selection` writes it; the ledger adds `crashed` and `spend_usd` from the run-ends and refuses them in the file
   - `decide --result <row> --adopted|--dropped --note "..."`
   - `show [--issue N] [--spend]`
   - `final-register ... --approved-by Aarmen`
@@ -211,6 +211,32 @@ Paths are relative to `control/`. Scenario dicts are `{"location": str, "growth_
     - `budgets` and `tolerance` (1.1), both residual_lag only, else null;
     - `candidates: {name: {per_scenario: [run_policy result dicts], mean_paper_return, mean_profit_eur_m2, mean_cost:
       {co2, temp, rh} or null, qualifies: bool or null}}`.
+- `RESULTS` = `control/results/validation`. `RESULT_KEYS` = a scored season's numeric keys (`metrics.episode_metrics`'
+  keys except `valid`, plus `paper_reward_sum`).
+- `main(argv=None, *, ledger_path=ledger.LEDGER) -> int`; CLI `python -m greenleaf_control.selection --registered <row>
+  [--out FILE]`, `--out` defaulting to `RESULTS/<row>.json`, created exclusively.
+  - **Refused before anything is scored or written:**
+    - an existing `--out`;
+    - an unknown row;
+    - scenarios other than exactly `["validation"]`;
+    - an arm whose method is neither in `envs.METHODS` nor `rb_tuned` (`rb_default`, `zero_controls`, `random` have no
+      run rows; compare them with `evaluate --controller ... --split validation`);
+    - a primary or guard not in `RESULT_KEYS`;
+    - any run without a `run-end`;
+    - a registered arm × seed never run;
+    - an arm × seed with more than one run that didn't crash;
+    - an existing `selected.json` that isn't VALIDATION at 60 days.
+  - **Scored**, per arm and registered seed (sorted): the run whose run-end isn't `crashed` (a crashed run beside a
+    finished rerun scores the rerun).
+    - A learning arm uses its `selected.json`, or `select_checkpoint(run_dir)`: the chosen checkpoint's
+      `per_scenario`, with no second evaluation.
+    - `rb_tuned` uses `evaluate.run_rb(<run_dir>/rule_based_tuned.yml["GreenLightEnv"], s, 60)` for s in VALIDATION.
+  - **Writes** `{per_arm, selected}` (sorted keys, indent 2, no NaN):
+    - `per_arm[arm]` = {iqm, ci_low, ci_high, guards: {g: {iqm, ci_low, ci_high}}, invalid_episodes};
+    - each is `stats.iqm_ci` on the runs (by seed) × VALIDATION array, all null when no run was scored;
+    - no `crashed` or `spend_usd`.
+  - **Prints** one line per arm (primary and guards as iqm [lo, hi], n_runs, invalid_episodes). It ends with
+    `n<5: no claim` under 5 scored runs, or `deterministic, 1 run` for a one-run rb_tuned arm.
 - `stats.iqm_ci(scores: np.ndarray, reps: int = 2000, seed: int = 0) -> tuple[float, float, float]`
   - `scores` is 2-D, runs × tasks (seeds × scenarios); anything else raises ValueError.
   - Returns `(iqm, ci_low, ci_high)` as Python floats.
