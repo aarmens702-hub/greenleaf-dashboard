@@ -136,7 +136,7 @@ Per episode:
 
 ## 9. Experiment sequence (each an `experiment` issue, VALIDATION only)
 - **E1:** tune the RB (`rb_tuned`).
-- **E2:** reproduce PPO on PAPER (`ppo_paper`, 3 seeds): PPO beats `rb_default` on profit and penalties, as the
+- **E2:** reproduce PPO on PAPER (`ppo_paper`, 5 seeds): PPO beats `rb_default` on profit and penalties, as the
   paper's Figure 2 shows.
 - **E3:** `ppo` on TRAIN (5 seeds) against `rb_tuned`.
 - **E4:** `residual` at w ∈ {0.5, 1, 4} (5 seeds each).
