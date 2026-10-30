@@ -10,9 +10,20 @@ __pycache__/
 *.pyc
 .DS_Store
 .pytest_cache/
+/logs/
 /docs/corpus/*
 !/docs/corpus/.gitkeep
 .env
 *.env
-.claude/skills/
+# Claude Code: the harness (agents, hooks, skills, settings.json) is tracked;
+# personal and stale tool state is not.
+.claude/skills/developing-with-streamlit/
+.claude/tdd-guard/
+.claude/settings.local.json
 .streamlit/secrets.toml
+
+# Worktrees (/start-task) and GreenLeaf 2.0 local state
+.worktrees/
+control/.venv/
+control/runs/
+.modal.toml

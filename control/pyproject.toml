@@ -1,0 +1,58 @@
+[project]
+name = "greenleaf-control"
+version = "0.1.0"
+description = "GreenLeaf 2.0: a reinforcement-learning co-pilot for a tomato greenhouse, on GreenLight-Gym"
+requires-python = ">=3.12,<3.13"
+license = "AGPL-3.0-or-later"
+dependencies = [
+    "gl-gym @ git+https://github.com/BartvLaatum/GreenLight-Gym2@2d3febb",
+    "stable-baselines3>=2.3,<3",
+    "torch",
+    "optuna>=3.6",
+    "rliable==1.2.0",
+    "pyarrow<26",  # 26 needs numpy >= 2; gl-gym pins numpy < 2
+    "matplotlib",
+    "pyyaml",
+    "tensorboard",
+    "modal",
+    "requests",
+]
+
+[dependency-groups]
+dev = [
+    "pytest",
+    "hypothesis",
+    "ruff",
+]
+
+[build-system]
+requires = ["hatchling>=1.27"]
+build-backend = "hatchling.build"
+
+[tool.hatch.metadata]
+allow-direct-references = true
+
+[tool.hatch.build.targets.wheel]
+packages = ["greenleaf_control"]
+
+[[tool.uv.index]]
+name = "pytorch-cpu"
+url = "https://download.pytorch.org/whl/cpu"
+explicit = true
+
+[tool.uv.sources]
+torch = [{ index = "pytorch-cpu", marker = "sys_platform == 'linux'" }]
+
+[tool.ruff]
+target-version = "py312"
+line-length = 100
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B", "UP", "BLE", "S110", "E722"]
+ignore = ["E501"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+markers = [
+    "slow: over ~10 s; excluded from the Stop hook and CI",
+]

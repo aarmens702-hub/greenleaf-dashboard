@@ -1,0 +1,57 @@
+{
+  "provenance": {
+    "measured_at": "2026-10-28T19:27:16.198672+00:00",
+    "commit": "964a1949dcbc26781a153658d8aec812b1115d5e",
+    "machine": "arm64 Darwin 24.5.0",
+    "python": "3.12.7",
+    "gl_gym": "2d3febb",
+    "scenario": {
+      "location": "Amsterdam",
+      "growth_year": 2010,
+      "start_day": 59
+    },
+    "note": "measured by the orchestrator for #11; changing a value needs Aarmen's yes at /ship's scorer gate"
+  },
+  "upstream_rb_default_return": {
+    "value": 3104.5770693403633,
+    "steps": 5761,
+    "protocol_reference": {
+      "value": 3104.58,
+      "source": "PROTOCOL §7: bench.py, 2026-10-27",
+      "gl_gym": "2d3febb",
+      "python": "3.12",
+      "machine": "M3",
+      "commit": null,
+      "note": "printed to 2 decimals; no repo commit"
+    }
+  },
+  "ours": {
+    "rb_default": {
+      "profit_eur_m2": -4.697726335099438,
+      "viol_hours_co2": 0.0,
+      "viol_hours_temp": 79.5,
+      "viol_hours_rh": 629.75,
+      "yield_kg_m2": 11.417890405427057,
+      "paper_return": 3104.215901554114,
+      "steps": 5760
+    },
+    "zero_controls": {
+      "profit_eur_m2": 2.8939136431528767,
+      "viol_hours_co2": 572.5,
+      "viol_hours_temp": 970.0,
+      "viol_hours_rh": 1376.75,
+      "yield_kg_m2": 1.8086960269705479,
+      "paper_return": -969.4492465459682,
+      "steps": 5760
+    },
+    "random": {
+      "profit_eur_m2": -29.881332316342935,
+      "viol_hours_co2": 0.0,
+      "viol_hours_temp": 1000.25,
+      "viol_hours_rh": 599.75,
+      "yield_kg_m2": 4.846549496367945,
+      "paper_return": 467.1279507186817,
+      "steps": 5760
+    }
+  }
+}

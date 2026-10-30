@@ -55,7 +55,7 @@ def test_single_tool():
     assert out["answer"].startswith("Precision benefit is large")
     assert len(out["trace"]["tool_calls"]) == 1
     assert out["trace"]["tool_calls"][0] == {
-        "name": "precision_benefit_summary", "args": {}, "status": "ok",
+        "name": "precision_benefit_summary", "args": {}, "status": "ok", "truncated": False,
     }
     assert out["trace"]["hit_max"] is False
     # A successful data tool becomes a data source.
@@ -88,6 +88,24 @@ def test_max_iterations():
     assert out["trace"]["iterations"] == 4
     assert len(out["trace"]["tool_calls"]) == 4
     assert isinstance(out["answer"], str) and out["answer"]   # a final answer is still returned
+
+
+def test_trace_has_observability_fields():
+    """P1: the trace carries request_id, derived routing, and the silent-failure flags."""
+    script = [
+        _tool_msg("avg_profit_by_crop"),
+        _final_msg("Strawberry pays best [avg_profit_by_crop]."),
+    ]
+    with mock.patch.object(agent, "_chat", side_effect=script):
+        out = agent.answer("which crop is most profitable")
+    tr = out["trace"]
+    assert isinstance(tr["request_id"], str) and len(tr["request_id"]) >= 8
+    # A data tool fired, no document search -> DATA route.
+    assert tr["routing"]["needs_data"] is True
+    assert tr["routing"]["needs_docs"] is False
+    assert tr["empty_retrieval"] is False        # no search happened
+    assert tr["any_truncated"] is False
+    assert "cost_cad" in tr and "tokens_in" in tr
 
 
 def test_tool_error_recovery():

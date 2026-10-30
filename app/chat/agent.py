@@ -14,14 +14,14 @@ plumbing. Tool results are appended to the messages array as role="tool" turns.
 import json
 
 import pandas as pd
-import httpx
 
-from app.chat import router
 from app.chat import data_queries as dq
+from app.chat import llm
+from app.core import config
+from app.core import obs
 from app.rag.retrieve import retrieve
 
-AGENT_MODEL = "deepseek-chat"
-_TRUNC = 4000  # cap each tool result fed back to the model
+_TRUNC = config.TOOL_RESULT_TRUNC  # cap each tool result fed back to the model
 
 # ---------------------------------------------------------------------------
 # query_data — the flexible, SAFE escape hatch (parameterized pandas only).
@@ -481,13 +481,15 @@ def _execute_tool(name, args):
 
 
 def _tool_content(result):
-    """Serialize a tool result to a string for the messages array (truncated)."""
+    """Serialize a tool result to a string for the messages array (UNtruncated; the
+    caller applies _TRUNC and records whether truncation occurred, so the silent
+    evidence loss is visible in the trace)."""
     if isinstance(result, str):
-        return result[:_TRUNC]
+        return result
     try:
-        return json.dumps(result, default=str)[:_TRUNC]
+        return json.dumps(result, default=str)
     except (TypeError, ValueError):
-        return str(result)[:_TRUNC]
+        return str(result)
 
 
 # ---------------------------------------------------------------------------
@@ -545,25 +547,30 @@ _FORCE_FINAL_NUDGE = (
 )
 
 
-def _chat(messages, tools=None, max_tokens=1024):
-    """One DeepSeek chat-completions call. Returns the assistant message dict
-    ({role, content, tool_calls?}). SWAP POINT for the provider."""
-    if not router.USE_LIVE_API:
-        raise RuntimeError(
-            "No LLM API key is set, so live calls are disabled. Get a key at "
-            "https://platform.deepseek.com and export DEEPSEEK_API_KEY."
-        )
-    payload = {"model": AGENT_MODEL, "messages": messages, "max_tokens": max_tokens, "stream": False}
-    if tools is not None:
-        payload["tools"] = tools
-    resp = httpx.post(
-        f"{router.DEEPSEEK_BASE_URL}/chat/completions",
-        headers={"Authorization": f"Bearer {router.API_KEY}", "Content-Type": "application/json"},
-        json=payload,
-        timeout=120.0,
-    )
-    resp.raise_for_status()
-    return resp.json()["choices"][0]["message"]
+def _new_meter():
+    """A per-answer accumulator for LLM telemetry (calls/tokens/cost/latency)."""
+    return {"llm_calls": 0, "tokens_in": 0, "tokens_out": 0, "cost_cad": 0.0, "llm_ms": 0}
+
+
+def _accumulate(meter, result):
+    """Fold one llm.ChatResult's usage into the meter."""
+    meter["llm_calls"] += 1
+    usage = result.usage or {}
+    meter["tokens_in"] += int(usage.get("prompt_tokens", 0) or 0)
+    meter["tokens_out"] += int(usage.get("completion_tokens", 0) or 0)
+    meter["cost_cad"] = round(meter["cost_cad"] + (result.cost_cad or 0.0), 6)
+    meter["llm_ms"] += int(result.latency_ms or 0)
+
+
+def _chat(messages, tools=None, max_tokens=1024, meter=None):
+    """One model turn via the LLM seam (app/chat/llm.py). Returns the assistant
+    message dict ({role, content, tool_calls?}); when `meter` is given, this call's
+    token/cost/latency are folded into it for the trace. The provider SWAP POINT now
+    lives in llm.chat() (retry/backoff, split timeout, fallback, usage capture)."""
+    result = llm.chat(messages, tools=tools, max_tokens=max_tokens)
+    if meter is not None:
+        _accumulate(meter, result)
+    return result.message
 
 
 def _assistant_entry(msg):
@@ -585,17 +592,19 @@ def _parse_args(raw):
         return {}
 
 
-def answer(question, max_iterations=6):
+def answer(question, max_iterations=config.AGENT_MAX_ITERATIONS):
     """Answer a question with an agentic tool-calling loop.
 
     Args: question (str); max_iterations (int) — hard cap on model turns.
-    Returns: {answer, sources, trace:{iterations, tool_calls, hit_max}}.
+    Returns: {answer, sources, trace:{iterations, tool_calls, hit_max, llm_calls,
+    tokens_in, tokens_out, cost_cad, llm_ms}}.
     """
     messages = [
         {"role": "system", "content": AGENT_SYSTEM},
         {"role": "user", "content": question},
     ]
-    tool_calls_trace = []      # {name, args, status}
+    request_id = obs.new_request_id()
+    tool_calls_trace = []      # {name, args, status, truncated}
     data_sources = []          # {type:data, tool, function, args}
     doc_candidates = []        # {title, source_url}
     seen_data = set()
@@ -604,10 +613,11 @@ def answer(question, max_iterations=6):
     iterations = 0
     hit_max = False
     final_text = None
+    meter = _new_meter()
 
     while iterations < max_iterations:
         iterations += 1
-        msg = _chat(messages, tools=TOOL_SCHEMAS)
+        msg = _chat(messages, tools=TOOL_SCHEMAS, meter=meter)
         messages.append(_assistant_entry(msg))
         calls = msg.get("tool_calls") or []
         if not calls:
@@ -618,7 +628,9 @@ def answer(question, max_iterations=6):
             name = fn.get("name", "")
             args = _parse_args(fn.get("arguments"))
             result, status = _execute_tool(name, args)
-            tool_calls_trace.append({"name": name, "args": args, "status": status})
+            raw = _tool_content(result)
+            truncated = len(raw) > _TRUNC
+            tool_calls_trace.append({"name": name, "args": args, "status": status, "truncated": truncated})
             if status == "ok" and name == "search_documents" and isinstance(result, list):
                 for c in result:
                     url = c.get("source_url") or ""
@@ -634,13 +646,13 @@ def answer(question, max_iterations=6):
             messages.append({
                 "role": "tool",
                 "tool_call_id": call.get("id", ""),
-                "content": _tool_content(result),
+                "content": raw[:_TRUNC],
             })
     else:
         # Loop exhausted without a final answer: make one forced answer call (no tools).
         hit_max = True
         messages.append({"role": "user", "content": _FORCE_FINAL_NUDGE})
-        msg = _chat(messages, tools=None)
+        msg = _chat(messages, tools=None, meter=meter)
         final_text = msg.get("content") or "I can't answer that from GreenLeaf's data."
 
     if final_text is None:
@@ -651,12 +663,41 @@ def answer(question, max_iterations=6):
     docs = cited if cited else doc_candidates
     sources = [{"type": "doc", **d} for d in docs] + data_sources
 
-    return {
-        "answer": final_text,
-        "sources": sources,
-        "trace": {
-            "iterations": iterations,
-            "tool_calls": tool_calls_trace,
-            "hit_max": hit_max,
-        },
+    # Observability: derive the route from the tools actually called (this is what
+    # populates the previously-dead 'Reasoning' chip in the UI), and flag the silent
+    # failure modes — searches that returned nothing, and tool output truncation.
+    search_happened = any(c["name"] == "search_documents" for c in tool_calls_trace)
+    routing = {
+        "needs_docs": search_happened,
+        "needs_data": any(c["name"] != "search_documents" for c in tool_calls_trace),
+        "reasoning": "derived from tools actually called",
     }
+    empty_retrieval = bool(search_happened) and not doc_candidates
+    any_truncated = any(c.get("truncated") for c in tool_calls_trace)
+    n_tool_errors = sum(1 for c in tool_calls_trace if c.get("status") == "error")
+
+    trace = {
+        "request_id": request_id,
+        "iterations": iterations,
+        "tool_calls": tool_calls_trace,
+        "hit_max": hit_max,
+        "routing": routing,
+        "empty_retrieval": empty_retrieval,
+        "any_truncated": any_truncated,
+        "n_tool_errors": n_tool_errors,
+        "llm_calls": meter["llm_calls"],
+        "tokens_in": meter["tokens_in"],
+        "tokens_out": meter["tokens_out"],
+        "cost_cad": meter["cost_cad"],
+        "llm_ms": meter["llm_ms"],
+    }
+    obs.log_answer({
+        "event": "answer", "request_id": request_id, "iterations": iterations,
+        "hit_max": hit_max, "n_tools": len(tool_calls_trace), "n_tool_errors": n_tool_errors,
+        "empty_retrieval": empty_retrieval, "any_truncated": any_truncated, "routing": routing,
+        "tokens_in": meter["tokens_in"], "tokens_out": meter["tokens_out"],
+        "cost_cad": meter["cost_cad"], "llm_ms": meter["llm_ms"],
+        "question_chars": len(question or ""),
+    })
+
+    return {"answer": final_text, "sources": sources, "trace": trace}

@@ -1,0 +1,397 @@
+{
+  "k": 5,
+  "n_labeled": 28,
+  "n_total": 34,
+  "hit@k": 1.0,
+  "recall@k": 1.0,
+  "mrr": 0.9464,
+  "ndcg@k": 0.9605,
+  "index": {
+    "embedding_model": "all-MiniLM-L6-v2",
+    "corpus_version": "842e972ef5bc7fe790290284f136c487a587707fae701e9bbe9ff72ed66b495b",
+    "chunk_count": 18
+  },
+  "per_question": [
+    {
+      "id": "doc-climate-1",
+      "type": "doc",
+      "hit@k": 1.0,
+      "recall@k": 1.0,
+      "mrr": 1.0,
+      "ndcg@k": 1.0,
+      "top": [
+        "bc_climate_heat.md",
+        "bc_energy_costs.md",
+        "labor_costs_shortages.md"
+      ]
+    },
+    {
+      "id": "doc-climate-2",
+      "type": "doc",
+      "hit@k": 1.0,
+      "recall@k": 1.0,
+      "mrr": 1.0,
+      "ndcg@k": 1.0,
+      "top": [
+        "bc_climate_heat.md",
+        "bc_energy_costs.md",
+        "crop_growing_characteristics.md"
+      ]
+    },
+    {
+      "id": "doc-climate-3",
+      "type": "doc",
+      "hit@k": 1.0,
+      "recall@k": 1.0,
+      "mrr": 1.0,
+      "ndcg@k": 1.0,
+      "top": [
+        "bc_climate_heat.md",
+        "bc_energy_costs.md",
+        "canada_greenhouse_industry_2024.md",
+        "crop_growing_characteristics.md"
+      ]
+    },
+    {
+      "id": "doc-energy-1",
+      "type": "doc",
+      "hit@k": 1.0,
+      "recall@k": 1.0,
+      "mrr": 1.0,
+      "ndcg@k": 1.0,
+      "top": [
+        "bc_energy_costs.md",
+        "fertilizer_input_prices.md",
+        "canada_greenhouse_industry_2024.md",
+        "labor_costs_shortages.md"
+      ]
+    },
+    {
+      "id": "doc-energy-2",
+      "type": "doc",
+      "hit@k": 1.0,
+      "recall@k": 1.0,
+      "mrr": 1.0,
+      "ndcg@k": 1.0,
+      "top": [
+        "bc_energy_costs.md",
+        "labor_costs_shortages.md",
+        "bc_climate_heat.md",
+        "canada_greenhouse_industry_2024.md"
+      ]
+    },
+    {
+      "id": "doc-energy-3",
+      "type": "doc",
+      "hit@k": 1.0,
+      "recall@k": 1.0,
+      "mrr": 1.0,
+      "ndcg@k": 1.0,
+      "top": [
+        "bc_energy_costs.md",
+        "labor_costs_shortages.md",
+        "canada_greenhouse_industry_2024.md"
+      ]
+    },
+    {
+      "id": "doc-industry-1",
+      "type": "doc",
+      "hit@k": 1.0,
+      "recall@k": 1.0,
+      "mrr": 1.0,
+      "ndcg@k": 1.0,
+      "top": [
+        "canada_greenhouse_industry_2024.md",
+        "labor_costs_shortages.md",
+        "bc_energy_costs.md",
+        "crop_growing_characteristics.md"
+      ]
+    },
+    {
+      "id": "doc-industry-2",
+      "type": "doc",
+      "hit@k": 1.0,
+      "recall@k": 1.0,
+      "mrr": 1.0,
+      "ndcg@k": 1.0,
+      "top": [
+        "canada_greenhouse_industry_2024.md",
+        "crop_growing_characteristics.md",
+        "labor_costs_shortages.md",
+        "pest_disease_management.md"
+      ]
+    },
+    {
+      "id": "doc-industry-3",
+      "type": "doc",
+      "hit@k": 1.0,
+      "recall@k": 1.0,
+      "mrr": 1.0,
+      "ndcg@k": 1.0,
+      "top": [
+        "canada_greenhouse_industry_2024.md",
+        "crop_growing_characteristics.md",
+        "labor_costs_shortages.md",
+        "pest_disease_management.md"
+      ]
+    },
+    {
+      "id": "doc-crop-1",
+      "type": "doc",
+      "hit@k": 1.0,
+      "recall@k": 1.0,
+      "mrr": 1.0,
+      "ndcg@k": 1.0,
+      "top": [
+        "crop_growing_characteristics.md",
+        "pest_disease_management.md",
+        "precision_ag_roi_evidence.md",
+        "fertilizer_input_prices.md"
+      ]
+    },
+    {
+      "id": "doc-crop-2",
+      "type": "doc",
+      "hit@k": 1.0,
+      "recall@k": 1.0,
+      "mrr": 0.5,
+      "ndcg@k": 0.6309297535714575,
+      "top": [
+        "pest_disease_management.md",
+        "crop_growing_characteristics.md",
+        "canada_greenhouse_industry_2024.md",
+        "precision_ag_roi_evidence.md"
+      ]
+    },
+    {
+      "id": "doc-crop-3",
+      "type": "doc",
+      "hit@k": 1.0,
+      "recall@k": 1.0,
+      "mrr": 1.0,
+      "ndcg@k": 1.0,
+      "top": [
+        "crop_growing_characteristics.md",
+        "canada_greenhouse_industry_2024.md",
+        "precision_ag_roi_evidence.md"
+      ]
+    },
+    {
+      "id": "doc-fert-1",
+      "type": "doc",
+      "hit@k": 1.0,
+      "recall@k": 1.0,
+      "mrr": 1.0,
+      "ndcg@k": 1.0,
+      "top": [
+        "fertilizer_input_prices.md",
+        "canada_greenhouse_industry_2024.md",
+        "labor_costs_shortages.md",
+        "precision_ag_roi_evidence.md"
+      ]
+    },
+    {
+      "id": "doc-fert-2",
+      "type": "doc",
+      "hit@k": 1.0,
+      "recall@k": 1.0,
+      "mrr": 1.0,
+      "ndcg@k": 1.0,
+      "top": [
+        "fertilizer_input_prices.md",
+        "bc_energy_costs.md",
+        "labor_costs_shortages.md"
+      ]
+    },
+    {
+      "id": "doc-fert-3",
+      "type": "doc",
+      "hit@k": 1.0,
+      "recall@k": 1.0,
+      "mrr": 0.5,
+      "ndcg@k": 0.6309297535714575,
+      "top": [
+        "bc_energy_costs.md",
+        "fertilizer_input_prices.md",
+        "labor_costs_shortages.md"
+      ]
+    },
+    {
+      "id": "doc-labor-1",
+      "type": "doc",
+      "hit@k": 1.0,
+      "recall@k": 1.0,
+      "mrr": 1.0,
+      "ndcg@k": 1.0,
+      "top": [
+        "labor_costs_shortages.md",
+        "canada_greenhouse_industry_2024.md",
+        "bc_energy_costs.md"
+      ]
+    },
+    {
+      "id": "doc-labor-2",
+      "type": "doc",
+      "hit@k": 1.0,
+      "recall@k": 1.0,
+      "mrr": 1.0,
+      "ndcg@k": 1.0,
+      "top": [
+        "labor_costs_shortages.md",
+        "canada_greenhouse_industry_2024.md",
+        "bc_energy_costs.md",
+        "crop_growing_characteristics.md"
+      ]
+    },
+    {
+      "id": "doc-pest-1",
+      "type": "doc",
+      "hit@k": 1.0,
+      "recall@k": 1.0,
+      "mrr": 1.0,
+      "ndcg@k": 1.0,
+      "top": [
+        "pest_disease_management.md",
+        "fertilizer_input_prices.md",
+        "labor_costs_shortages.md",
+        "crop_growing_characteristics.md"
+      ]
+    },
+    {
+      "id": "doc-pest-2",
+      "type": "doc",
+      "hit@k": 1.0,
+      "recall@k": 1.0,
+      "mrr": 1.0,
+      "ndcg@k": 1.0,
+      "top": [
+        "pest_disease_management.md",
+        "crop_growing_characteristics.md",
+        "labor_costs_shortages.md",
+        "bc_climate_heat.md",
+        "bc_energy_costs.md"
+      ]
+    },
+    {
+      "id": "doc-fin-1",
+      "type": "doc",
+      "hit@k": 1.0,
+      "recall@k": 1.0,
+      "mrr": 1.0,
+      "ndcg@k": 1.0,
+      "top": [
+        "precision_ag_loan_program.md",
+        "precision_ag_roi_evidence.md",
+        "fertilizer_input_prices.md"
+      ]
+    },
+    {
+      "id": "doc-fin-2",
+      "type": "doc",
+      "hit@k": 1.0,
+      "recall@k": 1.0,
+      "mrr": 1.0,
+      "ndcg@k": 1.0,
+      "top": [
+        "precision_ag_loan_program.md",
+        "fertilizer_input_prices.md",
+        "bc_energy_costs.md",
+        "precision_ag_roi_evidence.md"
+      ]
+    },
+    {
+      "id": "doc-fin-3",
+      "type": "doc",
+      "hit@k": 1.0,
+      "recall@k": 1.0,
+      "mrr": 1.0,
+      "ndcg@k": 1.0,
+      "top": [
+        "precision_ag_loan_program.md",
+        "bc_energy_costs.md",
+        "precision_ag_roi_evidence.md"
+      ]
+    },
+    {
+      "id": "doc-roi-1",
+      "type": "doc",
+      "hit@k": 1.0,
+      "recall@k": 1.0,
+      "mrr": 1.0,
+      "ndcg@k": 1.0,
+      "top": [
+        "precision_ag_roi_evidence.md",
+        "precision_ag_loan_program.md",
+        "crop_growing_characteristics.md"
+      ]
+    },
+    {
+      "id": "doc-roi-2",
+      "type": "doc",
+      "hit@k": 1.0,
+      "recall@k": 1.0,
+      "mrr": 1.0,
+      "ndcg@k": 1.0,
+      "top": [
+        "precision_ag_roi_evidence.md",
+        "precision_ag_loan_program.md",
+        "bc_energy_costs.md"
+      ]
+    },
+    {
+      "id": "doc-roi-3",
+      "type": "doc",
+      "hit@k": 1.0,
+      "recall@k": 1.0,
+      "mrr": 1.0,
+      "ndcg@k": 1.0,
+      "top": [
+        "precision_ag_roi_evidence.md",
+        "fertilizer_input_prices.md",
+        "labor_costs_shortages.md",
+        "precision_ag_loan_program.md"
+      ]
+    },
+    {
+      "id": "hybrid-energy-cost",
+      "type": "hybrid",
+      "hit@k": 1.0,
+      "recall@k": 1.0,
+      "mrr": 1.0,
+      "ndcg@k": 1.0,
+      "top": [
+        "bc_energy_costs.md",
+        "labor_costs_shortages.md",
+        "fertilizer_input_prices.md"
+      ]
+    },
+    {
+      "id": "hybrid-tomato-benchmark",
+      "type": "hybrid",
+      "hit@k": 1.0,
+      "recall@k": 1.0,
+      "mrr": 0.5,
+      "ndcg@k": 0.6309297535714575,
+      "top": [
+        "crop_growing_characteristics.md",
+        "canada_greenhouse_industry_2024.md",
+        "precision_ag_roi_evidence.md",
+        "bc_energy_costs.md"
+      ]
+    },
+    {
+      "id": "hybrid-pest-alerts",
+      "type": "hybrid",
+      "hit@k": 1.0,
+      "recall@k": 1.0,
+      "mrr": 1.0,
+      "ndcg@k": 1.0,
+      "top": [
+        "pest_disease_management.md",
+        "labor_costs_shortages.md",
+        "precision_ag_roi_evidence.md",
+        "precision_ag_loan_program.md"
+      ]
+    }
+  ]
+}

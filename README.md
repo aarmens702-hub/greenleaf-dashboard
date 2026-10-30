@@ -7,6 +7,25 @@ GreenLeaf CEA, a hypothetical B.C. controlled-environment agriculture operator.
 The audience is a mix of farmers, RBC lender staff, and technical judges, so every
 answer leads with numbers and cites where they came from.
 
+## Where it started
+
+This dashboard placed **2nd** at the RBC × BCCAI × SFU Beedie Agribusiness Analytics Hackathon (May 2026). It's
+the starting point for GreenLeaf 2.0 in `control/`, a reinforcement-learning co-pilot for a greenhouse simulator.
+
+> **Synthetic data.** The dashboard runs on the organisers' synthetic case (`data/raw/`), so no number in it is
+> real-world evidence. Currency is CAD.
+
+| Overview | Operations |
+|---|---|
+| ![Overview tab: headline numbers, daily input spend and the plots at risk](docs/media/dashboard/overview.png) | ![Operations tab: a 3-day stress early-warning and the daily watch-list](docs/media/dashboard/operations.png) |
+| **Financials** | **Ask GreenLeaf** |
+| ![Financials tab: the season P&L, profit per plot and the loss tail](docs/media/dashboard/financials.png) | ![Ask GreenLeaf tab: the agentic RAG chat with its suggested prompts](docs/media/dashboard/ask-greenleaf.png) |
+
+- **Overview:** headline numbers, daily input spend, and the plots most at risk today.
+- **Operations:** a 3-day stress early-warning and a daily watch-list.
+- **Financials:** the season in dollars, the profit spread and the loss tail.
+- **Ask GreenLeaf:** an agentic RAG chat that answers from the data and a small research corpus, citing its sources.
+
 ## Setup
 
 ```bash
@@ -26,21 +45,24 @@ Without a key the dashboard's data tabs still work; only the chat is disabled.
 
 ## Run
 
+Python 3.12, from the repo root:
+
 ```bash
-# 1. Build the derived data (parquet) the app reads from
-python build_derived.py
+# 1. Launch the dashboard (the first start builds data/derived/ via build_derived.py)
+python -m streamlit run app/streamlit_app/main.py
 
-# 2. Build the RAG index once (re-run whenever docs/greenleaf_corpus/ changes)
-python app/rag/build_index.py
-
-# 3. Launch the dashboard
-streamlit run app/streamlit_app/main.py
+# 2. For the chat: build the RAG index once (downloads the embedding model; re-run
+#    whenever docs/greenleaf_corpus/ changes) and set DEEPSEEK_API_KEY in .env
+python -m app.rag.build_index
 ```
 
 The app has four tabs: **Overview**, **Operations**, **Financials**, and
 **Ask GreenLeaf** (the chat assistant).
 
 ## Tests
+
+Build the derived data and the RAG index first (`python build_derived.py`, or start the app once, and
+`python -m app.rag.build_index`), then:
 
 ```bash
 pytest tests/

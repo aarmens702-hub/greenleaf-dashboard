@@ -1,0 +1,128 @@
+[
+  {
+    "file": "season_replay.gif",
+    "source": "rb_default",
+    "scenario": {
+      "location": "Amsterdam",
+      "growth_year": 2010,
+      "start_day": 59
+    },
+    "commit": "15603d88ecc20d29616331c26ebba8b48174cd56",
+    "dirty": false,
+    "gl_gym": "2d3febb1ea002b24b452e32293e990beb78d3ce1",
+    "made_at": "2026-10-29T06:57:53.080722+00:00",
+    "metrics": {
+      "profit_eur_m2": -4.697726335099438,
+      "viol_hours_co2": 0.0,
+      "pct_in_bounds_co2": 100.0,
+      "viol_hours_temp": 79.5,
+      "pct_in_bounds_temp": 94.47916666666667,
+      "viol_hours_rh": 629.75,
+      "pct_in_bounds_rh": 56.267361111111114,
+      "yield_kg_m2": 11.417890405427057,
+      "heat_cost": 8.212431922203677,
+      "elec_cost": 12.597531159088465,
+      "co2_cost": 2.1563879024905885,
+      "paper_return": 3104.215901554114,
+      "solver_failures": 0,
+      "steps": 5760,
+      "valid": true
+    }
+  },
+  {
+    "file": "season_replay.mp4",
+    "source": "rb_default",
+    "scenario": {
+      "location": "Amsterdam",
+      "growth_year": 2010,
+      "start_day": 59
+    },
+    "commit": "15603d88ecc20d29616331c26ebba8b48174cd56",
+    "dirty": false,
+    "gl_gym": "2d3febb1ea002b24b452e32293e990beb78d3ce1",
+    "made_at": "2026-10-29T06:57:53.080722+00:00",
+    "metrics": {
+      "profit_eur_m2": -4.697726335099438,
+      "viol_hours_co2": 0.0,
+      "pct_in_bounds_co2": 100.0,
+      "viol_hours_temp": 79.5,
+      "pct_in_bounds_temp": 94.47916666666667,
+      "viol_hours_rh": 629.75,
+      "pct_in_bounds_rh": 56.267361111111114,
+      "yield_kg_m2": 11.417890405427057,
+      "heat_cost": 8.212431922203677,
+      "elec_cost": 12.597531159088465,
+      "co2_cost": 2.1563879024905885,
+      "paper_return": 3104.215901554114,
+      "solver_failures": 0,
+      "steps": 5760,
+      "valid": true
+    }
+  },
+  {
+    "file": "baselines.png",
+    "source": "rb_default vs zero_controls vs random",
+    "scenario": {
+      "location": "Amsterdam",
+      "growth_year": 2010,
+      "start_day": 59
+    },
+    "commit": "15603d88ecc20d29616331c26ebba8b48174cd56",
+    "dirty": false,
+    "gl_gym": "2d3febb1ea002b24b452e32293e990beb78d3ce1",
+    "made_at": "2026-10-29T06:57:53.080722+00:00",
+    "metrics": {
+      "rb_default": {
+        "profit_eur_m2": -4.697726335099438,
+        "viol_hours_co2": 0.0,
+        "pct_in_bounds_co2": 100.0,
+        "viol_hours_temp": 79.5,
+        "pct_in_bounds_temp": 94.47916666666667,
+        "viol_hours_rh": 629.75,
+        "pct_in_bounds_rh": 56.267361111111114,
+        "yield_kg_m2": 11.417890405427057,
+        "heat_cost": 8.212431922203677,
+        "elec_cost": 12.597531159088465,
+        "co2_cost": 2.1563879024905885,
+        "paper_return": 3104.215901554114,
+        "solver_failures": 0,
+        "steps": 5760,
+        "valid": true
+      },
+      "zero_controls": {
+        "profit_eur_m2": 2.8939136431528767,
+        "viol_hours_co2": 572.5,
+        "pct_in_bounds_co2": 60.24305555555556,
+        "viol_hours_temp": 970.0,
+        "pct_in_bounds_temp": 32.638888888888886,
+        "viol_hours_rh": 1376.75,
+        "pct_in_bounds_rh": 4.392361111111109,
+        "yield_kg_m2": 1.8086960269705479,
+        "heat_cost": 0.0,
+        "elec_cost": 0.0,
+        "co2_cost": 0.0,
+        "paper_return": -969.4492465459682,
+        "solver_failures": 0,
+        "steps": 5760,
+        "valid": true
+      },
+      "random": {
+        "profit_eur_m2": -29.881332316342935,
+        "viol_hours_co2": 0.0,
+        "pct_in_bounds_co2": 100.0,
+        "viol_hours_temp": 1000.25,
+        "pct_in_bounds_temp": 30.538194444444443,
+        "viol_hours_rh": 599.75,
+        "pct_in_bounds_rh": 58.35069444444445,
+        "yield_kg_m2": 4.846549496367945,
+        "heat_cost": 8.48705018016113,
+        "elec_cost": 25.25926717386662,
+        "co2_cost": 3.8894941565038996,
+        "paper_return": 467.1279507186817,
+        "solver_failures": 0,
+        "steps": 5760,
+        "valid": true
+      }
+    }
+  }
+]

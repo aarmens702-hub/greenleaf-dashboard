@@ -1,0 +1,43 @@
+name: CI
+
+# Gate code + retrieval quality. The agent tests mock the LLM and the eval is
+# retrieval-only, so NO API secret is needed here.
+on:
+  pull_request:
+    paths:
+      - "app/**"
+      - "analysis/**"
+      - "models/**"
+      - "data/**"
+      - "build_derived.py"
+      - "eval/**"
+      - "docs/greenleaf_corpus/**"
+      - "tests/**"
+      - "pyproject.toml"
+      - ".github/workflows/ci.yml"
+  push:
+    branches: [master, prod-rag-pipeline]
+
+jobs:
+  test-and-eval:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - name: Install
+        run: pip install -e .
+      - name: Build RAG index
+        # index_data is gitignored; build it (downloads the embedding model) so
+        # retrieve.py imports cleanly for both the tests and the eval gate.
+        run: python -m app.rag.build_index
+      - name: Build derived data
+        # data/derived is gitignored; several tests read it at import.
+        run: python build_derived.py
+      - name: Unit tests
+        # Only the dashboard's tests/; control/ has its own CI.
+        run: pytest -q tests
+      - name: Retrieval regression gate
+        run: python -m eval.run_eval --check

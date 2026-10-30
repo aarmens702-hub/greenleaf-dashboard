@@ -1,0 +1,52 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>GreenLeaf: a simulated tomato season</title>
+  <meta name="description" content="Two rule sets run the same simulated tomato greenhouse for one season. A GreenLight-Gym simulator replay, not real-world results.">
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <div class="wrap">
+    <header>
+      <h1>GreenLeaf: a simulated tomato season</h1>
+      <p class="lede">Two rule sets run the same simulated greenhouse for <span data-fill="days"></span> days of <span data-fill="place"></span> weather. Press play.</p>
+    </header>
+    <main>
+      <section class="controls" aria-label="Replay controls">
+        <label>Season <select id="season"></select></label>
+        <button id="play" type="button" disabled>Play</button>
+        <label>Speed
+          <select id="speed">
+            <option value="1">1 day per second</option>
+            <option value="3" selected>3 days per second</option>
+            <option value="6">6 days per second</option>
+          </select>
+        </label>
+        <label class="scrub">
+          <input id="scrub" type="range" min="0" max="0" step="1" value="0" disabled aria-label="Hour of the season">
+          <output id="day" for="scrub"></output>
+        </label>
+      </section>
+      <p class="legend">
+        <span><i class="sw sw-line"></i>simulated climate</span>
+        <span><i class="sw sw-band"></i>safe band</span>
+        <span><i class="sw sw-tick"></i>time outside the band</span>
+      </p>
+      <p id="status" class="status" role="status">Loading the season...</p>
+      <div id="panels" class="panels"></div>
+      <section class="score" aria-labelledby="score-title">
+        <h2 id="score-title">End of season (simulated)</h2>
+        <p id="hint" class="hint">The scoreboard fills in when the replay reaches the last day.</p>
+        <table id="score" hidden></table>
+      </section>
+    </main>
+    <footer>
+      <p>Simulated with GreenLight-Gym on <span data-fill="place"></span> weather; not real-world results. Tuned rules: experiment E1, ledger row result-525a6e90.</p>
+      <p><a href="https://github.com/aarmens702-hub/greenleaf-dashboard">Source on GitHub</a></p>
+    </footer>
+  </div>
+  <script src="app.js"></script>
+</body>
+</html>

@@ -1,0 +1,34 @@
+{"id": "doc-climate-1", "type": "doc", "question": "What are typical summer high temperatures in the BC Fraser Valley?", "relevant_sources": ["bc_climate_heat.md"]}
+{"id": "doc-climate-2", "type": "doc", "question": "How do extreme heat events affect greenhouse stress in BC?", "relevant_sources": ["bc_climate_heat.md"]}
+{"id": "doc-climate-3", "type": "doc", "question": "What is the growing-season climate of the Fraser Valley greenhouse region?", "relevant_sources": ["bc_climate_heat.md"]}
+{"id": "doc-energy-1", "type": "doc", "question": "How much did BC Hydro rates increase in 2025?", "relevant_sources": ["bc_energy_costs.md"]}
+{"id": "doc-energy-2", "type": "doc", "question": "How do BC electricity costs compare to other North American utilities?", "relevant_sources": ["bc_energy_costs.md"]}
+{"id": "doc-energy-3", "type": "doc", "question": "Is electricity a major operating cost for BC greenhouses?", "relevant_sources": ["bc_energy_costs.md"]}
+{"id": "doc-industry-1", "type": "doc", "question": "How large is Canada's greenhouse vegetable industry by area and farm-gate value?", "relevant_sources": ["canada_greenhouse_industry_2024.md"]}
+{"id": "doc-industry-2", "type": "doc", "question": "What share of Canadian greenhouse area is used for fruit and vegetables?", "relevant_sources": ["canada_greenhouse_industry_2024.md"]}
+{"id": "doc-industry-3", "type": "doc", "question": "What is the crop mix in Canadian greenhouse vegetable production?", "relevant_sources": ["canada_greenhouse_industry_2024.md"]}
+{"id": "doc-crop-1", "type": "doc", "question": "Why is greenhouse tomato sensitive to vapor pressure deficit?", "relevant_sources": ["crop_growing_characteristics.md"]}
+{"id": "doc-crop-2", "type": "doc", "question": "What is tomato brown rugose fruit virus and why does it matter for growers?", "relevant_sources": ["crop_growing_characteristics.md"]}
+{"id": "doc-crop-3", "type": "doc", "question": "What are the growing characteristics of strawberry, pepper and cucumber in a greenhouse?", "relevant_sources": ["crop_growing_characteristics.md"]}
+{"id": "doc-fert-1", "type": "doc", "question": "How much did fertilizer prices spike after 2022?", "relevant_sources": ["fertilizer_input_prices.md"]}
+{"id": "doc-fert-2", "type": "doc", "question": "What happened to phosphate (DAP) prices in 2025?", "relevant_sources": ["fertilizer_input_prices.md"]}
+{"id": "doc-fert-3", "type": "doc", "question": "Why are farm input costs volatile week to week?", "relevant_sources": ["fertilizer_input_prices.md"]}
+{"id": "doc-labor-1", "type": "doc", "question": "What share of greenhouse production expenses is labor?", "relevant_sources": ["labor_costs_shortages.md"]}
+{"id": "doc-labor-2", "type": "doc", "question": "How do labor shortages affect greenhouse operations in Canada?", "relevant_sources": ["labor_costs_shortages.md"]}
+{"id": "doc-pest-1", "type": "doc", "question": "Why are almost all of GreenLeaf's sensor alerts High Pest Pressure?", "relevant_sources": ["pest_disease_management.md"]}
+{"id": "doc-pest-2", "type": "doc", "question": "What are the major disease challenges in Canadian greenhouses?", "relevant_sources": ["pest_disease_management.md"]}
+{"id": "doc-fin-1", "type": "doc", "question": "What is the Precision Agriculture Loan (PAL) Act?", "relevant_sources": ["precision_ag_loan_program.md"]}
+{"id": "doc-fin-2", "type": "doc", "question": "What interest rates and loan terms would the precision-ag loan program offer?", "relevant_sources": ["precision_ag_loan_program.md"]}
+{"id": "doc-fin-3", "type": "doc", "question": "How is the RBC/BCCAI financing concept modeled on a US program?", "relevant_sources": ["precision_ag_loan_program.md"]}
+{"id": "doc-roi-1", "type": "doc", "question": "What water savings has precision irrigation demonstrated in research?", "relevant_sources": ["precision_ag_roi_evidence.md"]}
+{"id": "doc-roi-2", "type": "doc", "question": "What does the research say about AI-driven irrigation reducing water use?", "relevant_sources": ["precision_ag_roi_evidence.md"]}
+{"id": "doc-roi-3", "type": "doc", "question": "What is the evidence that sensor technology improves yield and resource efficiency?", "relevant_sources": ["precision_ag_roi_evidence.md"]}
+{"id": "hybrid-energy-cost", "type": "hybrid", "question": "How does our input cost mix compare to BC energy cost trends?", "relevant_sources": ["bc_energy_costs.md"], "expected_tools": ["cost_breakdown"]}
+{"id": "hybrid-tomato-benchmark", "type": "hybrid", "question": "Is our tomato yield above the BC commercial greenhouse benchmark?", "relevant_sources": ["canada_greenhouse_industry_2024.md"], "expected_tools": ["greenleaf_vs_benchmark"]}
+{"id": "hybrid-pest-alerts", "type": "hybrid", "question": "Our alerts are mostly pest pressure — what does research say about managing that?", "relevant_sources": ["pest_disease_management.md"], "expected_tools": ["alert_response_summary"]}
+{"id": "data-profit-crop", "type": "data", "question": "Which crop is most profitable?", "expected_tools": ["avg_profit_by_crop"]}
+{"id": "data-precision-benefit", "type": "data", "question": "What is our overall precision benefit?", "expected_tools": ["precision_benefit_summary"]}
+{"id": "data-plot-status", "type": "data", "question": "How is plot P0001 doing?", "expected_tools": ["plot_status"]}
+{"id": "data-cost-driver", "type": "data", "question": "What is our biggest cost driver?", "expected_tools": ["cost_breakdown"]}
+{"id": "data-season-overview", "type": "data", "question": "Give me an overview of the whole operation this season.", "expected_tools": ["season_overview"]}
+{"id": "data-treatment", "type": "data", "question": "Which treatment gives the best profit and ROI?", "expected_tools": ["treatment_summary"]}
