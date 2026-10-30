@@ -2,7 +2,7 @@
 
 **Read this first when you pick the project up on any machine.** It's the shared memory: where things stand, what's next, what we learned, and how Aarmen likes to work. Update it at the end of each session.
 
-*Last updated: 2026-10-29, Mac session (E2 adopted, night).*
+*Last updated: 2026-10-30, Mac session (E3 adopted, E4 w05 and w1 adopted, E5 dropped; E6 #36 next).*
 
 ## Where things are
 - **The repo** is `github.com/aarmens702-hub/greenleaf-dashboard`: public, default branch `master`, MIT at the root and AGPL-3.0-or-later in `control/`. It holds the hackathon dashboard that placed 2nd (RBC × BCCAI × SFU, May 2026). GreenLeaf 2.0 lives in `control/`.
@@ -38,18 +38,32 @@
   - ppo_paper IQM over 5 seeds × 3 VALIDATION seasons: profit 2.299 [2.146, 2.468] €/m² vs rb_default's mean -7.414; total violation hours 251.4 vs 743.2; fruit growth 6.80 vs 11.34. PAPER: 5 of 5 seeds beat rb_default on profit and violation hours.
   - Caveats on the record (#31, the decision note): the profit comes from switching the lamps off (electricity 0.009 vs 14.9 €/m²); fruit growth -42%; temperature violations up, all cold-side; CO₂ overshoot in seeds 2 and 4; days 45 and 75 share 46 and 44 of 60 days of weather with the training season, so generalization is the final's question. Aarmen ruled that seed 0's one training-time solver failure doesn't count under rule (c).
   - **The run dirs** live in `.worktrees/31/control/runs/registered-2d021f24/` (the ledger's run_dir), so that worktree is kept; a backup is in the main checkout's `control/runs/`.
+- **E3 to E5 ran overnight 2026-10-29/30 on the Mac** ($0, 35 runs, 0 crashed, 0 invalid, 0 scoring solver failures; 15 to 24 min a run). Rules for E3 to E5 were written by Claude on Aarmen's delegation; adopt or drop was his, the next morning.
+  - **A flaw in those rules:** rule (a) compared an arm's profit IQM with rb_tuned's plain 3-season mean. On 15 values the IQM drops the 3 lowest and 3 highest, and day 45 sits about 6 €/m² below the other seasons, so the IQM lands well above the plain mean. rb_tuned scored the same way has IQM 0.092 (5 seeds) or 0.282 (10 seeds), not -0.517. Each result commit reports the like-for-like numbers; E6 (#36) uses them as its bars.
+- **E3 (#33) is adopted** (Aarmen, 2026-10-30): `ppo` on TRAIN beats rb_tuned.
+  - Ledger: registered-02216f96 (`470a577`) → 5 runs → result-06364fa1 (`0da8158`) → **decision-b1319a3a** (`954cf51`).
+  - Profit IQM 2.395 [2.327, 2.458] €/m² vs rb_tuned -0.517 (like-for-like 0.092); violation hours 289.75 vs 355.67; beats rb_tuned's same season on profit and on violation hours in 15/15.
+  - Caveats (0da8158): lamps and CO₂ dosing off, so fruit growth 6.69 vs 9.06 (-26%); temperature hours worse than rb_tuned in 15/15 (cold side in the replays); zero_controls earns more profit (2.95) at about 2,900 h a season. The gap over the baseline shrank from E2's +9.71 to +2.91 because the baseline improved; PPO's own IQM barely moved.
+- **E4 (#34): residual_w05 and residual_w1 adopted, residual_w4 dropped** (Aarmen, 2026-10-30).
+  - Ledger: registered-4d202c00 (`c7f3351`) → 15 runs → result-2a890455 (`2692c92`) → **decision-b159ac9a** (`3a8cd7a`; one decision row per result, the per-arm call is in its note).
+  - Profit IQM w05 0.629 [0.482, 0.740], w1 0.396 [0.321, 0.449], w4 -0.367 [-0.482, -0.265]; violation hours 265.25 / 129.22 / 42.42 vs 355.67. Same-season profit wins over rb_tuned 15/15, 14/15, 0/15: w4 passed rule (a) only through the IQM-vs-mean mismatch.
+  - The residual keeps the lamps, so fruit growth rises (plain means 9.42 / 9.41 / 9.43 vs 9.06), and every arm has fewer violation hours than rb_tuned's same season in 15/15 with the selected checkpoints (w05 12/15 with final checkpoints).
+  - By its rule, **E6 confirms residual_w05** (#36).
+- **E5 (#35) is dropped** (Aarmen, 2026-10-30), to be re-run as E5b.
+  - Ledger: registered-976c1a64 (`d4c3021`) → 15 runs → result-d41feb94 (`b71150f`) → **decision-c26a2bc9** (`234201e`).
+  - All three arms passed the registered rule (profit IQM b100 0.258, b50 0.175, b25 -0.218; violation hours 277.31 / 174.00 / 96.19 under budgets 391.24 / 195.62 / 97.81), but open decisions 4 and 5 below happened: with the zero CO₂ budget, λ_co2 pinned at its cap (100) in 14 of 15 runs and learning degraded after it (profit fell after 250k, explained variance dipped at the cap). Selection picked the 250k checkpoint in 10 of 15 runs. E4's fixed-penalty w1 beat lag_b50 on both profit and violations.
+- **The run dirs** for E3, E4 and E5 live in `.worktrees/33`, `/34` and `/35` (the ledger's run_dirs), so those worktrees are kept; backups are in the main checkout's `control/runs/`.
 - **Also shipped 2026-10-29:** #25 ledger refuses non-metric primary/guards (`3f9e932`); #26 CI and hooks fail closed (`5c2fe87`); #27 guard gaps: Grep glob/type, path traversal, stop_tests fails closed (`65fb79d`); #28 D3a demo site preview `site/` with captures in `docs/media/site/` (`fa304f3`); #32 PROTOCOL §9, E2 runs 5 seeds (`b31b8d6`, scorer file).
 - **Filed 2026-10-29:** #29, more guard gaps (case-insensitive paths, symlinks in protect_secrets, stop_tests without .venv, the Stop hook's timeout); #30, the Modal plumbing run (open, only needed before any Modal run).
 - **Filed 2026-10-28:** #19, recording Modal runs (shipped). Aarmen chose the Mac over Modal for E2 (no payment method); Modal stays optional.
 
 ## To do, in order
-1. **Next: E3** (`ppo` × 5 vs rb_tuned), then E4 overnight, all on the Mac at about 15 min a run. rb_tuned (E1, adopted) is the grower for E3-E5 and the Lagrangian budgets' reference.
-   - Before E5: open decisions 4 and 5 (PID recovery, zero-cost budgets).
-   - Free work: #29 (guard gaps); D3b (the AI side of the replay, once E3+ exist).
-2. **TUNE_SPACE (#17b):** settled; E1 ran with it and was adopted.
-3. **Stage 2** (E1 … E6): experiments, each pre-registered. File them with `/new-task` once Stage 1 is green. Ask GreenLeaf (D6) is built in parallel.
-4. **Stage 3:** the final (once), then the analysis.
-5. **Stage 4:** deploy and polish (D1–D7 in the plan). Visual roadmap: https://claude.ai/artifact/19obed2CuttzDAPZzbFDuw
+1. **Now: E6 (#36)**, registered-f2fd71e9 (`3ac74be`): `residual_w05` with seeds 100 to 109 on the Mac (about 3 h, started 2026-10-30 about 10 am), against rb_tuned's like-for-like bars (profit IQM 0.282, 352.75 violation hours). Run dirs in `.worktrees/36`.
+2. **Then E5b**, a second registration on #35 with a fix for the pinned λ_co2 (open decisions 4 and 5: a CO₂ budget floor, or a smaller `lambda_max` / larger `ki`), for Aarmen's OK. About 4.5 h. If an arm passes, its pick gets its own 10-seed confirmation.
+3. **Then the final** (once, Aarmen's yes): open decision 3 first. Then the analysis (Stage 3).
+   - Free work: #29 (guard gaps); D3b (the AI side of the replay, now that E3 and E4 exist).
+4. **TUNE_SPACE (#17b):** settled; E1 ran with it and was adopted.
+5. **Stage 4:** deploy and polish (D1–D7 in the plan). Ask GreenLeaf (D6) is built in parallel. Visual roadmap: https://claude.ai/artifact/19obed2CuttzDAPZzbFDuw
 
 **Run the harness from a Claude Code session started inside this repo** (`cd ~/Desktop/greenleaf-dashboard && claude`). Its agents, hooks and skills load only there.
 
