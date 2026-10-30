@@ -2,7 +2,7 @@
 
 **Read this first when you pick the project up on any machine.** It's the shared memory: where things stand, what's next, what we learned, and how Aarmen likes to work. Update it at the end of each session.
 
-*Last updated: 2026-10-29, Mac session (E1 adopted).*
+*Last updated: 2026-10-29, Mac session (E2 adopted, night).*
 
 ## Where things are
 - **The repo** is `github.com/aarmens702-hub/greenleaf-dashboard`: public, default branch `master`, MIT at the root and AGPL-3.0-or-later in `control/`. It holds the hackathon dashboard that placed 2nd (RBC × BCCAI × SFU, May 2026). GreenLeaf 2.0 lives in `control/`.
@@ -32,13 +32,20 @@
   - rb_tuned mean paper_return on VALIDATION is 3551.84 vs rb_default's 2950.87; it wins all 3 seasons, with 0 invalid and 1,067 vs 2,229.5 violation hours. All four parts of the registered rule hold.
   - Adopted with its caveats on the record (#22 and the decision note): temperature violation hours +9%, up to 27 h a season above 34 °C vs about 0 for rb_default; fruit growth 15 to 28% lower; 5 of 12 setpoints at a range edge; 3 seasons of one year, no interval.
   - **The run dir** (manifest.json, trials.csv) lives in `.worktrees/22/control/runs/registered-b89a61b1/`, where the ledger's run_dir points, so that worktree is kept on purpose. A backup copy is in the main checkout's `control/runs/registered-b89a61b1/` (git-ignored).
-- **Also shipped 2026-10-29:** #25 ledger refuses non-metric primary/guards (`3f9e932`); #26 CI and hooks fail closed (`5c2fe87`). **Filed:** #27, older guard gaps (secrets via Grep's glob filter, path traversal in guard_tests, stop_tests fails open).
-- **Filed 2026-10-28:** #19, recording Modal runs (ledger rows, fingerprints, cost, configs and weather in the image). Due before E2. Until it lands, `run_grid --backend modal` refuses.
+- **E2 (#31) is adopted** (Aarmen, 2026-10-29): ppo_paper is the reproduction arm for the 2012 final. The GreenLight-Gym paper's claim reproduces on the 2010 seasons.
+  - Ledger: registered-2d021f24 (`88123af`) → 5 runs, 5 finished, 0 crashed → result-b58681ad (`6756def`) → **decision-471d1e0e**.
+  - Ran locally on the Mac, $0: 14 to 16 min per 2M-step run (about 2,000 steps/s), selection about 8 min for 45 checkpoints.
+  - ppo_paper IQM over 5 seeds × 3 VALIDATION seasons: profit 2.299 [2.146, 2.468] €/m² vs rb_default's mean -7.414; total violation hours 251.4 vs 743.2; fruit growth 6.80 vs 11.34. PAPER: 5 of 5 seeds beat rb_default on profit and violation hours.
+  - Caveats on the record (#31, the decision note): the profit comes from switching the lamps off (electricity 0.009 vs 14.9 €/m²); fruit growth -42%; temperature violations up, all cold-side; CO₂ overshoot in seeds 2 and 4; days 45 and 75 share 46 and 44 of 60 days of weather with the training season, so generalization is the final's question. Aarmen ruled that seed 0's one training-time solver failure doesn't count under rule (c).
+  - **The run dirs** live in `.worktrees/31/control/runs/registered-2d021f24/` (the ledger's run_dir), so that worktree is kept; a backup is in the main checkout's `control/runs/`.
+- **Also shipped 2026-10-29:** #25 ledger refuses non-metric primary/guards (`3f9e932`); #26 CI and hooks fail closed (`5c2fe87`); #27 guard gaps: Grep glob/type, path traversal, stop_tests fails closed (`65fb79d`); #28 D3a demo site preview `site/` with captures in `docs/media/site/` (`fa304f3`); #32 PROTOCOL §9, E2 runs 5 seeds (`b31b8d6`, scorer file).
+- **Filed 2026-10-29:** #29, more guard gaps (case-insensitive paths, symlinks in protect_secrets, stop_tests without .venv, the Stop hook's timeout); #30, the Modal plumbing run (open, only needed before any Modal run).
+- **Filed 2026-10-28:** #19, recording Modal runs (shipped). Aarmen chose the Mac over Modal for E2 (no payment method); Modal stays optional.
 
 ## To do, in order
-1. **Next:** rb_tuned (E1, adopted) is the grower for E3-E5 and the Lagrangian budgets' reference.
-   - Free next steps: #27 (guard gaps); D3, the demo site preview with baseline replays (no deploy).
-   - Everything else needs spend (the Modal plumbing run, then E2) or results.
+1. **Next: E3** (`ppo` × 5 vs rb_tuned), then E4 overnight, all on the Mac at about 15 min a run. rb_tuned (E1, adopted) is the grower for E3-E5 and the Lagrangian budgets' reference.
+   - Before E5: open decisions 4 and 5 (PID recovery, zero-cost budgets).
+   - Free work: #29 (guard gaps); D3b (the AI side of the replay, once E3+ exist).
 2. **TUNE_SPACE (#17b):** settled; E1 ran with it and was adopted.
 3. **Stage 2** (E1 … E6): experiments, each pre-registered. File them with `/new-task` once Stage 1 is green. Ask GreenLeaf (D6) is built in parallel.
 4. **Stage 3:** the final (once), then the analysis.
@@ -65,11 +72,11 @@
 5. **Zero-cost budgets for residual_lag (before E5).** It also bites selection: with a CO₂ budget of 0, × 1.10 leaves no slack, so one CO₂-violating step disqualifies a checkpoint and §5 falls to "lowest total cost" more often (both smoke manifests the #13c reviewer saw had a CO₂ budget of 0.0).
    - Earlier note: rb_default never violates CO₂ on the TRAIN_EVAL seasons, so `budget_frac` × 0 gives a CO₂ budget of 0; the PID's error is then cost / 1e-8 and λ_co2 jumps to its cap (100) at the first CO₂ cost. If rb_tuned also has zero CO₂ cost, residual_lag is pinned at λ = 100 on CO₂. Option: a budget floor.
 
-6. **Crashed runs in a result (before E2; from #20's review).** PROTOCOL §6 says crashed runs "count": listed, and they block adoption. #20 never scores them and the ledger counts them. Three questions:
+6. **Crashed runs in a result (from #20's review; E2 had none).** PROTOCOL §6 says crashed runs "count": listed, and they block adoption. #20 never scores them and the ledger counts them. Three questions:
    - An arm with crashes reports its IQM over its surviving seeds, which can bias it upward. How is such a number quoted?
    - A crash followed by a finished rerun still records crashed ≥ 1, so §6 blocks adopting that arm even though every seed is scored. A Modal infrastructure crash would sink an arm; is that wanted?
    - `budget-stop` runs are scored as full runs with no flag.
-8. **A plumbing run before E2 (from #19b's review; spend).**
+8. **A plumbing run before any Modal run (#30; from #19b's review; spend). E2 ran locally instead.**
    - Nothing on the container side has ever run: the /root layout, SubprocVecEnv in the container, the volume commit and reload, and train_remote's body against the real SDK.
    - `--remote` refuses `--smoke`, so E2's registered runs would be the first execution, and any plumbing failure becomes a permanent crashed run-end under E2.
    - Default: a throwaway plumbing registration first (1 arm × 1 seed, a few thousand timesteps, cents). Its own issue, and it needs your yes on spend.
@@ -81,7 +88,7 @@
      - the ledger's cost_usd is an upper bound (the Mac's wall, queue time included);
      - keep the Mac plugged in, since caffeinate doesn't stop lid-close sleep on battery;
      - the image uploads the whole weather dir, 2012 included (hashed against the stamp, never trained on).
-7. **Preemption on Modal (before E2; from #19's scout).** Modal reruns a preempted input up to 8 times, even with `retries=0`. The rerun hits train's refusal of an existing run dir, so it's recorded as crashed, which blocks adoption (see 6). Option: `nonpreemptible=True` at a higher price (read the multiplier on modal.com/pricing). It's a spend call.
+7. **Preemption on Modal (before any Modal run; from #19's scout).** Modal reruns a preempted input up to 8 times, even with `retries=0`. The rerun hits train's refusal of an existing run dir, so it's recorded as crashed, which blocks adoption (see 6). Option: `nonpreemptible=True` at a higher price (read the multiplier on modal.com/pricing). It's a spend call.
 
 ### Decided 2026-10-28
 - **The "modal" rule in `guard_runs` stays as is.** Specialists built and reviewed #17a's `modal_app` without loosening it: they write with the Write tool, check with `ruff check .` and plain `pytest`, and read with the Read and Grep tools. No guard change.
