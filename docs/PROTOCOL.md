@@ -1,6 +1,6 @@
 # Evaluation protocol (core)
 
-**Version 1, 2026-10-27.** This file decides how every GreenLeaf 2.0 result is scored, so it is a scorer file:
+**Version 2, 2026-10-30.** After E5's pinned λ_co2, a zero-budget constraint in `residual_lag` keeps a fixed multiplier of 1 (§3), and §5 checks budgets only where nonzero. This file decides how every GreenLeaf 2.0 result is scored, so it is a scorer file:
 - changing it needs Aarmen's yes;
 - its hash stamps every ledger row, so results recorded under an older version stop being comparable.
 
@@ -44,7 +44,7 @@ VALIDATION contains PAPER's season. That is deliberate: PAPER is only a reproduc
 | `ppo_paper` | SB3 PPO with upstream's config (`control/configs/ppo.yml`), upstream's action scheme (rate changes of ±0.1 per step), trained on PAPER only |
 | `ppo` | The same PPO, trained on TRAIN |
 | `residual` | Controls = clip(rb_tuned action + 0.15 × policy action, 0, 1); reward = scaled profit − w × Σ scaled costs; `log_std_init = -1.0`; trained on TRAIN |
-| `residual_lag` | `residual` with w = 0 and a PID-Lagrangian multiplier per constraint, with budget = fraction × rb_tuned's mean per-step cost on TRAIN_EVAL |
+| `residual_lag` | `residual` with w = 0 and a PID-Lagrangian multiplier per constraint, with budget = fraction × rb_tuned's mean per-step cost on TRAIN_EVAL; a constraint whose budget is 0 keeps a fixed multiplier of 1 (the profit-to-cost ratio of `residual` at w = 1) instead of a PID-Lagrangian |
 
 **Equal effort:**
 - The RB gets 200 tuning trials.
@@ -73,8 +73,8 @@ Per episode:
 ## 5. Training, checkpoints, selection
 - **Checkpoints:** every 250,000 steps and at the end, each with its frozen VecNormalize stats.
 - **Selection on VALIDATION only,** deterministic actions, frozen stats:
-  - `residual_lag`: the highest mean profit among checkpoints whose mean per-step cost on every constraint is ≤
-    budget × 1.10; if none qualifies, the lowest total cost.
+  - `residual_lag`: the highest mean profit among checkpoints whose mean per-step cost is ≤ budget × 1.10 on every
+    constraint with a nonzero budget; if none qualifies, the lowest total cost.
   - Every other learning arm: the highest mean `paper_return`.
 - **Fresh runs only:** a run directory is written once and never resumed.
 

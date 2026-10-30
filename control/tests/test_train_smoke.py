@@ -311,12 +311,16 @@ def _no_learning(monkeypatch) -> dict:
 
 def _assert_lag_budgets_and_pids(config: dict, lambdas_csv: Path) -> None:
     """residual_lag's budgets are budget_frac x rb_default's mean per-step cost over TRAIN_EVAL,
-    stored as config["budgets"] in CONSTRAINTS order, and its PIDs are the contract defaults on them.
+    stored as config["budgets"] in CONSTRAINTS order; a nonzero budget gets a PID with the contract
+    defaults, and a zero budget a fixed multiplier of 1 (issue #38).
 
     The budgets are recomputed here from envs.run_baseline and rewards.constraint_costs: 9 seasons
     of 96 steps, pooled (equal lengths, so a mean of per-season means agrees). Known answer for the
-    PIDs: a fresh PIDLagrangian(budget) (kp 0.5, ki 0.05, kd 0.1, lambda_max 100) fed the one
-    rollout's logged mean cost gives the logged lambda.
+    multipliers: on a nonzero budget, a fresh PIDLagrangian(budget) (kp 0.5, ki 0.05, kd 0.1,
+    lambda_max 100) fed the one rollout's logged mean cost gives the logged lambda; on a zero
+    budget (co2's here: rb_default has no co2 cost on these 1-day seasons) the logged lambda is
+    1.0 whatever the cost, where a PIDLagrangian(0.0) gives 0 at zero cost and
+    min(100, 0.65 x cost / 1e-8) at a positive one (e = cost / 1e-8; I + kp*e + kd*d = 0.65e).
     """
     episodes = [envs.run_baseline("rb_default", s, 1) for s in scenarios.TRAIN_EVAL]
     assert [len(e) for e in episodes] == [N_DAY] * 9
@@ -329,7 +333,8 @@ def _assert_lag_budgets_and_pids(config: dict, lambdas_csv: Path) -> None:
     assert len(rows) == 1  # 2,048 steps is one rollout, so one rollout end
     assert int(rows[0]["timesteps"]) == 2048
     for c, budget in zip(CONSTRAINTS, config["budgets"], strict=True):
-        expected = PIDLagrangian(budget).update(float(rows[0][f"cost_{c}"]))
+        cost = float(rows[0][f"cost_{c}"])
+        expected = PIDLagrangian(budget).update(cost) if budget > 0 else 1.0
         assert float(rows[0][f"lambda_{c}"]) == pytest.approx(expected, rel=1e-9, abs=1e-12), c
 
 
@@ -789,6 +794,54 @@ def test_residual_lag_lambdas_reach_the_env_stack_the_model_trains_on(tmp_path, 
     np.testing.assert_array_equal(
         cb.wrapper.lambdas, [float(last[f"lambda_{c}"]) for c in CONSTRAINTS]
     )
+
+
+def test_residual_lag_gives_a_zero_budget_a_fixed_multiplier_and_the_others_pids(
+    tmp_path, monkeypatch
+):
+    """Issue #38: _train gives each constraint with budget b > 0 a PIDLagrangian(b) and each with
+    b == 0 a FixedMultiplier(1.0), in CONSTRAINTS order; the manifest's budgets are unchanged, so
+    co2's still shows 0.0.
+
+    Known answer: budgets (0.0, 0.0012, 0.0038), patched in for _budgets (so no TRAIN_EVAL season
+    plays), give [FixedMultiplier with lam 1.0, PIDLagrangian(0.0012), PIDLagrangian(0.0038)], the
+    PIDs on the contract defaults (kp 0.5, ki 0.05, kd 0.1, lambda_max 100). Today all three are
+    PIDLagrangians. PPO.learn is a no-op here.
+    """
+    import greenleaf_control.train as train
+
+    budgets = [0.0, 0.0012, 0.0038]
+    monkeypatch.setattr(train, "_budgets", lambda rb, budget_frac, season_length: list(budgets))
+    _no_learning(monkeypatch)
+    made = []
+
+    class Recording(LagrangianCallback):
+        def __init__(self, *args, **kwargs) -> None:
+            super().__init__(*args, **kwargs)
+            made.append(self)
+
+    monkeypatch.setattr(train, "LagrangianCallback", Recording)
+    runs = tmp_path / "runs"
+    argv = _smoke_argv("residual_lag", runs)
+    assert train.main(argv, ledger_path=tmp_path / "ledger.jsonl") == 0
+
+    [cb] = made
+    # by name first, so while FixedMultiplier is missing this fails here, on the assertion
+    assert [type(p).__name__ for p in cb.pids] == [
+        "FixedMultiplier",
+        "PIDLagrangian",
+        "PIDLagrangian",
+    ]
+    from greenleaf_control.lagrangian import FixedMultiplier
+
+    fixed, *pids = cb.pids
+    assert type(fixed) is FixedMultiplier
+    assert fixed.lam == 1.0
+    assert [type(p) for p in pids] == [PIDLagrangian, PIDLagrangian]
+    assert [p.budget for p in pids] == [0.0012, 0.0038]
+    assert [(p.kp, p.ki, p.kd, p.lambda_max) for p in pids] == [(0.5, 0.05, 0.1, 100.0)] * 2
+    config = json.loads((_smoke_dir(runs) / "manifest.json").read_text())["config"]
+    assert config["budgets"] == budgets
 
 
 def test_registered_run_that_crashes_records_crashed_and_propagates(tmp_path, monkeypatch):

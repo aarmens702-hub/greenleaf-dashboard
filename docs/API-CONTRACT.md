@@ -79,11 +79,15 @@ Paths are relative to `control/`. Scenario dicts are `{"location": str, "growth_
   - `update(mean_cost: float) -> float`. `lam` starts at 0.0.
   - The error is relative to the budget: `e = (cost - budget) / max(budget, 1e-8)`.
   - The integral is clamped to [0, lambda_max] (anti-windup); the derivative acts only on increases; λ is clamped to [0, lambda_max].
+- `class FixedMultiplier`, constructed as `__init__(self, value: float = 1.0)`, for a constraint whose budget is 0.
+  - `update(mean_cost: float) -> float` returns `value` whatever the cost. `lam` is `value` from construction.
 - `class VecLagrangianReward(VecEnvWrapper)`
   - `lambdas: np.ndarray` (3,)
   - Each reward becomes `(r - Σλᵢcᵢ) / (1 + Σλᵢ)`.
   - `pop_mean_costs() -> np.ndarray` (3,), the mean per step since the last pop.
 - `class LagrangianCallback(BaseCallback)`, constructed as `__init__(wrapper, pids, log_path: Path)`.
+  - `pids` holds a `PIDLagrangian` or a `FixedMultiplier` per constraint.
+  - At training start it sets `wrapper.lambdas` from the multipliers' `lam`.
   - At each rollout end it updates the PIDs, sets `wrapper.lambdas`, and logs `lag/lambda_<c>` and `lag/cost_<c>`.
 - Stack order: `SubprocVecEnv → VecMonitor → VecLagrangianReward → VecNormalize`.
 
@@ -216,8 +220,9 @@ Paths are relative to `control/`. Scenario dicts are `{"location": str, "growth_
   - **Scoring:** each candidate is scored with `evaluate.run_policy(run_dir, name, s, 60, record_steps=<residual_lag>)`
     for s in `scenarios.VALIDATION`, in order. Seasons are always 60 days, whatever the manifest's season length.
   - **residual_lag:**
-    - A candidate qualifies when, for every constraint c, the mean of its frames' `cost_<c>`, pooled over the three
-      seasons, is ≤ `config["budgets"][c] × 1.10`.
+    - A candidate qualifies when, for every constraint c with a nonzero budget, the mean of its frames' `cost_<c>`,
+      pooled over the three seasons, is ≤ `config["budgets"][c] × 1.10`. With every budget 0, every candidate
+      qualifies.
     - The qualifying candidate with the highest mean `profit_eur_m2` wins.
     - If none qualifies, the lowest total cost wins: the plain sum over c of those means.
   - **Other arms:** the highest mean `paper_return` (metrics', not `paper_reward_sum`).

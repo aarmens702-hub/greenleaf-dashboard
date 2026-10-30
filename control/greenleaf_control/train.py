@@ -37,7 +37,12 @@ from stable_baselines3.common.callbacks import BaseCallback
 from stable_baselines3.common.vec_env import DummyVecEnv, SubprocVecEnv, VecMonitor, VecNormalize
 
 from greenleaf_control import envs, ledger, manifest, rule_based, scenarios
-from greenleaf_control.lagrangian import LagrangianCallback, PIDLagrangian, VecLagrangianReward
+from greenleaf_control.lagrangian import (
+    FixedMultiplier,
+    LagrangianCallback,
+    PIDLagrangian,
+    VecLagrangianReward,
+)
 from greenleaf_control.rewards import constraint_costs
 
 RUNS = Path(__file__).resolve().parents[1] / "runs"
@@ -222,7 +227,8 @@ def _train(config: dict, run_dir: Path, callback: _RunCallback) -> None:
         model = build_model(config, venv)
         callbacks = [callback]
         if config["method"] == "residual_lag":
-            pids = [PIDLagrangian(budget) for budget in config["budgets"]]
+            # A zero budget gets a fixed multiplier of 1, where a PID's lambda would pin at its cap.
+            pids = [PIDLagrangian(b) if b > 0 else FixedMultiplier(1.0) for b in config["budgets"]]
             # The VecLagrangianReward itself, which build_vec_env puts right under VecNormalize.
             callbacks.append(LagrangianCallback(venv.venv, pids, run_dir / "lambdas.csv"))
         model.learn(config["timesteps"], callback=callbacks)

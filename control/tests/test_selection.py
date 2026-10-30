@@ -7,10 +7,11 @@ candidates are ckpt_<steps>.zip in numeric order of steps, then ckpt_final.zip; 
 one (not ckpt_zero.zip, the zeroed policy test_evaluate saves beside a run's checkpoints). Each is
 scored with evaluate.run_policy(run_dir, "<steps>" | "final", s, 60, record_steps=<residual_lag>)
 for s in scenarios.VALIDATION, in order: 60-day seasons (PROTOCOL §1), not the manifest's. Then:
-- residual_lag: a checkpoint qualifies when, on every constraint c, its mean per-step cost_<c> (the
-  frames' column, pooled over the three seasons) is <= budgets[c] x 1.10; the qualifying one with
-  the highest mean profit_eur_m2 wins; if none qualifies, the lowest total cost wins, the plain sum
-  over c of those means.
+- residual_lag: a checkpoint qualifies when, on every constraint c with a nonzero budget (issue
+  #38: a zero-budget constraint isn't checked, though its mean cost is still recorded), its mean
+  per-step cost_<c> (the frames' column, pooled over the three seasons) is <= budgets[c] x 1.10;
+  the qualifying one with the highest mean profit_eur_m2 wins; if none qualifies, the lowest total
+  cost wins, the plain sum over c of those means.
 - every other arm: the highest mean paper_return (metrics', not paper_reward_sum).
 A tie goes to the earliest checkpoint; an invalid season is scored, never dropped (PROTOCOL §4); a
 non-finite score raises. It writes run_dir/selected.json once (exclusive create) and returns the
@@ -376,6 +377,81 @@ def test_lag_with_none_qualifying_picks_the_lowest_plain_total_cost(tmp_path, mo
     selected = _selected(run_dir)
     assert selected["rule"] == "min_total_cost"
     assert all(c["qualifies"] is False for c in selected["candidates"].values())
+
+
+@pytest.mark.parametrize(
+    ("zero", "over"),
+    [("co2", "temp"), ("temp", "rh"), ("rh", "co2")],
+    ids=["co2_zero", "temp_zero", "rh_zero"],
+)
+def test_lag_skips_the_budget_check_on_a_zero_budget_constraint(zero, over, tmp_path, monkeypatch):
+    """Issue #38: the budget is checked only on constraints with a nonzero budget; a zero-budget
+    one's mean cost is still recorded. Budget 0 on `zero` and 1.0 on the others (lines 1.1).
+
+    Known answer (mean costs; 0.25 wherever not given):
+    - 250000: profit 300; 0.5 on `zero`, over its 0 x 1.10 = 0 but unchecked: in.
+    - 500000: profit 400; 0 on `zero`, 2.0 on `over` (nonzero budget), over 1.1: out.
+    - final: profit 100; 0 on `zero`: in.
+    So 250000, under max_mean_profit_within_budget, with its `zero` cost recorded as 0.5. The old
+    rule (checking every constraint) puts 250000 out too and picks final.
+    """
+    import greenleaf_control.selection as selection
+
+    def cost(**given: float) -> tuple:
+        return tuple(given.get(c, 0.25) for c in CONSTRAINTS)
+
+    table = {
+        "250000": _cand(profit=300.0, cost=cost(**{zero: 0.5})),
+        "500000": _cand(profit=400.0, cost=cost(**{zero: 0.0, over: 2.0})),
+        "final": _cand(profit=100.0, cost=cost(**{zero: 0.0})),
+    }
+    budgets = [0.0 if c == zero else 1.0 for c in CONSTRAINTS]
+    run_dir, _ = _setup(tmp_path, monkeypatch, "residual_lag", table, budgets=budgets)
+
+    assert selection.select_checkpoint(run_dir) == "250000"
+    selected = _selected(run_dir)
+    assert selected["rule"] == "max_mean_profit_within_budget"
+    assert {name: c["qualifies"] for name, c in selected["candidates"].items()} == {
+        "250000": True,
+        "500000": False,
+        "final": True,
+    }
+    # the unchecked constraint's mean cost is still recorded
+    assert selected["candidates"]["250000"]["mean_cost"] == dict(
+        zip(CONSTRAINTS, cost(**{zero: 0.5}), strict=True)
+    )
+    assert selected["budgets"] == budgets
+
+
+def test_lag_with_every_budget_zero_every_checkpoint_qualifies(tmp_path, monkeypatch):
+    """Issue #38's edge: with all three budgets 0 no constraint is checked, so every checkpoint
+    qualifies and the highest mean profit wins; the mean costs are still recorded.
+
+    Known answer (the same mean cost on each constraint):
+    - 250000: cost 0.25 (total 0.75), profit 100.
+    - 500000: cost 1.0 (total 3.0), profit 300.
+    - final: cost 0.5 (total 1.5), profit 200.
+    So 500000, under max_mean_profit_within_budget. The old rule qualifies none (every cost > 0)
+    and picks the lowest total cost, 250000, under min_total_cost.
+    """
+    import greenleaf_control.selection as selection
+
+    table = {
+        "250000": _cand(profit=100.0, cost=(0.25, 0.25, 0.25)),
+        "500000": _cand(profit=300.0, cost=(1.0, 1.0, 1.0)),
+        "final": _cand(profit=200.0, cost=(0.5, 0.5, 0.5)),
+    }
+    run_dir, _ = _setup(tmp_path, monkeypatch, "residual_lag", table, budgets=[0.0, 0.0, 0.0])
+
+    assert selection.select_checkpoint(run_dir) == "500000"
+    selected = _selected(run_dir)
+    assert selected["rule"] == "max_mean_profit_within_budget"
+    assert all(c["qualifies"] is True for c in selected["candidates"].values())
+    assert {name: c["mean_cost"] for name, c in selected["candidates"].items()} == {
+        "250000": dict.fromkeys(CONSTRAINTS, 0.25),
+        "500000": dict.fromkeys(CONSTRAINTS, 1.0),
+        "final": dict.fromkeys(CONSTRAINTS, 0.5),
+    }
 
 
 # --- The candidates ----------------------------------------------------------------------------
