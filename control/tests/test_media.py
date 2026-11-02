@@ -117,6 +117,15 @@ The replay's tests build an E6-shaped tmp ledger (10 seeds, fake run dirs holdin
 and selected.json) and a tmp parquet, and replace evaluate.run_policy with a spy returning a real
 season, so no checkpoint loads; the fast ones patch export_replay.SEASON_LENGTH to 1 day.
 
+The notes once the final is recorded (issue #56): while the ledger main reads has no final-result
+row, the trade-off footer's note is CARD_NOTE and the replay's REPLAY_NOTE, as before. Once it has
+one, they read "Recorded VALIDATION results; the 2012 test results are in docs/REPORT.md §5
+(<its row id>)" and "A replay of a recorded VALIDATION result; the 2012 test results are in
+docs/REPORT.md §5 (<its row id>)", and neither says "sealed"; nothing else in the cards changes.
+main reads that row through ledger.rows; _card_reads sends any read of the committed ledger to the
+tmp one, and the tests spend the seal on a copy of the synthetic ledger with ledger.final_register
+and ledger.final_result.
+
 The fast tests play 1- or 2-day seasons and write a GIF only. The slow ones run the CLI (60-day
 seasons, GIF and MP4 through ffmpeg) and are skipped without ffmpeg and ffprobe. The 2012 weather
 is sealed (PROTOCOL §8): every test runs under a tripwire on pandas.read_csv that fails before any
@@ -199,6 +208,8 @@ FOOTER_PLACE = f"VALIDATION, {VAL_PLACE} days " + ", ".join(
     str(s["start_day"]) for s in VALIDATION
 )  # "VALIDATION, Amsterdam 2010 days 45, 59, 75"
 CARD_NOTE = "Recorded VALIDATION results; the 2012 test weather is still sealed"
+# Its note once the ledger holds a final-result row (issue #56); {} is that row's id.
+CARD_FINAL_NOTE = "Recorded VALIDATION results; the 2012 test results are in docs/REPORT.md §5 ({})"
 PAPER_NOTE = "A simulator run, not a registered result"  # footer's default note, today's words
 CI_LINE = "IQM over seeds × seasons, 95% stratified bootstrap CI"
 CARD_FOOTER = "source: synthetic rows in a tmp ledger, commit 0123456"  # what the card tests pass
@@ -360,6 +371,10 @@ REPLAY_PLACE = (
     "VALIDATION, Amsterdam 2010 day 59"  # the replay's footer place, as the issue words it
 )
 REPLAY_NOTE = "A replay of a recorded VALIDATION result; the 2012 test weather is still sealed"
+# Its note once the ledger holds a final-result row (issue #56's scope note); {} is that row's id.
+REPLAY_FINAL_NOTE = (
+    "A replay of a recorded VALIDATION result; the 2012 test results are in docs/REPORT.md §5 ({})"
+)
 ARM = "residual_w05"
 RUN_COMMIT = "fedcba9876543210fedcba9876543210fedcba98"  # the fake runs' training commit, made up
 REPLAY_SEEDS = list(range(100, 110))  # E6's ten seeds
@@ -874,7 +889,10 @@ def _card_reads(monkeypatch, media, src: dict, **over) -> None:
     """main's card reads the synthetic rows, never the committed ones: TRADEOFF and E1_RESULT name
     them, and tradeoff_points and rb_tuned_reference are bound to the tmp ledger and parquet
     (their defaults bind the committed files at import). over replaces src's tradeoff, ledger or
-    parquet. Before #50 media has no card, so there is nothing to bind and main reads neither."""
+    parquet. Before #50 media has no card, so there is nothing to bind and main reads neither.
+    Any other ledger.rows read of the committed ledger (issue #56's: is a final-result row in it?)
+    reads src's ledger instead, so the notes follow src's rows and the committed file is never
+    opened."""
     src = {**src, **over}
     monkeypatch.setattr(media, "TRADEOFF", src["tradeoff"], raising=False)
     monkeypatch.setattr(media, "E1_RESULT", src["e1"], raising=False)
@@ -886,6 +904,12 @@ def _card_reads(monkeypatch, media, src: dict, **over) -> None:
         real = getattr(media, name, None)
         if real is not None:
             monkeypatch.setattr(media, name, functools.partial(real, **kwargs))
+    committed, inner = ledger.LEDGER.resolve(), ledger.rows
+
+    def rows(kind=None, issue=None, path=ledger.LEDGER):
+        return inner(kind, issue, src["ledger"] if Path(path).resolve() == committed else path)
+
+    monkeypatch.setattr(ledger, "rows", rows)
 
 
 def _refusal(case: str, src: dict, path: Path) -> tuple[list, set[str]]:
@@ -2882,6 +2906,137 @@ def test_main_replay_takes_profit_within_rel_1e9(sources, tmp_path, monkeypatch)
     assert media.main(["--out", str(tmp_path / "media"), "--replay", src["result"]]) == 0
 
     assert "duel" in calls
+
+
+# --- The notes once the final is recorded (issue #56) -------------------------------------------
+
+
+def _spend_seal(path: Path, result_id: str) -> str:
+    """Spend the seal once on the tmp ledger at path through the ledger's own API: a
+    final-registered row at result_id's selected checkpoints (baselines rb_default and rb_tuned),
+    then a final-result row over ledger.TEST_SPLITS. Returns the final-result's row id. Its numbers
+    are made up and never drawn (the notes name the row, never a number); no 2012 weather is read."""
+    [checkpoints] = [
+        r["selected"] for r in ledger.rows("result", path=path) if r["row_id"] == result_id
+    ]
+    freg = ledger.final_register(
+        issue=45,
+        checkpoints=checkpoints,
+        baselines=["rb_default", "rb_tuned"],
+        approved_by="Aarmen",
+        path=path,
+    )
+
+    def entry(arm: str, scored: dict) -> dict:
+        return {
+            "iqm": 1.0,
+            "ci_low": 0.5,
+            "ci_high": 1.5,
+            "guards": {key: {"iqm": 1.0, "ci_low": 0.5, "ci_high": 1.5} for key in HOUR_KEYS},
+            "invalid_episodes": 0,
+            "prob_improvement": None if arm == "rb_tuned" else 0.5,  # P(arm > rb_tuned)
+            "scored": dict(scored),
+        }
+
+    [arm] = {r["arm"] for r in ledger.rows("run", path=path) if r["row_id"] in checkpoints}
+    arms = {arm: checkpoints, "rb_default": {}, "rb_tuned": {}}
+    per_split = {s: {a: entry(a, at) for a, at in arms.items()} for s in ledger.TEST_SPLITS}
+    fres = ledger.final_result(final_registered=freg["row_id"], per_split=per_split, path=path)
+    return fres["row_id"]
+
+
+def _main_drawn(media, src: dict, out: Path, replay: dict | None = None) -> dict:
+    """main --out out on fake data in its own patch context, every drawing recorded
+    (_drawing_recorded) and the card, and main's other ledger reads, on src's ledger
+    (_card_reads). Without replay, play returns the cached 1-day seasons and ffmpeg is reported
+    available; with replay ({"src", "run"}), main --replay <src's result> runs in _replay_world.
+    Returns the recorded calls."""
+    with pytest.MonkeyPatch.context() as mp:
+        if replay is None:
+            mp.setattr(media, "play", lambda controller, season_length=60: _baseline(controller))
+            mp.setattr(FFMpegWriter, "isAvailable", classmethod(lambda cls: True))
+            _card_reads(mp, media, src)
+            calls = _drawing_recorded(mp, media)
+            argv = ["--out", str(out)]
+        else:
+            calls = _replay_world(mp, media, src, replay["src"], replay["run"])
+            argv = ["--out", str(out), "--replay", replay["src"]["result"]]
+        assert media.main(argv) == 0
+    return calls
+
+
+def test_main_tradeoff_note_says_sealed_until_a_final_result_row_then_names_it(sources, tmp_path):
+    """Done when (#56): with a tmp ledger without a final-result row the note says sealed; with
+    one, it names the row and never says "sealed".
+
+    main --out OUT runs twice on fake data (_main_drawn: 1-day seasons, every drawing recorded):
+    first on the synthetic ledger, which has no final-result row, then on a copy of it with the
+    seal spent (_spend_seal: a final-registered row at E3's checkpoints, then a final-result row,
+    written by ledger.final_register and ledger.final_result).
+    - The first trade-off footer carries today's note, CARD_NOTE.
+    - The second carries "Recorded VALIDATION results; the 2012 test results are in
+      docs/REPORT.md §5 (<that final-result row id>)" and never "sealed".
+    - Nothing else in the cards changes: the second footer is the first with only the note
+      swapped (line breaks aside), and the replay's and the baselines card's footers are the same
+      in both runs."""
+    media = _media_card()
+    path = tmp_path / "spent" / "ledger.jsonl"
+    path.parent.mkdir()
+    shutil.copyfile(sources["ledger"], path)
+    fres = _spend_seal(path, sources["rows"]["E3"]["result"])
+
+    sealed = _main_drawn(media, sources, tmp_path / "sealed" / "media")
+    spent = _main_drawn(media, {**sources, "ledger": path}, tmp_path / "spent" / "media")
+
+    before, after = (" ".join(c["tradeoff"]["footer"].split()) for c in (sealed, spent))
+    note = CARD_FINAL_NOTE.format(fres)
+    assert CARD_NOTE in before, before
+    assert note in after, (note, after)
+    assert "sealed" not in after.lower(), after
+    assert after == before.replace(CARD_NOTE, note), (before, after)
+    for name in ("replay", "card"):
+        assert spent[name]["footer"] == sealed[name]["footer"], name
+
+
+def test_main_replay_note_says_sealed_until_a_final_result_row_then_names_it(sources, tmp_path):
+    """Done when (#56's scope note): the replay's note (hero.png, duel_replay.gif and .mp4)
+    follows the trade-off card's rule.
+
+    main --out OUT --replay <result> runs twice on fake data (_replay_world: 1-day seasons,
+    rb_tuned played for real, run_policy a spy returning rb_default's 1-day SEASON, every drawing
+    recorded). Each run reads one tmp ledger for the card, the pick and the rest, as the CLI reads
+    one: first a copy of the synthetic ledger with the E6-shaped replay rows appended
+    (_replay_sources), which has no final-result row; then a copy of that one with the seal spent
+    after them (_spend_seal), so both name the same rows and run dirs.
+    - Without a final-result row duel_replay's footer carries today's note, REPLAY_NOTE.
+    - With one it carries "A replay of a recorded VALIDATION result; the 2012 test results are in
+      docs/REPORT.md §5 (<that final-result row id>)" and never "sealed".
+    - Nothing else changes: the second footer is the first with only the note swapped (line
+      breaks aside), and the title and caption are the same in both runs."""
+    media = _media_has()
+    rb, run = _graded("rb_tuned", 1), _graded("rb_default", 1)
+    root = tmp_path / "sealed"
+    root.mkdir()
+    shutil.copyfile(sources["ledger"], root / "ledger.jsonl")
+    src = _replay_sources(root, record=_record(run["result"]), rb_record=_record(rb["result"]))
+    spent = tmp_path / "spent" / "ledger.jsonl"
+    spent.parent.mkdir()
+    shutil.copyfile(src["ledger"], spent)
+    fres = _spend_seal(spent, sources["rows"]["E3"]["result"])
+    duels = {}
+    for case, path in (("sealed", src["ledger"]), ("spent", spent)):
+        replay = {"src": {**src, "ledger": path}, "run": run}
+        calls = _main_drawn(media, {**sources, "ledger": path}, path.parent / "media", replay)
+        duels[case] = calls["duel"]
+
+    before, after = (" ".join(duels[c]["footer"].split()) for c in ("sealed", "spent"))
+    note = REPLAY_FINAL_NOTE.format(fres)
+    assert REPLAY_NOTE in before, before
+    assert note in after, (note, after)
+    assert "sealed" not in after.lower(), after
+    assert after == before.replace(REPLAY_NOTE, note), (before, after)
+    for key in ("title", "caption"):
+        assert duels["spent"][key] == duels["sealed"][key], key
 
 
 def test_cli_runs_as_a_module_and_lists_out(tmp_path):

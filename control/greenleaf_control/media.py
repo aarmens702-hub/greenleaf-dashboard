@@ -789,6 +789,13 @@ def main(argv: list[str] | None = None) -> int:
     points = tradeoff_points()
     references = [rb_tuned_reference(n) for n in sorted({len(p["seeds"]) for p in points})]
     pick = None if args.replay is None else replay_pick(args.replay)
+    # The test weather: sealed until the ledger holds the final-result row (one at most).
+    finals = ledger.rows("final-result", path=ledger.LEDGER)
+    test_weather = (
+        f"the 2012 test results are in docs/REPORT.md §5 ({finals[0]['row_id']})"
+        if finals
+        else "the 2012 test weather is still sealed"
+    )
 
     seasons = {c: play(c) for c in CARD}
     invalid = {c: s["result"] for c, s in seasons.items() if not s["result"]["valid"]}
@@ -858,7 +865,7 @@ def main(argv: list[str] | None = None) -> int:
         f"{', '.join(rows)},\n{RB_PARQUET}",  # two lines: one is wider than the card
         stamp,
         place=VAL_NAME,
-        note="Recorded VALIDATION results; the 2012 test weather is still sealed",
+        note=f"Recorded VALIDATION results; {test_weather}",
     )
     tradeoff_card(points, references, args.out / "tradeoff.png", footer=tradeoff_footer)
 
@@ -915,8 +922,7 @@ def main(argv: list[str] | None = None) -> int:
                 f"{run_name},\n{named}",  # two lines: one is wider than the still
                 stamp,
                 place=f"VALIDATION, {place} day {SEASON['start_day']}",
-                note="A replay of a recorded VALIDATION result; the 2012 test weather is still"
-                " sealed",
+                note=f"A replay of a recorded VALIDATION result; {test_weather}",
             ),
         )
         replay = {
