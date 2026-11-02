@@ -516,3 +516,47 @@ Paths are relative to `control/`. Scenario dicts are `{"location": str, "growth_
     legend, then a pipe table with one row per label (3 decimals, hours 2). Neither text file carries a timestamp or
     the out path.
   - Prints `matches the ledger: <k> (arm, key) pairs`, then one line per label.
+
+## `greenleaf_control.site_build` (S1, for the demo site; plays no season, writes no ledger row)
+- Here `site/` and `control/...` paths are relative to the repo root (`root`), not to `control/`.
+- **Reads only recorded files:** imports stdlib, `ledger` and `manifest` only (no env, `evaluate`, `report`,
+  `export_replay` or `rewards`, so no `gl_gym`); opens no weather file; writes nothing outside `out`.
+- `CONTROLLERS`: the page's controllers, id → display name, in order: `rb_tuned` "Tuned rules", `rb_default`
+  "Default rules", `residual_w05` "Co-pilot, fixed penalty", `lag_b100` "Co-pilot, constrained", `ppo` "PPO, no
+  rules", `ppo_paper` "PPO, paper setup", `zero_controls` "Do nothing". `random` is left out everywhere.
+- `build(out: Path, *, root=manifest.REPO_ROOT, ledger_path=ledger.LEDGER, force=False) -> dict`:
+  - returns `{"final_result": <final-result row id>, "replays": <int, copied into out/data/final>, "files": <int,
+    files written>, "bytes": <int, their total size>}`.
+  - **The final** is the ledger's one `final-result` row; its replays are `root/control/results/final/<the
+    final-registered row it names>/replays`, never typed.
+  - **Copies, byte for byte:** every plain file directly in `root/site` and `root/site/data/*.json`, to the same
+    relative path under `out`; and each page controller's `<id>_<Location>_2012_<day>.json` from the final's replays to
+    `out/data/final/` under its own name (7 × 3 cities × 8 start days = 168 today).
+  - **`out/data/index.json`:** `{"final_result", "splits"}`; splits `amsterdam_2012`, `london_2012`, `abbotsford_2012`,
+    `validation` in that order, each `{"id", "location", "year", "label", "dir", "start_days", "controllers"}`:
+    - `dir` is `data/final` for a 2012 split, `data` for validation; a replay is
+      `out/<dir>/<file_prefix>_<location>_<year>_<day>.json`;
+    - `start_days` are the days whose files are present, ascending; refused unless every controller has the same set;
+    - a controller is `{"id", "name", "file_prefix", "seed"}`, in `CONTROLLERS` order on a 2012 split (`file_prefix` =
+      id); validation lists `rb_tuned` and `residual_w05` (`file_prefix` `residual_w05_seed100`), what `site/data`
+      holds; `seed` = its replays' `meta.run.seed`, null when `meta.run` is null; refused if they disagree.
+  - **`out/data/results.json`:** `{<split id>: {"final_result" (2012 splits only), "note", "rows"}}`, in index.json's
+    split order:
+    - `note`: `"2012 test weather, scored once in the final (<row id>). Simulated, not a real greenhouse."`;
+      validation `"Validation seasons: checkpoints were selected on these. Simulated."`;
+    - `rows`: `root/control/results/analysis/<split>/summary.csv`'s labels in its order, `random` dropped; each
+      `{"controller", "n_runs", "invalid_episodes", "decision", <m>_{iqm,lo,hi} for m in profit_eur_m2, profit_gain,
+      viol_hours_total, viol_hours_co2, viol_hours_temp, viol_hours_rh, yield_kg_m2, "viol_hours_sum_iqm",
+      "rb_tuned_profit_iqm", "rb_tuned_viol_sum_iqm"}`: floats are `float(<the csv text>)`, the counts `int`, a blank
+      decision null; never recomputed or rounded;
+    - `controller`: the label on a 2012 split; on validation the page controller id of the final's baselines (by
+      name) and of each arm it scored (`ledger.final_arms`, by report's `<arm> #<issue>/<4 hex>` label of its
+      registration), null for every other label.
+  - Neither JSON holds NaN or Infinity (`allow_nan=False`).
+  - **Refusals** (`SystemExit` with a message), all before anything is made or written: the ledger has no
+    `final-result` row (the message names it); `out`, resolved and casefolded, is in or equal to `root/site`,
+    `root/control/results`, `root/control/runs` or `root/control/ledger`; `out` is `root` or an ancestor of it
+    (`force` included); `out` is non-empty without `force`. `force` overwrites same-named files and never deletes.
+- `main(argv=None, *, ledger_path=ledger.LEDGER) -> int`; CLI `python -m greenleaf_control.site_build --out DIR
+  [--force]` (`--out` required). Prints one line per file group (the site files, `<n> replays`, `index.json`,
+  `results.json`) and `<files> files, <bytes> bytes`; returns 0.
