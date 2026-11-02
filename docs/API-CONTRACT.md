@@ -476,11 +476,25 @@ Paths are relative to `control/`. Scenario dicts are `{"location": str, "growth_
 - `check_ledger(scores, *, ledger_path) -> int`: for every `result` row of a registration in the scores, each arm's
   primary and every guard (`iqm, ci_low, ci_high`) must equal `stats.iqm_ci` on the scores within 1e-12, else
   ValueError naming the result row, arm and key. Returns the number of (arm, key) pairs checked.
+- `figures(scores, summary, out_dir) -> None` (A1b): three PNGs drawn by `viz`, derived from the scores and the
+  summary, each with the footer `source: python -m greenleaf_control.report --split <split>; derived from
+  summary.csv / scores.parquet`:
+  - **Status** of a label: its decision's word (`adopted` or `dropped`), unless a decision note calls its arm otherwise:
+    `report.NOTE_CALLS[(decision row id, arm)]` (E4's `decision-b159ac9a` drops `residual_w4`) overrides the row's
+    word. None for a baseline (rb_tuned's E1 fold included) or an undecided arm.
+  - `per_scenario.png`: `viz.per_scenario`, panels `profit [€/m²]` and `total violation hours [h]`, every label's raw
+    runs × scenarios array, scenarios labelled `<location> day <start_day>`;
+  - `profiles.png`: `viz.profiles`, every label but rb_tuned, panels `profit gain over rb_tuned's same season [€/m²]`
+    (arm − rb_tuned) and `violation hours saved vs rb_tuned's same season [h]` (rb_tuned − arm); `highlight` = the
+    labels whose status is `adopted`;
+  - `tradeoff.png`: `viz.tradeoff`, one point per summary row at (`viol_saved_*`, `profit_gain_*`) with its status and
+    `n` = `n_runs` (a learning label under 5 runs reads `(n=<k>, no claim)`), so rb_tuned is the origin; x label
+    `violation hours saved vs rb_tuned [h]`, y label `profit gain over rb_tuned [€/m²]`.
 - `main(argv=None, *, ledger_path=ledger.LEDGER) -> int`; CLI `python -m greenleaf_control.report --split validation
   [--out DIR]`, `--out` defaulting to `ANALYSIS`.
   - Loads, checks and summarizes before a dir is made or a file is written; a refusal writes nothing.
   - Writes `<out>/<split>/scores.parquet` (load_scores' frame), `summary.csv` (summarize's, full precision) and
-    `summary.md`, replacing any previous version. `summary.md`: line 1 names the command and `summary.csv`, a legend,
-    then a pipe table with one row per label (3 decimals, hours 2). Neither text file carries a timestamp or the out
-    path.
+    `summary.md`, then `figures`' `per_scenario.png`, `profiles.png` and `tradeoff.png`, replacing any previous
+    version. `summary.md`: line 1 names the command and `summary.csv`, a legend, then a pipe table with one row per
+    label (3 decimals, hours 2). Neither text file carries a timestamp or the out path.
   - Prints `matches the ledger: <k> (arm, key) pairs`, then one line per label.

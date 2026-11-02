@@ -4,8 +4,10 @@
 
 rebuilds every arm's per-season scores from the ledger, the runs' selected.json files and
 evaluate's baseline parquets, checks them against the ledger's result rows, and only then writes
-<out>/<split>/{scores.parquet, summary.csv, summary.md}, replacing any previous version (a derived
-view; the ledger is the record). It plays no season, trains nothing and writes no ledger row.
+<out>/<split>/{scores.parquet, summary.csv, summary.md} and the figures (A1b) {per_scenario,
+profiles, tradeoff}.png, replacing any previous version (a derived view; the ledger is the record).
+Every figure is derived from scores.parquet and summary.csv. It plays no season, trains nothing
+and writes no ledger row.
 
 Every statistic is stats' on a label's runs (by seed) x scenarios (split order) array, the order
 selection scored in. rb_tuned is 1 deterministic run x S seasons, so its like-for-like bar is its
@@ -19,7 +21,7 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
-from greenleaf_control import envs, ledger, metrics, scenarios, selection, stats
+from greenleaf_control import envs, ledger, metrics, scenarios, selection, stats, viz
 
 ANALYSIS = Path(__file__).resolve().parents[1] / "results" / "analysis"
 BASELINE = "rb_tuned"
@@ -35,6 +37,10 @@ METRICS = (
 VIOL = tuple(f"viol_hours_{c}" for c in metrics.CONSTRAINTS)
 # PROTOCOL §6: deterministic arms (the RBs, zero_controls) need one run.
 DETERMINISTIC = ("zero_controls", "rb_default", "rb_tuned")
+# A decision row calls a whole registration, but its note can call one arm otherwise; the figures
+# draw (decision row id, arm) -> that arm's own call, as media.TRADEOFF does. E4 (#34) has one
+# decision row, decision-b159ac9a, "adopted", and its note drops residual_w4.
+NOTE_CALLS = {("decision-b159ac9a", "residual_w4"): "dropped"}
 IDS = ("label", "arm", "issue", "registered", "result", "decision", "protocol", "run", "seed")
 COLUMNS = (
     *IDS,
@@ -357,6 +363,66 @@ def _markdown(summary: pd.DataFrame, split: str) -> str:
     return "\n".join(lines) + "\n"
 
 
+def figures(scores: pd.DataFrame, summary: pd.DataFrame, out_dir: Path) -> None:
+    """out_dir/{per_scenario, profiles, tradeoff}.png, drawn by viz from the scores and the summary
+    (PROTOCOL §6), each with a footer naming the command:
+    - per_scenario: every label's raw runs x scenarios profit and total violation hours, the
+      scenarios labelled `<location> day <start_day>`;
+    - profiles: every label but rb_tuned, paired with rb_tuned's same season: profit gain (arm -
+      rb_tuned) and violation hours saved (rb_tuned - arm); the adopted labels highlighted;
+    - tradeoff: one point per summary row at (viol_saved, profit_gain) IQM [CI] with its status
+      and n_runs, so rb_tuned sits at the origin and up and to the right beats it on both.
+
+    A label's status is its decision's word ("adopted", "dropped"), NOTE_CALLS' call for its
+    arm overriding it; None for a baseline (rb_tuned's E1 fold included) or an undecided arm.
+    """
+    split = scores["split"].iloc[0]
+    seasons = [f"{s['location']} day {s['start_day']}" for s in scenarios.SPLITS[split]]
+    footer = (
+        f"source: python -m greenleaf_control.report --split {split}; derived from"
+        " summary.csv / scores.parquet"
+    )
+    arm = dict(zip(scores["label"], scores["arm"], strict=True))
+    status = {}
+    for label, decision in zip(summary["label"], summary["decision"].fillna(""), strict=True):
+        word, _, row_id = decision.partition(" ")
+        call = NOTE_CALLS.get((row_id, arm[label]), word) or None
+        status[label] = None if label in envs.BASELINES else call
+    rows = {label: scores[scores["label"] == label] for label in summary["label"]}
+    profit = {label: _matrix(r, "profit_eur_m2") for label, r in rows.items()}
+    hours = {label: _matrix(r, "viol_hours_total") for label, r in rows.items()}
+    panels = {"profit [€/m²]": profit, "total violation hours [h]": hours}
+    viz.per_scenario(panels, seasons, out_dir / "per_scenario.png", footer=footer)
+    arms = [label for label in rows if label != BASELINE]
+    gains = {
+        "profit gain over rb_tuned's same season [€/m²]": {
+            label: profit[label] - profit[BASELINE] for label in arms
+        },
+        "violation hours saved vs rb_tuned's same season [h]": {
+            label: hours[BASELINE] - hours[label] for label in arms
+        },
+    }
+    adopted = tuple(label for label in arms if status[label] == "adopted")
+    viz.profiles(gains, out_dir / "profiles.png", highlight=adopted, footer=footer)
+    points = [
+        {
+            "label": r["label"],
+            "profit": tuple(r[f"profit_gain_{s}"] for s in ("iqm", "lo", "hi")),
+            "viol_hours": tuple(r[f"viol_saved_{s}"] for s in ("iqm", "lo", "hi")),
+            "status": status[r["label"]],
+            "n": r["n_runs"],
+        }
+        for r in summary.to_dict("records")
+    ]
+    viz.tradeoff(
+        points,
+        out_dir / "tradeoff.png",
+        xlabel="violation hours saved vs rb_tuned [h]",
+        ylabel="profit gain over rb_tuned [€/m²]",
+        footer=footer,
+    )
+
+
 def main(argv: list[str] | None = None, *, ledger_path: Path = ledger.LEDGER) -> int:
     p = argparse.ArgumentParser(prog="python -m greenleaf_control.report")
     p.add_argument(
@@ -378,6 +444,7 @@ def main(argv: list[str] | None = None, *, ledger_path: Path = ledger.LEDGER) ->
     scores.to_parquet(out / "scores.parquet")
     summary.to_csv(out / "summary.csv", index=False)
     (out / "summary.md").write_text(table)
+    figures(scores, summary, out)
     print(f"matches the ledger: {pairs} (arm, key) pairs")
     for r in summary.to_dict("records"):
         print(

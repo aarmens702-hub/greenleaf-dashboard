@@ -12,11 +12,42 @@ axes, lines, patches and errorbar containers), never its pixels:
   horizontal line at it, labelled "reference".
 - lambda_traces(lambdas_csv, out): lambda_<c> against timesteps, one line per metrics.CONSTRAINTS
   entry, labelled c.
-- tradeoff(points, out): one errorbar per point at (viol_hours IQM, profit IQM), its bars reaching
-  each CI's lo and hi, labelled in a legend.
+- tradeoff(points, out, *, xlabel="violation hours [h]", ylabel="profit [€/m²]", footer=None):
+  one errorbar per point at (viol_hours IQM, profit IQM), its bars reaching each CI's lo and hi,
+  each errorbar labelled p["label"].
 
-A refused input (a frame without 6 actuators, a run dir without exactly one event file, or nothing
-to draw: no run dirs, no points, a header-only lambdas.csv) is a ValueError, and no PNG is written.
+Issue #47 (A1b) adds the report's two other figures and the tradeoff keywords:
+- per_scenario(panels, scenario_labels, out, *, footer=None): one axes per panel (x label its key),
+  one row per label (a y tick, dict order, the first on top), every value of the label's runs x
+  scenarios array a scatter dot in its row, the scenarios told apart and named.
+- profiles(panels, out, *, highlight=(), footer=None): one axes per panel (x label its key), one
+  ax.ecdf(values.ravel(), complementary=True, label=f"{label} (n={values.size})") per label, a
+  dashed vertical line at 0, y label "fraction of seeds × seasons above τ".
+
+Aarmen's "Instrument" style for public figures (the orchestrator's defaults on #47) changes the
+issue's "white facecolor" and "colours from tab20" for these three report figures. These are
+requirement changes, not loosened checks:
+- facecolor GROUND #F2F3F0 (season_strip, learning_curves and lambda_traces stay white);
+- monochrome with direct labels: every point or highlighted line carries its own text in ax.texts,
+  in MONO; a legend is never the only way to identify one. profiles' highlighted labels are INK
+  #111311 and labelled, the others HAIRLINE #D5D8D2 and unlabelled;
+- the tradeoff's limits fit the learning arms (labels not in envs.BASELINES, which viz tells by
+  name) with their CIs; a point outside them (on VALIDATION zero_controls, random, rb_default) is
+  a triangle on the axes edge pointing outward, plus a text with its label and true value(s);
+- footer=None is a keyword: the report passes its source line.
+
+The fix round on #47 (the orchestrator's rules) adds:
+- a point's optional "status" ("adopted", "dropped" or None): only an adopted learning arm gets
+  ink (a filled INK dot, an INK label); a dropped or undecided one is hollow and MUTED #6A6F68;
+- a one-line MONO key on the tradeoff and on profiles naming the encoding (it says "adopted",
+  "dropped" and "rb_tuned");
+- per_scenario's far baseline row: its values outside the learning arms' x range are a triangle
+  on that row's edge plus a text giving their true lo and hi, never dots;
+- viz.BASELINES, its own copy of envs.BASELINES (viz can't import envs), kept equal to it.
+
+A refused input (a frame without 6 actuators, a run dir without exactly one event file, a
+per_scenario array whose columns aren't the scenarios, or nothing to draw: no run dirs, no points,
+no panels, a header-only lambdas.csv) is a ValueError, and no PNG is written.
 
 viz reads only metrics' constants: it never imports rewards, envs, lagrangian or train.
 
@@ -27,20 +58,25 @@ guard. Nothing here touches control/runs/ or the real ledger.
 
 import ast
 import csv
+import inspect
+import re
 from pathlib import Path
 
 import numpy as np
 import pandas as pd
 import pytest
-from matplotlib.colors import to_hex
+from matplotlib.collections import PathCollection
+from matplotlib.colors import to_hex, to_rgba
 from matplotlib.container import ErrorbarContainer
 from matplotlib.figure import Figure
+from matplotlib.markers import MarkerStyle
 from matplotlib.patches import Rectangle
+from matplotlib.text import Text
 from stable_baselines3.common.logger import configure
 from tensorboard.backend.event_processing.event_accumulator import EventAccumulator
 
 import greenleaf_control
-from greenleaf_control import metrics
+from greenleaf_control import envs, metrics
 
 # greenleaf_control.viz is imported inside each test body, so while it is missing each test FAILS
 # rather than ERRORs at collection.
@@ -75,12 +111,107 @@ CURVES = {
 }
 DECOY = 99.0  # train/approx_kl, logged at every dump; it must never be drawn
 
-# (iqm, lo, hi) as stats.iqm_ci returns them; every bar is asymmetric (iqm - lo != hi - iqm)
+# (iqm, lo, hi) as stats.iqm_ci returns them; every bar is asymmetric (iqm - lo != hi - iqm). All
+# three are learning arms (no envs.BASELINES label), so the axes fit them all (#47: a baseline
+# outside the learning arms' limits is an edge marker, not an errorbar).
 POINTS = [
-    {"label": "rb_default", "profit": (12.5, 10.0, 14.0), "viol_hours": (40.0, 30.0, 52.0)},
+    {"label": "ppo", "profit": (12.5, 10.0, 14.0), "viol_hours": (40.0, 30.0, 52.0)},
     {"label": "residual", "profit": (15.25, 14.5, 16.0), "viol_hours": (60.5, 48.0, 64.0)},
     {"label": "residual_lag", "profit": (13.0, 11.75, 13.5), "viol_hours": (8.0, 6.5, 12.25)},
 ]
+
+# The Instrument style (#47, the orchestrator's defaults), as matplotlib's to_hex gives them
+GROUND = "#f2f3f0"  # the report figures' facecolor
+INK = "#111311"  # profiles' highlighted (adopted) lines
+HAIRLINE = "#d5d8d2"  # profiles' other lines
+MUTED = "#6a6f68"  # the tradeoff's dropped and undecided arms
+MONO = ["Menlo", "DejaVu Sans Mono"]  # the requested family of direct labels, installed ones only
+# The VALIDATION scenarios as report labels them, `<location> day <start_day>`
+SCENARIO_LABELS = ["Amsterdam day 45", "Amsterdam day 59", "Amsterdam day 75"]
+FOOTER = (
+    "source: python -m greenleaf_control.report --split validation; derived from"
+    " summary.csv / scores.parquet"
+)
+# The key's words: the tradeoff's and profiles' encoding names these three
+KEY_WORDS = ("adopted", "dropped", "rb_tuned")
+
+# per_scenario's panels: label -> runs x scenarios. Every value is distinct within its row, so a
+# dot's x names its scenario column; rb_tuned's values sit inside the learning arms' range
+# (profit -2.5..4.0, hours 0..30), so no dot is an edge marker.
+PROFIT_KEY, HOURS_KEY = "profit [€/m²]", "total violation hours [h]"
+PANELS = {
+    PROFIT_KEY: {
+        "rb_tuned": np.array([[-2.0, 1.0, 2.0]]),
+        "ppo #33/0221": np.array([[1.5, 2.5, 3.5], [0.25, 4.0, 2.75]]),
+        "lag_b100 #39/6d92": np.array([[-1.0, 0.5, 1.25], [3.0, -2.5, 0.75], [2.0, -0.5, 1.75]]),
+    },
+    HOURS_KEY: {
+        "rb_tuned": np.array([[3.0, 9.0, 21.0]]),
+        "ppo #33/0221": np.array([[12.0, 4.0, 30.0], [7.0, 18.0, 25.0]]),
+        "lag_b100 #39/6d92": np.array([[0.0, 6.0, 15.0], [2.0, 11.0, 27.0], [5.0, 8.0, 19.0]]),
+    },
+}
+# random, a far baseline row for per_scenario (#46's VALIDATION random sits near -30 €/m²
+# and 1,300 h): in each panel two values far outside the learning arms' range and one inside it.
+FAR_ROW = {
+    PROFIT_KEY: np.array([[-30.0, -28.0, 1.5]]),
+    HOURS_KEY: np.array([[2600.0, 2400.0, 10.0]]),
+}
+# panel: (the side its two far values are off, their true lo and hi, the one value inside)
+FAR_SIDES = {PROFIT_KEY: ("left", -30.0, -28.0, 1.5), HOURS_KEY: ("right", 2400.0, 2600.0, 10.0)}
+
+# profiles' panels: label -> runs x scenarios of paired changes against rb_tuned. ppo's profit
+# gains are the issue's (-1, 0.5, 2, 3): 0.75 of them above tau just above -1, 0.5 at tau = 1.
+GAIN_KEY = "profit gain over rb_tuned's same season [€/m²]"
+SAVED_KEY = "violation hours saved vs rb_tuned's same season [h]"
+PROFILES = {
+    GAIN_KEY: {
+        "zero_controls": np.array([[4.0, -2.0]]),
+        "ppo #33/0221": np.array([[-1.0, 2.0], [0.5, 3.0]]),
+        "lag_b50 #35/976c": np.array([[0.25, -0.75], [1.5, -1.25], [2.5, 0.75]]),
+    },
+    SAVED_KEY: {
+        "zero_controls": np.array([[-2500.0, -2400.0]]),
+        "ppo #33/0221": np.array([[60.0, -10.0], [35.0, 90.0]]),
+        "lag_b50 #35/976c": np.array([[180.0, 150.0], [210.0, -5.0], [120.0, 195.0]]),
+    },
+}
+PROFILES_YLABEL = "fraction of seeds × seasons above τ"
+
+# The report's trade-off: x violation hours saved vs rb_tuned [h], y profit gain over rb_tuned
+# [€/m²], (iqm, lo, hi). The three learning arms span x -18..310 and y -0.7..2.5, CIs included;
+# rb_tuned's origin is inside. #46's VALIDATION table puts the other baselines far outside
+# (zero_controls -2587 h, random -29.8 €/m², rb_default -388 h and -6.9 €/m²); here zero_controls
+# is off on the left only, random below only, rb_default both.
+SPREAD = [
+    {"label": "ppo #33/0221", "profit": (2.4, 2.3, 2.5), "viol_hours": (60.0, 40.0, 80.0)},
+    {
+        "label": "residual_w4 #34/4d20",
+        "profit": (-0.6, -0.7, -0.5),
+        "viol_hours": (300.0, 295.0, 310.0),
+    },
+    {"label": "lag_b100 #39/6d92", "profit": (0.6, 0.5, 0.7), "viol_hours": (-10.0, -18.0, -2.0)},
+    {"label": "rb_tuned", "profit": (0.0, 0.0, 0.0), "viol_hours": (0.0, 0.0, 0.0)},
+    {"label": "zero_controls", "profit": (1.0, 1.0, 1.0), "viol_hours": (-2500.0,) * 3},
+    {"label": "random", "profit": (-30.0,) * 3, "viol_hours": (100.0,) * 3},
+    {"label": "rb_default", "profit": (-7.0,) * 3, "viol_hours": (-400.0,) * 3},
+]
+# label: (the sides of the axes it's off, the true values its text must give)
+OFF_LIMITS = {
+    "zero_controls": ({"left"}, [-2500.0]),
+    "random": ({"bottom"}, [-30.0]),
+    "rb_default": ({"left", "bottom"}, [-400.0, -7.0]),
+}
+# An edge marker's triangle and the side it points to: a str marker, or matplotlib's CARET and
+# CARETBASE ints
+TRIANGLES = {
+    "<": "left",
+    ">": "right",
+    "^": "top",
+    "v": "bottom",
+    **{k: side for k, side in zip((4, 5, 6, 7), ("left", "right", "top", "bottom"), strict=True)},
+    **{k: side for k, side in zip((8, 9, 10, 11), ("left", "right", "top", "bottom"), strict=True)},
+}
 
 
 def _frame(residual: bool = False) -> pd.DataFrame:
@@ -160,46 +291,207 @@ def _listing(path: Path) -> list[str] | None:
     return sorted(p.name for p in path.iterdir()) if path.exists() else None
 
 
+def _viz(name: str):
+    """viz.<name>; an assertion, not an AttributeError, while it is missing (#47 adds
+    per_scenario and profiles)."""
+    import greenleaf_control.viz as viz
+
+    assert hasattr(viz, name), f"greenleaf_control.viz.{name} doesn't exist yet (#47)"
+    return getattr(viz, name)
+
+
+def _args(plot: str, tmp_path: Path) -> list:
+    """The arguments before `out` of a well-formed call of viz.<plot>."""
+    return {
+        "season_strip": lambda: [_frame()],
+        "learning_curves": lambda: [_seed_dirs(tmp_path)],
+        "lambda_traces": lambda: [_lambdas_csv(tmp_path / "lambdas.csv")],
+        "tradeoff": lambda: [POINTS],
+        "per_scenario": lambda: [PANELS, SCENARIO_LABELS],
+        "profiles": lambda: [PROFILES],
+    }[plot]()
+
+
+def _texts(fig: Figure) -> list[str]:
+    """Every text drawn anywhere on fig (ax.texts, legends, fig.texts, tick labels), its
+    whitespace collapsed."""
+    return [" ".join(t.get_text().split()) for t in fig.findobj(Text)]
+
+
+def _rows(fig: Figure) -> dict[str, float]:
+    """{label: its row's y}, from the first panel's y tick labels (a shared y hides the others')."""
+    return {
+        t.get_text(): t.get_position()[1] for t in fig.axes[0].get_yticklabels() if t.get_text()
+    }
+
+
+def _top_down(ax, rows: dict[str, float]) -> list[str]:
+    """rows' labels from the top of ax to the bottom, as drawn (an inverted y axis included)."""
+    return sorted(rows, key=lambda label: -ax.transData.transform([(0.0, rows[label])])[0][1])
+
+
+def _rgba(colors, i: int) -> tuple:
+    return tuple(np.round(colors[i % len(colors)], 3)) if len(colors) else ("none",)
+
+
+def _dots(ax) -> list[tuple[float, float, tuple]]:
+    """(x, y, look) of every dot scattered on ax (each offset of each PathCollection); look is its
+    marker path, face and edge colours and size, so dots that look alike share it."""
+    out = []
+    for coll in ax.collections:
+        if not isinstance(coll, PathCollection):
+            continue
+        paths, sizes = coll.get_paths(), coll.get_sizes()
+        faces, edges = coll.get_facecolors(), coll.get_edgecolors()
+        for i, (x, y) in enumerate(np.asarray(coll.get_offsets(), dtype=float)):
+            path = paths[i % len(paths)] if paths else None
+            look = (
+                None if path is None else tuple(np.round(path.vertices, 3).ravel()),
+                _rgba(faces, i),
+                _rgba(edges, i),
+                float(sizes[i % len(sizes)]) if len(sizes) else None,
+            )
+            out.append((float(x), float(y), look))
+    return out
+
+
+def _by_row(ax, rows: dict[str, float]) -> dict[str, list[tuple[float, float, tuple]]]:
+    """ax's dots grouped by the row whose tick is nearest, as (x, y offset from the row, look);
+    every dot must lie within half a row spacing of its row."""
+    ys = sorted(rows.values())
+    half = min(np.diff(ys)) / 2 if len(ys) > 1 else 0.5
+    out = {label: [] for label in rows}
+    for x, y, look in _dots(ax):
+        label = min(rows, key=lambda r: abs(rows[r] - y))
+        assert abs(rows[label] - y) < half, f"a dot at y {y} is in no row of {rows}"
+        out[label].append((x, round(y - rows[label], 3), look))
+    return out
+
+
+def _row_at(ax, rows: dict[str, float], xy) -> str:
+    """The label of the row nearest a position given in ax's axes fractions."""
+    y = ax.transData.inverted().transform(ax.transAxes.transform(xy))[1]
+    return min(rows, key=lambda label: abs(rows[label] - y))
+
+
+def _triangle_side(path) -> str | None:
+    """The side a scatter's marker path points to, if it is one of the four triangles."""
+    for marker, side in (("<", "left"), (">", "right"), ("^", "top"), ("v", "bottom")):
+        style = MarkerStyle(marker)
+        ref = style.get_path().transformed(style.get_transform())
+        if ref.vertices.shape == path.vertices.shape and np.allclose(ref.vertices, path.vertices):
+            return side
+    return None
+
+
+def _triangles(ax) -> list[tuple[str, np.ndarray]]:
+    """(side it points to, position in axes fractions) of every triangle marker on ax, drawn by
+    plot (a Line2D marker) or scatter (a PathCollection), in data or axes coordinates."""
+    to_axes = ax.transAxes.inverted()
+    out = []
+    for line in ax.get_lines():
+        marker = line.get_marker()
+        side = TRIANGLES.get(marker) if isinstance(marker, str | int) else None
+        if side is not None:
+            at = to_axes.transform(line.get_transform().transform(line.get_xydata()))
+            out += [(side, xy) for xy in at]
+    for coll in ax.collections:
+        paths = coll.get_paths() if isinstance(coll, PathCollection) else []
+        side = _triangle_side(paths[0]) if len(paths) == 1 else None
+        if side is not None:
+            at = coll.get_offset_transform().transform(np.asarray(coll.get_offsets(), dtype=float))
+            out += [(side, xy) for xy in to_axes.transform(at)]
+    return out
+
+
+def _numbers(text: str) -> list[float]:
+    """Every number written in text: a Unicode minus read as -, a thousands comma dropped."""
+    text = re.sub(r"(?<=\d),(?=\d{3}(?!\d))", "", text.replace("−", "-"))
+    return [float(n) for n in re.findall(r"[-+]?\d+(?:\.\d+)?", text)]
+
+
+def _names(text: str, label: str) -> bool:
+    """text names label as a whole: "residual" isn't named by "residual_lag"."""
+    return re.search(rf"(?<!\w){re.escape(label)}(?!\w)", text) is not None
+
+
+def _gives(text: str, value: float) -> bool:
+    """text writes value, to 1% (or 0.05 near zero)."""
+    return any(abs(n - value) <= max(0.01 * abs(value), 0.05) for n in _numbers(text))
+
+
+def _above(line, tau: float) -> float:
+    """A complementary-ECDF line's y at tau. ax.ecdf(complementary=True) draws steps-pre: on
+    x[i - 1] < tau <= x[i] the line reads y[i]."""
+    x, y = (np.asarray(d, dtype=float) for d in (line.get_xdata(), line.get_ydata()))
+    assert x[0] < tau <= x[-1], (tau, x)
+    return float(y[np.searchsorted(x, tau, side="left")])
+
+
 # Every function
 
 
-@pytest.mark.parametrize("plot", ["season_strip", "learning_curves", "lambda_traces", "tradeoff"])
-def test_every_plot_returns_a_white_figure_and_saves_it_as_png(plot, tmp_path):
-    """A white facecolor (not transparent) keeps each PNG readable in both light and dark README
-    themes; the function returns the Figure it saved."""
-    import greenleaf_control.viz as viz
+FACECOLOR = {
+    "season_strip": "#ffffff",
+    "learning_curves": "#ffffff",
+    "lambda_traces": "#ffffff",
+    # The report's figures (#47): GROUND, Aarmen's Instrument style for public visuals
+    "tradeoff": GROUND,
+    "per_scenario": GROUND,
+    "profiles": GROUND,
+}
 
-    first = {
-        "season_strip": lambda: _frame(),
-        "learning_curves": lambda: _seed_dirs(tmp_path),
-        "lambda_traces": lambda: _lambdas_csv(tmp_path / "lambdas.csv"),
-        "tradeoff": lambda: POINTS,
-    }[plot]()
+
+@pytest.mark.parametrize("plot", list(FACECOLOR))
+def test_every_plot_returns_its_figure_on_an_opaque_facecolor_and_saves_it_as_png(plot, tmp_path):
+    """An opaque facecolor (not transparent) keeps each PNG readable in both light and dark README
+    themes; the function returns the Figure it saved.
+
+    A run's plots stay white. The report's three figures (tradeoff, per_scenario, profiles) are on
+    GROUND #F2F3F0: a requirement change (the Instrument style Aarmen chose for every public
+    visual, the orchestrator's default on #47), not a loosened check."""
+    plot_fn = _viz(plot)
+    args = _args(plot, tmp_path)
     out = tmp_path / f"{plot}.png"
-    fig = getattr(viz, plot)(first, out)
+    fig = plot_fn(*args, out)
     assert isinstance(fig, Figure)
-    assert to_hex(fig.get_facecolor()) == "#ffffff"
+    assert to_hex(fig.get_facecolor()) == FACECOLOR[plot]
     _assert_png(out)
 
 
 @pytest.mark.parametrize(
     "plot",
-    ["learning_curves", "lambda_traces", "tradeoff"],
-    ids=["no_run_dirs", "header_only_csv", "no_points"],
+    ["learning_curves", "lambda_traces", "tradeoff", "per_scenario", "profiles"],
+    ids=["no_run_dirs", "header_only_csv", "no_points", "no_scenario_panels", "no_profile_panels"],
 )
 def test_an_empty_input_raises_and_writes_no_png(plot, tmp_path):
     """Nothing to draw is a ValueError, never a blank PNG that reads as a run with no data."""
-    import greenleaf_control.viz as viz
-
+    plot_fn = _viz(plot)
     empty = {
-        "learning_curves": lambda: [],
-        "lambda_traces": lambda: _lambdas_csv(tmp_path / "lambdas.csv", rows=[]),
-        "tradeoff": lambda: [],
+        "learning_curves": lambda: [[]],
+        "lambda_traces": lambda: [_lambdas_csv(tmp_path / "lambdas.csv", rows=[])],
+        "tradeoff": lambda: [[]],
+        "per_scenario": lambda: [{}, SCENARIO_LABELS],
+        "profiles": lambda: [{}],
     }[plot]()
     out = tmp_path / f"{plot}.png"
     with pytest.raises(ValueError):
-        getattr(viz, plot)(empty, out)
+        plot_fn(*empty, out)
     assert not out.exists()
+
+
+@pytest.mark.parametrize("plot", ["per_scenario", "profiles", "tradeoff"])
+def test_the_report_figures_print_the_footer_they_are_given(plot, tmp_path):
+    """footer is a keyword-only argument, default None; given, it is a text of the figure (here
+    the report's source line), so a PNG names the command that made it."""
+    plot_fn = _viz(plot)
+    footer = inspect.signature(plot_fn).parameters.get("footer")
+    assert footer is not None, f"viz.{plot} takes no footer yet (#47)"
+    assert (footer.kind, footer.default) == (inspect.Parameter.KEYWORD_ONLY, None)
+    out = tmp_path / f"{plot}.png"
+    fig = plot_fn(*_args(plot, tmp_path), out, footer=FOOTER)
+    _assert_png(out)
+    assert any(FOOTER in text for text in _texts(fig)), _texts(fig)
 
 
 def _imported_modules(path: Path) -> set[str]:
@@ -236,6 +528,17 @@ def test_viz_never_imports_the_graded_code_or_pyplot(module):
     imported = _imported_modules(path)
     assert "greenleaf_control.metrics" in imported  # where BOUNDS and CONSTRAINTS come from
     assert not [name for name in imported if name == module or name.startswith(f"{module}.")]
+
+
+def test_viz_holds_envs_baselines():
+    """A drift guard: viz can't import envs (above), so it keeps its own copy of the baseline
+    names, which tell a baseline from a learning arm in every report figure. It must stay
+    envs.BASELINES: a baseline renamed or added there and not here would be fitted and inked as a
+    learning arm."""
+    import greenleaf_control.viz as viz
+
+    assert hasattr(viz, "BASELINES"), "viz.BASELINES doesn't exist"
+    assert tuple(viz.BASELINES) == envs.BASELINES
 
 
 # season_strip
@@ -396,8 +699,11 @@ def test_lambda_traces_draws_one_line_per_constraint(tmp_path):
 def test_tradeoff_draws_each_point_at_its_iqms_with_bars_to_its_cis(tmp_path):
     """One errorbar per point, labelled: the marker at (viol_hours IQM, profit IQM), a horizontal
     bar from viol_hours' lo to hi and a vertical bar from profit's lo to hi, both at the marker
-    (e.g. rb_default: marker (40, 12.5), bars x 30..52 at y 12.5 and y 10..14 at x 40). The legend
-    holds the three labels."""
+    (e.g. ppo: marker (40, 12.5), bars x 30..52 at y 12.5 and y 10..14 at x 40).
+
+    Each label is a direct text on the axes (ax.texts), not only a legend entry: the Instrument
+    style's direct labels (#47), a requirement change from "the legend holds the three labels". A
+    legend may still exist. "residual" must be its own text, not found inside "residual_lag"."""
     import greenleaf_control.viz as viz
 
     out = tmp_path / "tradeoff.png"
@@ -418,9 +724,345 @@ def test_tradeoff_draws_each_point_at_its_iqms_with_bars_to_its_cis(tmp_path):
         assert (sorted([x0, x1]), y0) == (pytest.approx([v_lo, v_hi]), profit), p["label"]
         [[(x0, y0), (x1, y1)]] = vertical
         assert (x0, sorted([y0, y1])) == (viol, pytest.approx([p_lo, p_hi])), p["label"]
-    legends = [ax.get_legend() for ax in fig.axes if ax.get_legend() is not None] + fig.legends
-    texts = [t.get_text() for legend in legends for t in legend.get_texts()]
-    assert sorted(texts) == sorted(p["label"] for p in POINTS)
+    texts = [t.get_text() for ax in fig.axes for t in ax.texts]
+    for p in POINTS:
+        assert any(_names(text, p["label"]) for text in texts), (p["label"], texts)
+
+
+@pytest.mark.parametrize(
+    "kwargs",
+    [
+        {},
+        {
+            "xlabel": "violation hours saved vs rb_tuned [h]",
+            "ylabel": "profit gain over rb_tuned [€/m²]",
+        },
+    ],
+    ids=["defaults", "the_reports_labels"],
+)
+def test_tradeoff_axis_labels_are_keywords_defaulting_to_todays(kwargs, tmp_path):
+    """xlabel and ylabel are keyword-only, defaulting to today's "violation hours [h]" and "profit
+    [€/m²]" (so a caller that passes neither draws what it drew before #47); the report passes its
+    paired-change labels."""
+    tradeoff = _viz("tradeoff")
+    params = inspect.signature(tradeoff).parameters
+    defaults = {"xlabel": "violation hours [h]", "ylabel": "profit [€/m²]"}
+    for name, default in defaults.items():
+        assert name in params, f"viz.tradeoff takes no {name} keyword yet (#47)"
+        assert (params[name].kind, params[name].default) == (
+            inspect.Parameter.KEYWORD_ONLY,
+            default,
+        )
+    out = tmp_path / "tradeoff.png"
+    fig = tradeoff(POINTS, out, **kwargs)
+    _assert_png(out)
+    want = {**defaults, **kwargs}
+    assert (fig.axes[0].get_xlabel(), fig.axes[0].get_ylabel()) == (want["xlabel"], want["ylabel"])
+
+
+def test_tradeoff_fits_its_axes_to_the_learning_arms(tmp_path):
+    """The limits fit the learning arms (labels not in envs.BASELINES) with a margin: each arm's
+    marker and both CI bars lie strictly inside them, and so does rb_tuned's origin. They don't
+    stretch to the far baselines: zero_controls (x -2500) is off on the left only, random (y -30)
+    below only, rb_default (-400, -7) on both. Without this, VALIDATION's zero_controls at -2587 h
+    squeezes every learning arm into one pixel column (the Instrument style's scale rule, #47)."""
+    tradeoff = _viz("tradeoff")
+    out = tmp_path / "tradeoff.png"
+    fig = tradeoff(SPREAD, out)
+    _assert_png(out)
+    ax = fig.axes[0]
+    (x0, x1), (y0, y1) = ax.get_xlim(), ax.get_ylim()
+    for p in SPREAD:
+        if p["label"] in envs.BASELINES:
+            continue
+        (_, v_lo, v_hi), (_, p_lo, p_hi) = p["viol_hours"], p["profit"]
+        assert x0 < v_lo and v_hi < x1, (p["label"], (x0, x1))
+        assert y0 < p_lo and p_hi < y1, (p["label"], (y0, y1))
+    assert x0 < 0.0 < x1 and y0 < 0.0 < y1, "rb_tuned's origin is off the axes"
+    for p in SPREAD:
+        if p["label"] in OFF_LIMITS:
+            x, y = p["viol_hours"][0], p["profit"][0]
+            off = {"left": x < x0, "right": x > x1, "bottom": y < y0, "top": y > y1}
+            sides = {side for side, is_off in off.items() if is_off}
+            assert sides == OFF_LIMITS[p["label"]][0], (p["label"], (x0, x1), (y0, y1))
+
+
+def test_tradeoff_labels_every_point_directly_in_mono(tmp_path):
+    """Every point, the off-limit baselines and rb_tuned included, has its own text on the axes
+    naming its label, in the requested MONO family list (the Instrument style's direct labels,
+    #47); no label is dropped."""
+    tradeoff = _viz("tradeoff")
+    out = tmp_path / "tradeoff.png"
+    fig = tradeoff(SPREAD, out)
+    _assert_png(out)
+    texts = list(fig.axes[0].texts)
+    for p in SPREAD:
+        mine = [t for t in texts if _names(t.get_text(), p["label"])]
+        assert mine, (p["label"], [t.get_text() for t in texts])
+        assert any(list(t.get_fontfamily()) == MONO for t in mine), (
+            p["label"],
+            [t.get_fontfamily() for t in mine],
+        )
+
+
+@pytest.mark.parametrize("label", list(OFF_LIMITS))
+def test_tradeoff_draws_an_off_limit_point_as_an_edge_marker_with_its_true_values(label, tmp_path):
+    """A point outside the limits isn't dropped or clipped away: a triangle sits on the axes edge
+    where the point would be (its in-range coordinate kept, its off coordinate clamped to the edge,
+    within 5% of the axes), pointing outward on a side the point is off (rb_default, off two
+    sides, sits at the lower-left corner pointing left or down), drawn by plot or scatter. One text
+    on the axes gives its label and the true value of each coordinate it's off: zero_controls
+    -2500 (h saved), random -30 (€/m²), rb_default -400 and -7 (a Unicode minus or a thousands
+    comma is fine)."""
+    tradeoff = _viz("tradeoff")
+    out = tmp_path / "tradeoff.png"
+    fig = tradeoff(SPREAD, out)
+    _assert_png(out)
+    ax = fig.axes[0]
+    sides, values = OFF_LIMITS[label]
+    [p] = [p for p in SPREAD if p["label"] == label]
+    at = ax.transAxes.inverted().transform(
+        ax.transData.transform([(p["viol_hours"][0], p["profit"][0])])
+    )[0]
+    edge = np.clip(at, 0.0, 1.0)
+    marks = [(side, xy) for side, xy in _triangles(ax) if side in sides]
+    assert any(np.all(np.abs(xy - edge) <= 0.05) for _, xy in marks), (
+        label,
+        edge,
+        _triangles(ax),
+    )
+    texts = [t.get_text() for t in ax.texts if _names(t.get_text(), label)]
+    assert any(all(_gives(text, v) for v in values) for text in texts), (label, values, texts)
+
+
+def _hollow(face) -> bool:
+    """A marker face that shows the ground through it: "none", fully transparent, or GROUND."""
+    if isinstance(face, str) and face.lower() == "none":
+        return True
+    return to_rgba(face)[3] == 0 or to_hex(face) == GROUND
+
+
+def test_tradeoff_inks_only_adopted_arms(tmp_path):
+    """The orchestrator's rule on #47: only an adopted learning arm gets ink. A point's "status"
+    is "adopted", "dropped" or None (undecided: no decision row yet). ppo (adopted) is a filled INK
+    dot (face and edge INK) with an INK direct label; residual_w4 (dropped) and lag_b100
+    (undecided) are hollow dots (face GROUND or none) with a MUTED #6A6F68 edge and MUTED direct
+    labels, so an undecided arm never reads as adopted."""
+    tradeoff = _viz("tradeoff")
+    statuses = {"ppo #33/0221": "adopted", "residual_w4 #34/4d20": "dropped"}
+    statuses["lag_b100 #39/6d92"] = None
+    points = [{**p, "status": statuses[p["label"]]} for p in SPREAD[:3]] + [SPREAD[3]]
+    out = tmp_path / "tradeoff.png"
+    fig = tradeoff(points, out)
+    _assert_png(out)
+    ax = fig.axes[0]
+    bars = {c.get_label(): c for c in ax.containers if isinstance(c, ErrorbarContainer)}
+    for label, status in statuses.items():
+        dot = bars[label].lines[0]
+        face, edge = dot.get_markerfacecolor(), to_hex(dot.get_markeredgecolor())
+        colours = {to_hex(t.get_color()) for t in ax.texts if _names(t.get_text(), label)}
+        if status == "adopted":
+            assert (to_hex(face), edge, colours) == (INK, INK, {INK}), (label, status)
+        else:
+            assert (_hollow(face), edge, colours) == (True, MUTED, {MUTED}), (
+                label,
+                status,
+                face,
+                edge,
+                colours,
+            )
+
+
+@pytest.mark.parametrize("plot", ["tradeoff", "profiles"])
+def test_tradeoff_and_profiles_carry_a_one_line_mono_key_to_their_encoding(plot, tmp_path):
+    """With direct labels and no colour legend, one line of MONO text names the encoding (exact
+    wording free): it says "adopted", "dropped" and "rb_tuned" (e.g. ink = adopted, hollow =
+    dropped or undecided, gains paired with rb_tuned's same season)."""
+    plot_fn = _viz(plot)
+    out = tmp_path / f"{plot}.png"
+    fig = plot_fn(*_args(plot, tmp_path), out)
+    _assert_png(out)
+    keys = [t for t in fig.findobj(Text) if all(w in t.get_text() for w in KEY_WORDS)]
+    assert keys, (plot, _texts(fig))
+    assert any("\n" not in t.get_text() and list(t.get_fontfamily()) == MONO for t in keys), [
+        (t.get_text(), t.get_fontfamily()) for t in keys
+    ]
+
+
+# per_scenario
+
+
+def test_per_scenario_draws_every_value_as_a_dot_in_its_labels_row(tmp_path):
+    """One axes per panel, its x label the panel's key. Each label is a y tick (every label, none
+    dropped), in dict order from the top (the first on top), and every value of its runs x
+    scenarios array is one scatter dot in its row: the x offsets in the row are the array's values
+    (rb_tuned's profit row is -2, 1, 2; ppo's six, lag_b100's nine), nothing more. A dot may sit a
+    little above or below its row's tick (under half a row), never in another row."""
+    per_scenario = _viz("per_scenario")
+    out = tmp_path / "per_scenario.png"
+    fig = per_scenario(PANELS, SCENARIO_LABELS, out)
+    _assert_png(out)
+    assert [ax.get_xlabel() for ax in fig.axes] == list(PANELS)
+    rows = _rows(fig)
+    labels = list(PANELS[PROFIT_KEY])
+    assert sorted(rows) == sorted(labels), rows
+    assert _top_down(fig.axes[0], rows) == labels
+    for ax, (key, arrays) in zip(fig.axes, PANELS.items(), strict=True):
+        got = _by_row(ax, rows)
+        for label in labels:
+            xs = sorted(x for x, _, _ in got[label])
+            assert xs == sorted(arrays[label].ravel().tolist()), (key, label)
+
+
+def test_per_scenario_tells_the_scenarios_apart_in_every_row_and_names_them(tmp_path):
+    """The issue's "coloured by scenario", monochrome under the Instrument style (#47): in each
+    row, every dot of one scenario column looks alike (marker, fill, edge, size and offset from the
+    row tick) and differs from the other two scenarios' dots, however that's drawn (shape, shade or
+    a small offset). Each scenario label ("Amsterdam day 45" ...) is a text of the figure (a
+    legend entry or a direct label), so a reader can name them."""
+    per_scenario = _viz("per_scenario")
+    out = tmp_path / "per_scenario.png"
+    fig = per_scenario(PANELS, SCENARIO_LABELS, out)
+    _assert_png(out)
+    rows = _rows(fig)
+    for ax, (key, arrays) in zip(fig.axes, PANELS.items(), strict=True):
+        got = _by_row(ax, rows)
+        for label, values in arrays.items():
+            column = {float(v): j for (_, j), v in np.ndenumerate(values)}
+            looks = {j: set() for j in range(len(SCENARIO_LABELS))}
+            for x, offset, look in got[label]:
+                assert x in column, (key, label, x)
+                looks[column[x]].add((offset, look))
+            assert all(len(s) == 1 for s in looks.values()), (key, label, looks)
+            assert len({next(iter(s)) for s in looks.values()}) == len(SCENARIO_LABELS), (
+                key,
+                label,
+                looks,
+            )
+    texts = _texts(fig)
+    for scenario in SCENARIO_LABELS:
+        assert any(scenario in text for text in texts), (scenario, texts)
+
+
+def test_per_scenario_draws_a_far_baselines_values_as_a_triangle_on_its_rows_edge(tmp_path):
+    """random's row (first) holds two values per panel far outside the learning arms' range
+    (profit -30 and -28 €/m², left of about -2.5; hours 2,400 and 2,600, right of about 30) and one
+    inside it (1.5, 10). The x limits still fit the learning arms and rb_tuned, so the far values
+    lie beyond the limit on their side. In random's row the dots are exactly the inside value; on
+    that row's edge a triangle points out (< in profit, > in hours, within 5% of the axes edge);
+    one text on the axes gives the far values' true lo and hi (-30 and -28; 2,400 and 2,600). The
+    other rows' dots are unchanged."""
+    per_scenario = _viz("per_scenario")
+    panels = {key: {"random": FAR_ROW[key], **arrays} for key, arrays in PANELS.items()}
+    out = tmp_path / "per_scenario.png"
+    fig = per_scenario(panels, SCENARIO_LABELS, out)
+    _assert_png(out)
+    rows = _rows(fig)
+    assert _top_down(fig.axes[0], rows) == ["random", *PANELS[PROFIT_KEY]]
+    for ax, key in zip(fig.axes, panels, strict=True):
+        side, lo, hi, inside = FAR_SIDES[key]
+        x0, x1 = ax.get_xlim()
+        assert (hi < x0) if side == "left" else (lo > x1), (key, (x0, x1))
+        got = _by_row(ax, rows)
+        assert [x for x, _, _ in got["random"]] == [inside], (key, got["random"])
+        for label, values in PANELS[key].items():
+            assert sorted(x for x, _, _ in got[label]) == sorted(values.ravel().tolist()), label
+        on_row = [xy for s, xy in _triangles(ax) if s == side and _row_at(ax, rows, xy) == "random"]
+        edge = 0.0 if side == "left" else 1.0
+        assert any(abs(xy[0] - edge) <= 0.05 for xy in on_row), (key, _triangles(ax))
+        texts = [t.get_text() for t in ax.texts]
+        assert any(_gives(t, lo) and _gives(t, hi) for t in texts), (key, lo, hi, texts)
+
+
+@pytest.mark.parametrize("columns", [2, 4])
+def test_per_scenario_refuses_an_array_whose_columns_arent_the_scenarios(columns, tmp_path):
+    """Every array is runs x scenarios: one with 2 or 4 columns against 3 scenario labels (here the
+    hours panel's last label) is a ValueError, and no PNG is written."""
+    per_scenario = _viz("per_scenario")
+    panels = {key: dict(arrays) for key, arrays in PANELS.items()}
+    panels[HOURS_KEY]["lag_b100 #39/6d92"] = np.arange(2.0 * columns).reshape(2, columns)
+    out = tmp_path / "per_scenario.png"
+    with pytest.raises(ValueError):
+        per_scenario(panels, SCENARIO_LABELS, out)
+    assert not out.exists()
+
+
+# profiles
+
+
+def test_profiles_draws_each_labels_fraction_above_tau(tmp_path):
+    """One complementary ECDF per label per panel, labelled "<label> (n=<values.size>)", drawn
+    steps-pre: at each tau between its smallest and largest value the line reads the fraction of
+    the label's values above tau. Known answers, ppo's profit gains (-1, 0.5, 2, 3): 3 of 4 above
+    tau = -0.999 (0.75), 3 of 4 above 0, 2 of 4 above 1 (0.5), 1 of 4 above 2.5."""
+    profiles = _viz("profiles")
+    out = tmp_path / "profiles.png"
+    fig = profiles(PROFILES, out)
+    _assert_png(out)
+    assert [ax.get_xlabel() for ax in fig.axes] == list(PROFILES)
+    for ax, (key, arrays) in zip(fig.axes, PROFILES.items(), strict=True):
+        lines = {line.get_label(): line for line in ax.get_lines()}
+        for label, values in arrays.items():
+            name = f"{label} (n={values.size})"
+            assert name in lines, (key, name, list(lines))
+            line = lines[name]
+            assert line.get_drawstyle() == "steps-pre", (key, name)
+            v = np.sort(values.ravel())
+            taus = [v[0] + 1e-3, *((v[:-1] + v[1:]) / 2)]
+            for tau in taus:
+                assert _above(line, tau) == pytest.approx(np.mean(v > tau), abs=1e-12), (key, tau)
+    ppo = {line.get_label(): line for line in fig.axes[0].get_lines()}["ppo #33/0221 (n=4)"]
+    for tau, fraction in [(-0.999, 0.75), (0.0, 0.75), (1.0, 0.5), (2.5, 0.25)]:
+        assert _above(ppo, tau) == pytest.approx(fraction, abs=1e-12), tau
+
+
+def test_profiles_marks_tau_zero_with_a_dashed_line_and_labels_the_y_axis(tmp_path):
+    """Each panel has a dashed vertical line at tau = 0 (where the profit profile reads the
+    same-season win fraction), and the y label "fraction of seeds × seasons above τ" (on every
+    panel, or on the first when the y axis is shared)."""
+    profiles = _viz("profiles")
+    out = tmp_path / "profiles.png"
+    fig = profiles(PROFILES, out)
+    _assert_png(out)
+    assert fig.axes[0].get_ylabel() == PROFILES_YLABEL
+    for ax in fig.axes:
+        assert ax.get_ylabel() in (PROFILES_YLABEL, ""), ax.get_ylabel()
+        zero = [
+            line
+            for line in ax.get_lines()
+            if line.get_linestyle() == "--"
+            and set(np.asarray(line.get_xdata(), dtype=float).tolist()) == {0.0}
+        ]
+        assert zero, (
+            ax.get_xlabel(),
+            [(ln.get_label(), ln.get_linestyle()) for ln in ax.get_lines()],
+        )
+
+
+def test_profiles_draws_highlighted_labels_in_ink_with_a_direct_label_and_the_rest_in_hairline(
+    tmp_path,
+):
+    """highlight names the adopted arms: each such line is INK #111311 with a direct text naming
+    its label on the axes; every other line is HAIRLINE #D5D8D2 with no text naming it, though its
+    ECDF is still drawn and labelled "<label> (n=...)" (the Instrument style, #47, in place of the
+    issue's tab20 colours)."""
+    profiles = _viz("profiles")
+    highlight = inspect.signature(profiles).parameters.get("highlight")
+    assert highlight is not None, "viz.profiles takes no highlight yet (#47)"
+    assert (highlight.kind, tuple(highlight.default)) == (inspect.Parameter.KEYWORD_ONLY, ())
+    out = tmp_path / "profiles.png"
+    fig = profiles(PROFILES, out, highlight=("ppo #33/0221",))
+    _assert_png(out)
+    for ax, (key, arrays) in zip(fig.axes, PROFILES.items(), strict=True):
+        lines = {line.get_label(): line for line in ax.get_lines()}
+        texts = [t.get_text() for t in ax.texts]
+        for label, values in arrays.items():
+            line = lines[f"{label} (n={values.size})"]
+            named = any(_names(text, label) for text in texts)
+            if label == "ppo #33/0221":
+                assert (to_hex(line.get_color()), named) == (INK, True), (key, label, texts)
+            else:
+                assert (to_hex(line.get_color()), named) == (HAIRLINE, False), (key, label, texts)
 
 
 # Drift guard against train's real output

@@ -45,6 +45,24 @@ null for a baseline. As these tests pin it:
   line per label; summary.csv at full precision, summary.md a pipe table (one row per label, 3
   decimals, hours at 2) under a first line naming the command and summary.csv; no timestamp or out
   path, so two --out dirs get identical bytes; a rerun replaces the files.
+- figures(scores, summary, out_dir) (#47, A1b), called by main after the tables: three PNGs next
+  to them, each drawn by viz (called as viz.<name>, so a spy that wraps the real function sees
+  it) with footer `source: python -m greenleaf_control.report --split validation; ...`:
+  - per_scenario.png: viz.per_scenario, two panels (profit, then total violation hours), every
+    label's raw runs x scenarios array, scenario labels `<location> day <start_day>`;
+  - profiles.png: viz.profiles, panels "profit gain over rb_tuned's same season [€/m²]" (arm -
+    rb_tuned) and "violation hours saved vs rb_tuned's same season [h]" (rb_tuned - arm), every
+    label but rb_tuned; highlight = the labels whose decision starts "adopted" (the Instrument
+    style's default on #47);
+  - tradeoff.png: viz.tradeoff, one point per summary row at (viol_saved_*, profit_gain_*),
+    rb_tuned at (0, 0, 0), x label "violation hours saved vs rb_tuned [h]", y label "profit gain
+    over rb_tuned [€/m²]".
+  The fix round on #47 adds: the footer says "derived from summary.csv / scores.parquet"; each
+  tradeoff point carries a "status" (its decision's call, "adopted" or "dropped", None for a
+  baseline or an undecided arm), with report.NOTE_CALLS[(decision row id, arm)] overriding it for
+  an arm a decision's note calls on its own (#34's decision-b159ac9a drops residual_w4); highlight
+  is the labels whose status is "adopted"; a learning label under 5 runs has "(n=<k>, no claim)"
+  in its drawn tradeoff label.
 
 Offline: every ledger, run dir, parquet and output is under tmp_path; selection.RESULTS is patched
 to tmp_path in every test that loads; every --out is under tmp_path. Nothing plays a season:
@@ -127,6 +145,9 @@ SUMMARY_COLUMNS = {
     *"rb_tuned_profit_iqm rb_tuned_viol_sum_iqm p_improve_profit p_improve_viol".split(),
     *(f"{m}_{s}" for m in (*METRICS, "profit_gain", "viol_saved") for s in ("iqm", "lo", "hi")),
 }
+# The figures (#47): viz's names, each written as <name>.png next to the tables
+FIGURES = ("per_scenario", "profiles", "tradeoff")
+PNG = b"\x89PNG\r\n\x1a\n"  # the 8-byte PNG signature
 
 
 # --- Seasons, parquets, ledgers --------------------------------------------------------------
@@ -975,10 +996,11 @@ def _md_table(text: str) -> list[tuple[str, str]]:
     return [(line.strip().strip("|").split("|")[0].strip(), line) for line in body]
 
 
-def test_main_writes_three_files_identical_across_out_dirs(tmp_path, monkeypatch, capsys):
+def test_main_writes_six_files_identical_tables_across_out_dirs(tmp_path, monkeypatch, capsys):
     """main --split validation --out DIR writes DIR/validation/{scores.parquet, summary.csv,
-    summary.md} and prints `matches the ledger: 7 (arm, key) pairs` (E1's 4 + alpha's 3) and a
-    line per label. A second --out, already holding a previous version of the three files, gets
+    summary.md} and, since #47, the three figures {per_scenario, profiles, tradeoff}.png (PNGs),
+    six files in all; it prints `matches the ledger: 7 (arm, key) pairs` (E1's 4 + alpha's 3) and
+    a line per label. A second --out, already holding a previous version of the three tables, gets
     them replaced, with summary.csv and summary.md byte-identical to the first's (no timestamp, no
     out path).
 
@@ -1006,7 +1028,16 @@ def test_main_writes_three_files_identical_across_out_dirs(tmp_path, monkeypatch
     printed = capsys.readouterr().out
     assert report.main(["--split", "validation", "--out", str(out2)], ledger_path=path) == 0
 
-    assert sorted(p.name for p in d1.iterdir()) == ["scores.parquet", "summary.csv", "summary.md"]
+    assert sorted(p.name for p in d1.iterdir()) == [
+        "per_scenario.png",
+        "profiles.png",
+        "scores.parquet",
+        "summary.csv",
+        "summary.md",
+        "tradeoff.png",
+    ]
+    for name in FIGURES:
+        assert (d1 / f"{name}.png").read_bytes()[:8] == PNG, name
     for name in ("summary.csv", "summary.md"):
         text = (d1 / name).read_text()
         assert (d2 / name).read_bytes() == (d1 / name).read_bytes(), name
@@ -1175,6 +1206,275 @@ def test_a_test_split_is_refused_before_any_parquet_is_read(split, tmp_path, mon
     assert not out.exists()
 
 
+# --- figures (#47) -----------------------------------------------------------------------------
+
+GAIN_KEY = "profit gain over rb_tuned's same season [€/m²]"
+SAVED_KEY = "violation hours saved vs rb_tuned's same season [h]"
+COMMAND = "python -m greenleaf_control.report --split validation"
+# zero_controls: profits -1, so gains (4, -2, -3) over RB's (-5, 1, 2); no violation hours, so
+# hours saved (3, 9, 21).
+ZERO = _seasons((-1, -1, -1))
+
+
+def _spies(monkeypatch) -> dict[str, list[dict]]:
+    """Wrap viz.per_scenario, viz.profiles and viz.tradeoff: each still draws and returns its
+    Figure, and each call is recorded as its arguments bound by name (defaults applied), the
+    Figure ("fig"), and whether the three tables were already in the PNG's dir ("after_tables")."""
+    from greenleaf_control import viz
+
+    calls = {}
+    for name in FIGURES:
+        assert hasattr(viz, name), f"greenleaf_control.viz.{name} doesn't exist yet (#47)"
+        calls[name] = []
+        real = getattr(viz, name)
+
+        def spy(*args, _real=real, _calls=calls[name], **kwargs):
+            bound = inspect.signature(_real).bind(*args, **kwargs)
+            bound.apply_defaults()
+            here = Path(bound.arguments["out"]).parent
+            tables = ("scores.parquet", "summary.csv", "summary.md")
+            fig = _real(*args, **kwargs)
+            _calls.append(
+                {
+                    **bound.arguments,
+                    "fig": fig,
+                    "after_tables": all((here / t).is_file() for t in tables),
+                }
+            )
+            return fig
+
+        monkeypatch.setattr(viz, name, spy)
+    return calls
+
+
+def _figure_world(path: Path, root: Path, results: Path) -> dict[str, dict]:
+    """The figures' ledger and files, tie-free in profit against rb_tuned, four labels (summarize
+    bootstraps each, about 1.3 s a label on the Mac, so no more):
+    - parquets: zero_controls (ZERO) and rb_tuned (RB); no random or rb_default;
+    - #36: alpha (ppo), seeds 0-4, _gain_arm's seasons (profit gains D: 1..12 and -1, -2, -3;
+      hours saved S), its result and an adopted decision;
+    - #37: bravo (residual), seeds 0 and 1, BRAVO's seasons, its result and a dropped decision.
+    Returns {label: seed -> seasons} in the summary's order (baselines, then #36, then #37)."""
+    _baseline(results, "zero_controls", ZERO)
+    _baseline(results, "rb_tuned", RB)
+    tables = {"zero_controls": {0: ZERO}, "rb_tuned": {0: RB}}
+    for issue, arm, method, table, decision in (
+        (36, "alpha", "ppo", _gain_arm(), "adopted"),
+        (37, "bravo", "residual", {s: BRAVO[s] for s in (0, 1)}, "dropped"),
+    ):
+        reg = _register(path, issue=issue, arms=((arm, method),), seeds=sorted(table))
+        _arm(path, root, reg, arm, table, method=method)
+        res = _result(path, reg, {arm: [table[s] for s in sorted(table)]})
+        ledger.decide(result=res["row_id"], decision=decision, note=arm, path=path)
+        tables[_label(arm, reg)] = table
+    return tables
+
+
+def _totals(by_seed: dict) -> np.ndarray:
+    """viol_hours_total's runs x VALIDATION array (co2 + temp + rh), rows by seed."""
+    return sum(_array(by_seed, v) for v in VIOL)
+
+
+def _above(line, tau: float) -> float:
+    """A complementary-ECDF line's y at tau. ax.ecdf(complementary=True) draws steps-pre: on
+    x[i - 1] < tau <= x[i] the line reads y[i]."""
+    assert line.get_drawstyle() == "steps-pre", line.get_drawstyle()
+    x, y = (np.asarray(d, dtype=float) for d in (line.get_xdata(), line.get_ydata()))
+    assert x[0] < tau <= x[-1], (tau, x)
+    return float(y[np.searchsorted(x, tau, side="left")])
+
+
+def _draw(report, monkeypatch, tmp_path: Path) -> tuple[dict, dict, pd.DataFrame, Path]:
+    """_figure_world, then main --split validation --out tmp_path/analysis under the spies.
+    Returns (calls, tables, the summary.csv main wrote, read back exactly, out)."""
+    calls = _spies(monkeypatch)
+    path = tmp_path / "ledger.jsonl"
+    tables = _figure_world(path, tmp_path, selection.RESULTS)
+    out = tmp_path / "analysis"
+    assert report.main(["--split", "validation", "--out", str(out)], ledger_path=path) == 0
+    for name in FIGURES:
+        assert len(calls[name]) == 1, f"main drew {name} {len(calls[name])} times, not once"
+    summary = pd.read_csv(out / "validation" / "summary.csv", float_precision="round_trip")
+    return calls, tables, summary, out
+
+
+def test_per_scenario_draws_raw_profit_and_total_hours_for_every_label(tmp_path, monkeypatch):
+    """per_scenario.png: two panels, profit then total violation hours, each holding every label
+    in the summary's order (zero_controls, rb_tuned, the adopted alpha, the dropped bravo) with
+    its raw runs (by seed) x scenarios array from the scores: rb_tuned's profit row is (-5, 1, 2)
+    and its hours (3, 9, 21); alpha's are RB + D and RB's totals - S. The scenario labels are
+    `<location> day <start_day>` in VALIDATION order."""
+    report, _ = _report(monkeypatch, tmp_path)
+    calls, tables, _, out = _draw(report, monkeypatch, tmp_path)
+
+    [call] = calls["per_scenario"]
+    assert list(call["scenario_labels"]) == [
+        "Amsterdam day 45",
+        "Amsterdam day 59",
+        "Amsterdam day 75",
+    ]
+    keys = list(call["panels"])
+    assert len(keys) == 2 and "profit" in keys[0] and "violation" in keys[1], keys
+    profit, hours = (call["panels"][k] for k in keys)
+    assert list(profit) == list(tables) and list(hours) == list(tables)
+    for label, table in tables.items():
+        np.testing.assert_array_equal(profit[label], _array(table, "profit_eur_m2"), label)
+        np.testing.assert_array_equal(hours[label], _totals(table), label)
+    np.testing.assert_array_equal(profit["rb_tuned"], [[-5.0, 1.0, 2.0]])
+    np.testing.assert_array_equal(hours["rb_tuned"], [[3.0, 9.0, 21.0]])
+    assert Path(call["out"]) == out / "validation" / "per_scenario.png"
+
+
+def test_profiles_draw_every_label_but_rb_tuned_and_read_p_improve_just_above_zero(
+    tmp_path, monkeypatch
+):
+    """profiles.png: panels GAIN_KEY (arm - rb_tuned's same season) and SAVED_KEY (rb_tuned's same
+    season - arm), every label but rb_tuned, as runs x scenarios arrays; highlight is the adopted
+    labels (alpha), never the dropped bravo.
+
+    Known answers (alpha, 15 values each): its profit gains are D, 1..12 and -1, -2, -3, so just
+    above tau = 0 its profile reads 12 / 15 = 0.8, which is p_improve_profit (no ties). Its hours
+    saved S has 8 positive values, 2 zeros and 5 negative: the profile reads 8 / 15 just above 0,
+    while P(fewer hours) counts the ties half, 0.6."""
+    report, _ = _report(monkeypatch, tmp_path)
+    calls, tables, summary, _ = _draw(report, monkeypatch, tmp_path)
+    alpha, bravo = list(tables)[2:]
+
+    [call] = calls["profiles"]
+    assert list(call["panels"]) == [GAIN_KEY, SAVED_KEY]
+    gains, saved = call["panels"][GAIN_KEY], call["panels"][SAVED_KEY]
+    drawn = [label for label in tables if label != "rb_tuned"]
+    assert list(gains) == drawn and list(saved) == drawn
+    rb_profit, rb_total = _array({0: RB}, "profit_eur_m2"), _totals({0: RB})
+    for label in drawn:
+        want = _array(tables[label], "profit_eur_m2") - rb_profit
+        np.testing.assert_array_equal(gains[label], want, label)
+        np.testing.assert_array_equal(saved[label], rb_total - _totals(tables[label]), label)
+    np.testing.assert_array_equal(gains[alpha], [D[s] for s in range(5)])
+    np.testing.assert_array_equal(saved[alpha], [S[s] for s in range(5)])
+    np.testing.assert_array_equal(gains["zero_controls"], [[4.0, -2.0, -3.0]])
+    assert list(call["highlight"]) == [alpha], (call["highlight"], bravo)
+
+    axes = {ax.get_xlabel(): ax for ax in call["fig"].axes}
+    lines = {k: {ln.get_label(): ln for ln in axes[k].get_lines()} for k in (GAIN_KEY, SAVED_KEY)}
+    above = _above(lines[GAIN_KEY][f"{alpha} (n=15)"], 1e-9)
+    assert above == pytest.approx(0.8, abs=1e-12)
+    assert _row(summary, alpha)["p_improve_profit"] == pytest.approx(above, abs=1e-12)
+    assert _above(lines[SAVED_KEY][f"{alpha} (n=15)"], 1e-9) == pytest.approx(8 / 15, abs=1e-12)
+    assert _row(summary, alpha)["p_improve_viol"] == pytest.approx(0.6, abs=1e-12)
+
+
+def test_tradeoff_points_are_summarys_gain_and_saved_columns_with_rb_tuned_at_the_origin(
+    tmp_path, monkeypatch
+):
+    """tradeoff.png: one point per row of the summary.csv main wrote, in its order, the dropped arm
+    and the baselines included: "viol_hours" is the row's viol_saved_{iqm,lo,hi} and "profit" its
+    profit_gain_{iqm,lo,hi} (viz.tradeoff's point keys), with the report's axis labels. rb_tuned
+    is exactly (0, 0, 0) on both, the origin. Known answers for alpha (as in
+    test_paired_gains_and_p_improvement_over_rb_tuneds_same_season): profit gain IQM 5.0 €/m²,
+    hours saved IQM 4/3 h.
+
+    Each point's "status" is its decision's call: alpha "adopted", bravo "dropped", the baselines
+    None. A learning label under 5 runs carries the n<5 flag in its drawn direct label (the text on
+    the axes starting with the label): bravo's 2 runs read "(n=2, no claim)"; alpha's 5 runs and
+    the baselines carry no "no claim"."""
+    report, _ = _report(monkeypatch, tmp_path)
+    calls, tables, summary, out = _draw(report, monkeypatch, tmp_path)
+    alpha, bravo = list(tables)[2:]
+
+    [call] = calls["tradeoff"]
+    points = call["points"]
+    assert [p["label"] for p in points] == summary["label"].tolist() == list(tables)
+    for p, row in zip(points, summary.to_dict("records"), strict=True):
+        profit, saved = _triple(row, "profit_gain"), _triple(row, "viol_saved")
+        assert tuple(p["profit"]) == pytest.approx(profit, abs=1e-12), p
+        assert tuple(p["viol_hours"]) == pytest.approx(saved, abs=1e-12), p
+    by_label = {p["label"]: p for p in points}
+    rb = by_label["rb_tuned"]
+    assert (tuple(rb["profit"]), tuple(rb["viol_hours"])) == ((0.0,) * 3, (0.0,) * 3)
+    assert by_label[alpha]["profit"][0] == pytest.approx(5.0, abs=1e-12)
+    assert by_label[alpha]["viol_hours"][0] == pytest.approx(4 / 3, abs=1e-12)
+    assert (call["xlabel"], call["ylabel"]) == (
+        "violation hours saved vs rb_tuned [h]",
+        "profit gain over rb_tuned [€/m²]",
+    )
+    assert Path(call["out"]) == out / "validation" / "tradeoff.png"
+    status = {label: p.get("status") for label, p in by_label.items()}
+    assert status == {"zero_controls": None, "rb_tuned": None, alpha: "adopted", bravo: "dropped"}
+    texts = [t.get_text() for ax in call["fig"].axes for t in ax.texts]
+    drawn = {label: [t for t in texts if t.startswith(label)] for label in tables}
+    assert any("(n=2, no claim)" in t for t in drawn[bravo]), (bravo, texts)
+    for label in ("zero_controls", "rb_tuned", alpha):
+        assert drawn[label], (label, texts)
+        assert not any("no claim" in t for t in drawn[label]), (label, drawn[label])
+
+
+def test_every_figure_is_drawn_after_the_tables_with_the_commands_footer(tmp_path, monkeypatch):
+    """Each of the three figures is drawn once, after scores.parquet, summary.csv and summary.md
+    are written (so only once every check passed), into <out>/validation/<name>.png (a PNG). Its
+    footer names `python -m greenleaf_control.report --split validation` and no path under
+    tmp_path (the --out dir), so two --out dirs get the same footer. It says the figure is
+    "derived from summary.csv / scores.parquet", not that "every point is in" them (the
+    orchestrator's wording on #47: a profile line or a gain array is computed from the scores, not
+    stored in them)."""
+    report, _ = _report(monkeypatch, tmp_path)
+    calls, _, _, out = _draw(report, monkeypatch, tmp_path)
+
+    for name in FIGURES:
+        [call] = calls[name]
+        assert call["after_tables"], f"{name} was drawn before the tables were written"
+        footer = call["footer"]
+        assert isinstance(footer, str) and COMMAND in footer, (name, footer)
+        assert str(tmp_path) not in footer, (name, footer)
+        assert "derived from summary.csv / scores.parquet" in footer, (name, footer)
+        assert "every point is in" not in footer, (name, footer)
+        png = out / "validation" / f"{name}.png"
+        assert Path(call["out"]) == png, name
+        assert png.read_bytes()[:8] == PNG, name
+
+
+def test_note_calls_hold_34s_dropped_residual_w4():
+    """A decision row is one call on a whole registration, but its note can call arms one by one:
+    #34's decision-b159ac9a adopts the registration (residual_w05, residual_w1, residual_w4) and
+    its note drops residual_w4. report.NOTE_CALLS maps (decision row id, arm) to that arm's own
+    call, so the figures don't ink residual_w4 as adopted. Pinned from the orchestrator's reading
+    of the note; the real ledger isn't read here."""
+    report = _module()
+    assert hasattr(report, "NOTE_CALLS"), "report.NOTE_CALLS doesn't exist yet (#47)"
+    assert report.NOTE_CALLS.get(("decision-b159ac9a", "residual_w4")) == "dropped"
+
+
+def test_a_note_call_drops_one_arm_of_an_adopted_registration(tmp_path, monkeypatch):
+    """One registration (#34) with arms alpha (ppo) and bravo (residual), seeds 0-4 (ALPHA, BRAVO),
+    one result and one "adopted" decision; NOTE_CALLS patched to {(that decision, "bravo"):
+    "dropped"}, as its note would call it. Then the tradeoff's statuses are alpha "adopted", bravo
+    "dropped" (its note call beats the registration's), the baselines (zero_controls, rb_tuned)
+    None; profiles highlights alpha only."""
+    report, results = _report(monkeypatch, tmp_path)
+    assert hasattr(report, "NOTE_CALLS"), "report.NOTE_CALLS doesn't exist yet (#47)"
+    calls = _spies(monkeypatch)
+    path = tmp_path / "ledger.jsonl"
+    _baseline(results, "zero_controls", ZERO)
+    _baseline(results, "rb_tuned", RB)
+    reg = _register(path, issue=34, arms=(("alpha", "ppo"), ("bravo", "residual")), seeds=range(5))
+    _arm(path, tmp_path, reg, "alpha", ALPHA)
+    _arm(path, tmp_path, reg, "bravo", BRAVO, method="residual")
+    scored = {"alpha": [ALPHA[s] for s in range(5)], "bravo": [BRAVO[s] for s in range(5)]}
+    res = _result(path, reg, scored)
+    note = "adopt alpha; bravo dropped"
+    dec = ledger.decide(result=res["row_id"], decision="adopted", note=note, path=path)
+    monkeypatch.setattr(report, "NOTE_CALLS", {(dec["row_id"], "bravo"): "dropped"})
+    out = tmp_path / "analysis"
+
+    assert report.main(["--split", "validation", "--out", str(out)], ledger_path=path) == 0
+
+    alpha, bravo = _label("alpha", reg), _label("bravo", reg)
+    assert [len(calls[name]) for name in ("tradeoff", "profiles")] == [1, 1]
+    status = {p["label"]: p.get("status") for p in calls["tradeoff"][0]["points"]}
+    assert status == {"zero_controls": None, "rb_tuned": None, alpha: "adopted", bravo: "dropped"}
+    assert list(calls["profiles"][0]["highlight"]) == [alpha]
+
+
 # --- The contract ------------------------------------------------------------------------------
 
 
@@ -1182,10 +1482,11 @@ def test_contract_and_no_test_wrote_the_real_ledger_or_results():
     """ANALYSIS is control/results/analysis, BASELINE "rb_tuned", METRICS the issue's seven, and
     the signatures are the issue's: load_scores(split, *, ledger_path=ledger.LEDGER),
     summarize(scores), check_ledger(scores, *, ledger_path), main(argv=None, *,
-    ledger_path=ledger.LEDGER).
+    ledger_path=ledger.LEDGER), and #47's figures(scores, summary, out_dir).
 
     This test runs last in the module: the real ledger's size and mtime, and the listing of
-    control/results/, are as they were when the module was collected."""
+    control/results/, are as they were when the module was collected. figures' signature is
+    checked after them, so that check runs while figures is missing."""
     report = _module()
 
     assert report.ANALYSIS == CONTROL / "results" / "analysis"
@@ -1206,3 +1507,5 @@ def test_contract_and_no_test_wrote_the_real_ledger_or_results():
     assert inspect.signature(report.main).parameters["argv"].default is None
     assert _stat(REAL_LEDGER) == REAL_LEDGER_BEFORE
     assert _listing(REAL_RESULTS) == REAL_RESULTS_BEFORE
+    assert hasattr(report, "figures"), "report.figures doesn't exist yet (#47)"
+    assert list(inspect.signature(report.figures).parameters) == ["scores", "summary", "out_dir"]
