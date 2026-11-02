@@ -2,9 +2,14 @@
 
 **Read this first when you pick the project up on any machine.** It's the shared memory: where things stand, what's next, what we learned, and how Aarmen likes to work. Update it at the end of each session.
 
-*Last updated: 2026-11-02 early morning, Mac session (the final is done and recorded, the seal is spent; the report, the test-split tables and the README are on `dev`; `/promote` next).*
+*Last updated: 2026-11-02 evening, Mac session (the final is done and the seal is spent; the interactive site is live on GitHub Pages; the README is revamped; everything is on `master` at 7f87ece).*
 
 ## Where things are
+- **Live, 2026-11-02 evening.** `master` is at 7f87ece (PR #57 merged at Aarmen's "just push it"). The site is at https://aarmens702-hub.github.io/greenleaf-dashboard/, built by `greenleaf_control.site_build` from the final's recorded replays and deployed by `.github/workflows/pages.yml` on every push to master (Pages build type: workflow).
+  - Site: #58 site_build (`1d13dbd`), #59 compare any two controllers in any city plus the what-changed strips (`11c631a`), #60 the Results chart per city (`958ad6d`), #61 the Pages workflow (`f82ef84`), #63 the "Residual agent" names and the readout and caption clarifications (`3cfb4bb`).
+  - README: #62 (`e8d8a6b`) leads with "teaching agents to grow tomatoes", the live demo, an animated replay and two stills captured from the site (`docs/media/site/`); the stale #28 captures are removed.
+  - Checks on the final tree: the whole ladder, 2037 passed (17 min 25 s); check_locks clean; CI and the Pages run green on master.
+  - Public wording: "residual agent" and "constrained variant", not "co-pilot" (README, site, posts). REPORT.md, PRD.md, AGENTS.md, media.py and pyproject still say co-pilot.
 - **The headline, 2026-11-02 (read this first).** The one-time final ran on the 2012 test weather and is recorded: final-registered-4d0a4ba9 (`8ceace3`) → **final-result-aee23915** (`fe3a993`). The seal is spent: `evaluate --final` and the ledger refuse any second final, and check_locks flags one.
   - Graded by #45's registered rule (a) profit CI above rb_tuned like-for-like, (b) Σ violation-hour IQMs at or below rb_tuned's, (c) 0 invalid and 0 solver failures:
     - `residual_w05` (E6, 10 seeds) passes on all three splits: gain over rb_tuned's same seasons 0.30 [0.25, 0.35], 0.40 [0.35, 0.44], 0.54 [0.47, 0.61] €/m², Σ 292.6 / 343.1 / 444.3 h vs 365.2 / 456.9 / 559.8.
@@ -80,10 +85,10 @@
 - **Filed 2026-10-28:** #19, recording Modal runs (shipped). Aarmen chose the Mac over Modal for E2 (no payment method); Modal stays optional.
 
 ## To do, in order
-1. **`/promote` dev → master** (Aarmen's yes for the merge): full ladder, check_locks, every README and docs number traced to the ledger, then the PR.
-2. **The LinkedIn post** (Aarmen posts it): the draft is in the session scratchpad and in the morning summary; every number is from final-result-aee23915 and the test-split summary.csv files.
-3. **Deploy the site** (`site/`, validation seasons only; Aarmen's call on where).
-4. **Follow-ups** (each its own issue): the two in-scale label overlaps in the validation trade-off (#53's review); the GreenLight-Gym paper citation in REPORT.md [1]; a fruit-growth guard if any later claim compares against plain PPO; the simulator's first-day dependence on season length (#51's review).
+1. **The LinkedIn post and the LinkedIn project entry** (Aarmen posts them; drafts in the session scratchpad: linkedin-v6.txt and li-project.txt with four site screenshots). The X thread is posted.
+2. **The GitHub repo's About text** still describes the hackathon dashboard (and carries an em dash); it shows in link previews. Aarmen's call.
+3. **Wording follow-up:** "co-pilot" to "residual agent" in REPORT.md, PRD.md, AGENTS.md, media.py's labels and pyproject's description.
+4. **Follow-ups** (each its own issue): the two in-scale label overlaps in the validation trade-off (#53's review); the GreenLight-Gym paper citation in REPORT.md [1]; a fruit-growth guard if any later claim compares against plain PPO; the simulator's first-day dependence on season length (#51's review); the site's x-axis title reads "-day season" if a replay fails to load (#60's review).
 5. **Disk:** `uv cache clean`, and delete decided worktrees' `.venv`s (`uv sync` rebuilds them).
 
 **Run the harness from a Claude Code session started inside this repo** (`cd ~/Desktop/greenleaf-dashboard && claude`). Its agents, hooks and skills load only there.
