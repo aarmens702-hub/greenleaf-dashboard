@@ -241,21 +241,32 @@ Paths are relative to `control/`. Scenario dicts are `{"location": str, "growth_
     step's info values (reward-side diagnostics, not metrics).
 
 ## `greenleaf_control.export_replay` (D2, for the demo site)
-- `export(frame, result, states, controls, params, *, controller, scenario, stamp) -> dict`:
+- `export(frame, result, states, controls, params, *, controller, scenario, stamp, split, run) -> dict`:
   - `{meta, hourly, totals}`.
-  - `meta` = {controller, scenario, commit, dirty, gl_gym, note ("a simulator run, not a registered result"), bounds,
-    units}.
+  - `meta` = {controller, scenario, split, run, commit, dirty, gl_gym, note, bounds, units}:
+    - `split` is the split's name; `run` is `None` for a baseline, and for a run dir {id, registered, result, arm,
+      seed, checkpoint, commit}: its ledger run row, registration and result row, and `commit` the run's own training
+      commit, from its `manifest.json`;
+    - `commit`, `dirty` and `gl_gym` are the export code's stamp;
+    - `note` = `f"a simulator replay of a {split} season, not the final result"`.
   - `hourly` holds H = season_length × 24 points of:
     - t_hour;
     - co2/temp/rh at the end of each hour (frame row 4h+3, 3 significant digits);
     - the six u_* as the hour's mean (3 decimals);
     - profit and viol_co2/temp/rh as metrics on the prefix to that hour (4 decimals).
   - `totals` = the result exactly.
-- CLI `--controller {zero_controls|random|rb_default|rb_tuned|<run_dir>} --split ... --out <dir> [--final ROW]`:
-  - writes `<controller>_<location>_<year>_<startday>.json` per scenario (compact, no NaN), each under 250 KB;
-  - the test splits are refused without `--final`, and `--final` until F1, before any env;
-  - an existing file is refused;
-  - a run dir plays its `final` checkpoint through `evaluate.run_policy(..., return_trace=True)`.
+- CLI `--controller {zero_controls|random|rb_default|rb_tuned|<run_dir>} --split ... --out <dir> [--final ROW]`,
+  `main(argv=None, *, ledger_path=ledger.LEDGER)` as `selection.main`:
+  - writes `<controller>_<location>_<year>_<startday>.json` per scenario (compact, no NaN), each under 250 KB. A
+    baseline's `<controller>` is its name, a run dir's `<arm>_seed<seed>` (e.g. `residual_w05_seed100`);
+  - a run dir is a registered run, looked up in `ledger_path`, which is only read (a baseline never reads it):
+    - the `run` row whose `run_dir` resolves to the dir; none is refused as "not a registered run", naming the dir;
+    - its registration's `result` rows: exactly one, whose `selected` names the run; otherwise refused, naming the
+      run id and the count;
+  - a run dir plays at that row's `selected[run id]` checkpoint (not `selected.json`'s) through
+    `evaluate.run_policy(..., return_trace=True)`;
+  - refusals, in order and all before any env: `--final` (until F1), a test split without `--final`, a non-baseline
+    with no `manifest.json`, the run lookup, an existing file.
 
 ## `greenleaf_control.selection`, `stats`, `tune_rb`, `run_grid`, `modal_app`
 - `select_checkpoint(run_dir: Path) -> str`: the PROTOCOL §5 rule on VALIDATION; writes `run_dir/selected.json` once.

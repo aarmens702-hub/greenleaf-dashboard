@@ -87,3 +87,6 @@ Dated, with who decided. Not re-argued without a new reason.
   matched to 6e-17.
 - **2026-10-28, Claude (veto open).** Modal containers get hard limits equal to their requests (4 cores, 8 GiB, 4 h),
   so `run_grid --dry`'s worst case is a real bound: Modal bills max(request, usage).
+- **2026-11-01, Claude (veto open).** Every replay samples hours as `export_replay` does: climate at the end of each
+  hour (frame row 4h+3), actuators as the hour's mean, profit and violation counters on the prefix to the hour's end.
+  media.py's README GIF (row 4h, instants) moves to it at D5 (#48).

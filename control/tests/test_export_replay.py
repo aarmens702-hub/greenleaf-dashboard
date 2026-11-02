@@ -1,13 +1,14 @@
-"""Tests for greenleaf_control.export_replay (issue #24, D2): a recorded season as hourly JSON for
-the demo site (D3).
+"""Tests for greenleaf_control.export_replay (issue #24, D2; issue #48, D3b-1): a recorded season
+as hourly JSON for the demo site (D3).
 
-export(frame, result, states, controls, params, *, controller, scenario, stamp) -> dict builds the
-payload {"meta", "hourly", "totals"} from one season: evaluate's per-step frame (one row per step
-t = 0..T-1, read from the state after step t), its result dict, and the same season's raw trace
-(states (T + 1, nx), controls (T, 6), as metrics.trace_from_infos gives them) and model params,
-which feed the running counters through metrics, the grader. scenario is a split's scenario dict
-(location, growth_year, start_day); stamp holds the code's "commit", "dirty" and "gl_gym".
-main(argv=None) -> int is the CLI.
+export(frame, result, states, controls, params, *, controller, scenario, stamp, split, run) -> dict
+builds the payload {"meta", "hourly", "totals"} from one season: evaluate's per-step frame (one row
+per step t = 0..T-1, read from the state after step t), its result dict, and the same season's raw
+trace (states (T + 1, nx), controls (T, 6), as metrics.trace_from_infos gives them) and model
+params, which feed the running counters through metrics, the grader. scenario is a split's
+scenario dict (location, growth_year, start_day); stamp holds the export code's "commit", "dirty"
+and "gl_gym"; split is the split's name; run is a run dir's provenance (None for a baseline).
+main(argv=None, *, ledger_path=ledger.LEDGER) -> int is the CLI.
 
 The conventions pinned here. A season of T steps has H = T / 4 hours; hour h is steps 4h..4h+3.
 - co2 [ppm], temp [°C] and rh [%] at hour h are the frame's row 4h + 3: the state at the END of the
@@ -20,9 +21,26 @@ The conventions pinned here. A season of T steps has H = T / 4 hours; hour h is 
   states[t + 1]), rounded to 4 decimals. So they are read at the same instant as the climate, and
   the last hour's are the season's own.
 - totals is the result dict, unrounded.
+- meta is exactly {controller, scenario, split, run, commit, dirty, gl_gym, note, bounds, units};
+  note is "a simulator replay of a <split> season, not the final result".
 - The file is <controller>_<location>_<growth_year>_<start_day>.json, written as
-  json.dumps(payload, allow_nan=False, separators=(",", ":")); for a run dir, controller is the
-  dir's name.
+  json.dumps(payload, allow_nan=False, separators=(",", ":")). A baseline's controller is its
+  name; a run dir's is <arm>_seed<seed> (residual_w05_seed100), not the dir's name.
+
+A run dir is a registered run (issue #48). Its lookup reads ledger_path, and only reads it:
+- the run row whose run_dir resolves to the given dir (both sides resolved); none is refused,
+  naming the dir and "not a registered run";
+- its registration's result rows: exactly one, whose selected names the run; otherwise refused,
+  naming the run id and the count;
+- it plays at that result's selected[run id] (e.g. "1500000", not "final") through
+  evaluate.run_policy(..., return_trace=True), and meta.run is {id, registered, result, arm, seed,
+  checkpoint, commit}, commit from the run dir's manifest.json (the run's training commit, not the
+  export's stamp).
+Refusals come in this order, all before any env: --final, a test split, a non-baseline with no
+manifest.json, the lookup, an existing file. A baseline never reads the ledger.
+
+Every ledger here is a tmp one, built with ledger.register, run_start, run_end and record_result as
+test_selection_cli.py builds them, and every CLI call passes main its ledger_path.
 
 Known answers used throughout:
 - One day is 96 steps (86,400 s / 900 s), so 24 hours; 60 days are 5,760 steps, 1,440 hours.
@@ -41,6 +59,7 @@ the last test checks all three are as they were when this module was collected.
 import inspect
 import json
 import math
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -49,7 +68,16 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from greenleaf_control import envs, evaluate, manifest, metrics, rule_based, scenarios, train
+from greenleaf_control import (
+    envs,
+    evaluate,
+    ledger,
+    manifest,
+    metrics,
+    rule_based,
+    scenarios,
+    train,
+)
 
 # greenleaf_control.export_replay is imported inside each test body, so while it is missing each
 # test FAILS rather than ERRORs at collection.
@@ -81,8 +109,20 @@ RB_DEFAULT = rule_based.load_rb_params("default")
 U_COLS = ["u_boil", "u_co2", "u_thscr", "u_vent", "u_lamp", "u_blscr"]
 CLIMATE = ["co2", "temp", "rh"]
 HOURLY_KEYS = ["t_hour", *CLIMATE, *U_COLS, "profit", *(f"viol_{c}" for c in CONSTRAINTS)]
-META_KEYS = {"controller", "scenario", "commit", "dirty", "gl_gym", "note", "bounds", "units"}
-NOTE = "a simulator run, not a registered result"
+META_KEYS = {
+    "controller",
+    "scenario",
+    "split",
+    "run",
+    "commit",
+    "dirty",
+    "gl_gym",
+    "note",
+    "bounds",
+    "units",
+}
+NOTE_PAPER = "a simulator replay of a paper season, not the final result"
+NOTE_VALIDATION = "a simulator replay of a validation season, not the final result"
 UNITS = {"co2": "ppm", "temp": "°C", "rh": "%", "profit": "€/m²", "hours": "h"}
 # PROTOCOL §1's bounds: CO₂ 300-1,600 ppm, air temperature 15-34 °C, RH 50-85 %.
 BOUNDS_JSON = {"co2": [300.0, 1600.0], "temp": [15.0, 34.0], "rh": [50.0, 85.0]}
@@ -97,6 +137,32 @@ TEST_SPLITS = ("amsterdam_2012", "london_2012", "abbotsford_2012")
 CLI_FLAGS = ("--controller", "--split", "--out", "--final")
 PAPER_FILE = "rb_default_Amsterdam_2010_59.json"  # <controller>_<location>_<year>_<start day>
 MAX_BYTES = 250_000  # the plan's ceiling, 250 KB, in decimal kilobytes
+
+# A registered run, shaped like E6's seed 100 (#36): arm residual_w05, its result row selecting it
+# at checkpoint "1500000". Its manifest's commit is made up, so it differs from HEAD and STAMP's.
+ARM = "residual_w05"
+CHECKPOINT = "1500000"
+RUN_COMMIT = "fedcba9876543210fedcba9876543210fedcba98"
+RUN_FILE = "residual_w05_seed100_Amsterdam_2010_59.json"  # <arm>_seed<seed>_<location>_<year>_<day>
+# meta.run as export is handed it: E6's ids for seed 100, with the made-up commit.
+RUN = {
+    "id": "run-5de00091",
+    "registered": "registered-f2fd71e9",
+    "result": "result-d1f0b8e7",
+    "arm": ARM,
+    "seed": 100,
+    "checkpoint": CHECKPOINT,
+    "commit": RUN_COMMIT,
+}
+DIAGNOSTICS = {"min_approx_kl": 0.002, "final_entropy": -1.5, "final_explained_variance": 0.8}
+# A result row's per-arm numbers as selection hands them over (the ledger adds crashed, spend_usd).
+PER_ARM = {
+    "iqm": 0.077,
+    "ci_low": -0.1,
+    "ci_high": 0.2,
+    "guards": {"viol_hours_temp": {"iqm": 1.0, "ci_low": 0.5, "ci_high": 1.5}},
+    "invalid_episodes": 0,
+}
 
 
 @pytest.fixture
@@ -156,8 +222,17 @@ def _reject_constant(name: str):
     raise AssertionError(f"{name} in the JSON: the payload must be finite numbers only")
 
 
-def _exported(export_replay, season: dict, controller: str = "rb_default") -> dict:
-    """export's payload for a season, through the file's own JSON round trip (dumps then loads)."""
+def _exported(
+    export_replay,
+    season: dict,
+    controller: str = "rb_default",
+    split: str = "paper",
+    run: dict | None = None,
+) -> dict:
+    """export's payload for a season, through the file's own JSON round trip (dumps then loads).
+    While export takes no split or run, this fails on that assertion, not on a TypeError."""
+    keywords = set(inspect.signature(export_replay.export).parameters)
+    assert {"split", "run"} <= keywords, f"export takes no split or run: {sorted(keywords)}"
     payload = export_replay.export(
         season["frame"],
         season["result"],
@@ -167,6 +242,8 @@ def _exported(export_replay, season: dict, controller: str = "rb_default") -> di
         controller=controller,
         scenario=PAPER,
         stamp=STAMP,
+        split=split,
+        run=run,
     )
     text = json.dumps(payload, allow_nan=False, separators=(",", ":"))
     return json.loads(text, parse_constant=_reject_constant)
@@ -254,21 +331,115 @@ ALL_ENV_ROUTES = (
 
 
 def _refusal(excinfo, capsys) -> str:
-    """A refusal's text: the exception's message plus stderr (argparse's error goes there)."""
-    if isinstance(excinfo.value, SystemExit):
-        assert excinfo.value.code not in (0, None), "a refusal must exit nonzero"
-    return str(excinfo.value) + capsys.readouterr().err
+    """A refusal's text: the exception's message plus stderr (argparse's error goes there). A
+    SystemExit's int code is left out: argparse's 2 is not part of the message."""
+    value = excinfo.value
+    if isinstance(value, SystemExit):
+        assert value.code not in (0, None), "a refusal must exit nonzero"
+    message = "" if isinstance(value, SystemExit) and isinstance(value.code, int) else str(value)
+    return message + capsys.readouterr().err
+
+
+def _names_count(text: str, count: int, tmp_path: Path) -> bool:
+    """count is in text as a number of its own, outside the tmp paths (pytest-1/ could be one)."""
+    return re.search(rf"\b{count}\b", text.replace(str(tmp_path), "<tmp>")) is not None
 
 
 def _argv(controller: str, split: str, out: Path, *extra: str) -> list[str]:
     return ["--controller", controller, "--split", split, "--out", str(out), *extra]
 
 
+def _main(export_replay, argv: list[str], ledger_path: Path) -> int:
+    """export_replay.main(argv, ledger_path=ledger_path): every CLI call here reads a tmp ledger,
+    never the real one. While main takes no ledger_path, this fails on that assertion, not on a
+    TypeError."""
+    params = inspect.signature(export_replay.main).parameters
+    assert "ledger_path" in params, f"main takes no ledger_path: {list(params)}"
+    return export_replay.main(argv, ledger_path=ledger_path)
+
+
 def _fake_run_dir(path: Path) -> Path:
-    """A dir that looks like a run dir to a CLI check (it holds a manifest.json)."""
-    path.mkdir()
-    (path / "manifest.json").write_text(json.dumps({"config": {"method": "residual"}}))
+    """A dir that looks like a run dir to a CLI check: it holds a manifest.json with a config and
+    the run's training commit (RUN_COMMIT, made up)."""
+    path.mkdir(parents=True)
+    manifest_json = {"commit": RUN_COMMIT, "config": {"method": "residual"}}
+    (path / "manifest.json").write_text(json.dumps(manifest_json))
     return path
+
+
+def _register(path: Path, issue: int) -> dict:
+    """A registration on the tmp ledger of one arm, residual_w05, over seeds 100 and 101."""
+    return ledger.register(
+        issue=issue,
+        hypothesis="residual_w05 beats rb_tuned on validation profit",
+        arms=[{"name": ARM, "method": "residual", "config": {}}],
+        seeds=[100, 101],
+        timesteps=2_000_000,
+        scenarios=["validation"],
+        primary="profit_eur_m2",
+        guards=["viol_hours_temp"],
+        rule="adopt if the profit IQM CI excludes rb_tuned's",
+        budget={"cpu_hours": 1.0, "usd": 0.0, "backend": "local"},
+        path=path,
+    )
+
+
+def _runs(path: Path, root: Path, reg: dict, *, hop: bool = False) -> dict[int, tuple[dict, Path]]:
+    """reg's runs at seeds 100 and 101, as train records them: a fake run dir
+    root/<registered>/residual_w05/seed<S>, a run row naming it, and a finished run-end. With hop,
+    the run row names its dir through a ".." (absolute but not resolved, as /var is to
+    /private/var). Returns {seed: (run row, run dir)}."""
+    runs = {}
+    for seed in reg["seeds"]:
+        run_dir = _fake_run_dir(root / reg["row_id"] / ARM / f"seed{seed}")
+        named = run_dir.parent / ".." / ARM / run_dir.name if hop else run_dir
+        run = ledger.run_start(
+            registered=reg["row_id"], arm=ARM, seed=seed, run_dir=str(named), path=path
+        )
+        ledger.run_end(
+            run=run["row_id"],
+            status="finished",
+            wall_s=12.5,
+            timesteps=reg["timesteps"],
+            solver_failures=0,
+            cost_usd=None,
+            diagnostics=DIAGNOSTICS,
+            path=path,
+        )
+        runs[seed] = (run, run_dir)
+    return runs
+
+
+def _e6(tmp_path: Path, results: list[dict], *, hop: bool = False) -> tuple:
+    """A tmp ledger shaped like E6's (#36), after a decoy experiment, written in this order:
+    - the decoy (issue 35): residual_w05 at seeds 100 and 101 in its own run dirs, and one result
+      row selecting both at "1750000";
+    - E6 (issue 36): residual_w05 at seeds 100 and 101 (hop as in _runs), then one result row per
+      entry of results, each {seed: checkpoint} turned into its selected {run row_id: checkpoint}.
+    A lookup that matches a run by its dir's name, or by arm and seed, or counts every result row,
+    finds the decoy's. Returns (ledger path, E6's registration, E6's {seed: (run row, run dir)},
+    E6's result rows)."""
+    path, root = tmp_path / "ledger.jsonl", tmp_path / "runs"
+    decoy = _register(path, 35)
+    decoy_runs = _runs(path, root, decoy)
+    ledger.record_result(
+        registered=decoy["row_id"],
+        per_arm={ARM: PER_ARM},
+        selected={run["row_id"]: "1750000" for run, _ in decoy_runs.values()},
+        path=path,
+    )
+    reg = _register(path, 36)
+    runs = _runs(path, root, reg, hop=hop)
+    rows = [
+        ledger.record_result(
+            registered=reg["row_id"],
+            per_arm={ARM: PER_ARM},
+            selected={runs[seed][0]["row_id"]: ckpt for seed, ckpt in by_seed.items()},
+            path=path,
+        )
+        for by_seed in results
+    ]
+    return path, reg, runs, rows
 
 
 # --- export: the round trip (Done when) ---------------------------------------------------------
@@ -397,32 +568,48 @@ def test_export_running_counters_are_metrics_on_each_hours_prefix(name, moving, 
 # --- export: the meta block and the shape -------------------------------------------------------
 
 
-def test_export_meta_names_the_season_and_its_code_and_says_it_is_not_a_registered_result(seasons):
-    """meta is exactly {controller, scenario, commit, dirty, gl_gym, note, bounds, units}:
+META_CASES = [
+    pytest.param("rb_default", "paper", None, NOTE_PAPER, id="baseline-paper"),
+    pytest.param("residual_w05_seed100", "validation", RUN, NOTE_VALIDATION, id="run-validation"),
+]
+
+
+@pytest.mark.parametrize(("controller", "split", "run", "note"), META_CASES)
+def test_export_meta_names_the_season_its_split_its_run_and_its_code(
+    controller, split, run, note, seasons
+):
+    """Done when: meta is exactly {controller, scenario, split, run, commit, dirty, gl_gym, note,
+    bounds, units}:
     - controller as given; scenario the given scenario plus season_length in days (96 frame rows
       -> 1);
-    - commit, dirty and gl_gym the stamp's;
-    - note "a simulator run, not a registered result";
+    - split the split's name as given; run as given: None for a baseline, the 7-key dict for a run
+      dir (its commit is the run's own, RUN_COMMIT);
+    - commit, dirty and gl_gym the stamp's (the export code's), so meta.commit is not run's commit;
+    - note "a simulator replay of a <split> season, not the final result";
     - bounds metrics.BOUNDS as lists (PROTOCOL §1: 300-1,600 ppm, 15-34 °C, 50-85 %);
     - units co2 "ppm", temp "°C", rh "%", profit "€/m²", hours "h"."""
     import greenleaf_control.export_replay as export_replay
 
-    meta = _exported(export_replay, seasons["rb_default"], controller="rb_default")["meta"]
+    payload = _exported(export_replay, seasons["rb_default"], controller, split=split, run=run)
+    meta = payload["meta"]
 
     assert set(meta) == META_KEYS
-    assert meta["controller"] == "rb_default"
+    assert meta["controller"] == controller
     assert meta["scenario"] == {
         "location": "Amsterdam",
         "growth_year": 2010,
         "start_day": 59,
         "season_length": 1,
     }
+    assert meta["split"] == split
+    assert meta["run"] == run
     assert (meta["commit"], meta["dirty"], meta["gl_gym"]) == (
         STAMP["commit"],
         STAMP["dirty"],
         STAMP["gl_gym"],
     )
-    assert meta["note"] == NOTE
+    assert meta["commit"] != RUN_COMMIT
+    assert meta["note"] == note
     assert meta["bounds"] == BOUNDS_JSON
     assert meta["bounds"] == {c: list(bounds) for c, bounds in metrics.BOUNDS.items()}
     assert meta["units"] == UNITS
@@ -462,7 +649,7 @@ def test_cli_writes_one_compact_60_day_paper_file_under_250_kb(tmp_path):
 
     out = tmp_path / "site"
     out.mkdir()
-    assert export_replay.main(_argv("rb_default", "paper", out)) == 0
+    assert _main(export_replay, _argv("rb_default", "paper", out), tmp_path / "ledger.jsonl") == 0
 
     assert [p.name for p in out.iterdir()] == [PAPER_FILE]
     path = out / PAPER_FILE
@@ -486,15 +673,20 @@ def test_cli_file_round_trips_the_season_and_its_totals_are_the_metrics(tmp_path
     - totals is its result exactly: metrics' keys alone, or with paper_reward_sum too;
     - the last hour's profit is totals' profit_eur_m2 within 5e-5, its viol_<c> totals'
       viol_hours_<c> exactly;
-    - meta: controller "rb_default", scenario PAPER with season_length 60, the checkout's commit
-      (git rev-parse HEAD), dirty a bool, and the note.
+    - meta: controller "rb_default", scenario PAPER with season_length 60, split "paper", run None
+      (a baseline), the checkout's commit (git rev-parse HEAD), dirty a bool, and the note "a
+      simulator replay of a paper season, not the final result".
+    A baseline never reads the ledger: its ledger_path holds a line that isn't JSON, which
+    ledger.rows would fail on.
     About 4 s, plus the fixture's 3 s."""
     import greenleaf_control.export_replay as export_replay
 
     want, frame = paper_60
     out = tmp_path / "site"
     out.mkdir()
-    assert export_replay.main(_argv("rb_default", "paper", out)) == 0
+    unreadable = tmp_path / "ledger.jsonl"
+    unreadable.write_text("not a ledger row\n")
+    assert _main(export_replay, _argv("rb_default", "paper", out), unreadable) == 0
 
     payload = json.loads(
         (out / PAPER_FILE).read_text(encoding="utf-8"), parse_constant=_reject_constant
@@ -513,54 +705,71 @@ def test_cli_file_round_trips_the_season_and_its_totals_are_the_metrics(tmp_path
         capture_output=True,
         text=True,
     ).stdout.strip()
+    assert set(meta) == META_KEYS
     assert meta["controller"] == "rb_default"
     assert meta["scenario"] == {**PAPER, "season_length": 60}
+    assert meta["split"] == "paper"
+    assert meta["run"] is None
     assert meta["commit"] == head
     assert isinstance(meta["dirty"], bool)
-    assert meta["note"] == NOTE
+    assert meta["note"] == NOTE_PAPER
 
 
 # --- The CLI: the seal and the refusals (Done when; PROTOCOL §8) --------------------------------
 
 
+def _controller(controller: str, tmp_path: Path) -> str:
+    """controller as given, or for "<unregistered run dir>" a fake run dir (a manifest.json) that
+    no ledger row names: tmp_path/runs/registered-00000000/residual_w05/seed100."""
+    if controller != "<unregistered run dir>":
+        return controller
+    return str(_fake_run_dir(tmp_path / "runs" / "registered-00000000" / ARM / "seed100"))
+
+
+@pytest.mark.parametrize("controller", ["rb_default", "<unregistered run dir>"])
 @pytest.mark.parametrize("split", TEST_SPLITS)
 @pytest.mark.usefixtures("no_2012_reads")
-def test_cli_refuses_a_test_split_without_final(split, tmp_path, monkeypatch, capsys):
+def test_cli_refuses_a_test_split_without_final(split, controller, tmp_path, monkeypatch, capsys):
     """Done when: --split <a test split> without --final exits non-zero, naming the seal.
 
     --split takes every split in scenarios.SPLITS, so argparse doesn't refuse it as an unknown
     choice; export_replay refuses it, with SystemExit (code not 0) whose text says "sealed
     (PROTOCOL §8)" and names --final, before any env is built, any weather is read or any file is
-    written: the out dir stays empty."""
+    written: the out dir stays empty. The seal comes before the run lookup (#48): an unregistered
+    run dir on a test split is refused as sealed, not as unregistered."""
     import greenleaf_control.export_replay as export_replay
 
     _trip(monkeypatch, export_replay, ALL_ENV_ROUTES)
+    controller = _controller(controller, tmp_path)
     out = tmp_path / "site"
     out.mkdir()
 
     with pytest.raises(SystemExit) as excinfo:
-        export_replay.main(_argv("rb_default", split, out))
+        _main(export_replay, _argv(controller, split, out), tmp_path / "ledger.jsonl")
     text = _refusal(excinfo, capsys)
     assert "sealed (PROTOCOL §8)" in text, text
     assert "--final" in text, text
     assert list(out.iterdir()) == []
 
 
+@pytest.mark.parametrize("controller", ["rb_default", "<unregistered run dir>"])
 @pytest.mark.parametrize("split", ["paper", "amsterdam_2012"])
 @pytest.mark.usefixtures("no_2012_reads")
-def test_cli_refuses_final_as_f1s_not_implemented(split, tmp_path, monkeypatch, capsys):
+def test_cli_refuses_final_as_f1s_not_implemented(split, controller, tmp_path, monkeypatch, capsys):
     """Done when: any --final is refused until F1. On a non-test split and on a test split alike,
     with a well-formed final-registered row id, it is refused naming F1 and "not implemented",
-    before any env, weather read or file."""
+    before any env, weather read or file. It comes before the run lookup (#48): an unregistered
+    run dir with --final is refused as F1's, not as unregistered."""
     import greenleaf_control.export_replay as export_replay
 
     _trip(monkeypatch, export_replay, ALL_ENV_ROUTES)
+    controller = _controller(controller, tmp_path)
     out = tmp_path / "site"
     out.mkdir()
-    argv = _argv("rb_default", split, out, "--final", "final-registered-deadbeef")
+    argv = _argv(controller, split, out, "--final", "final-registered-deadbeef")
 
     with pytest.raises((SystemExit, NotImplementedError)) as excinfo:
-        export_replay.main(argv)
+        _main(export_replay, argv, tmp_path / "ledger.jsonl")
     text = _refusal(excinfo, capsys)
     assert "F1" in text, text
     assert "not implemented" in text.lower(), text
@@ -574,8 +783,8 @@ EXISTING_CASES = [
     pytest.param(
         "rb_default", "validation", "rb_default_Amsterdam_2010_75.json", id="baseline-last-of-3"
     ),
-    # A run dir's files are named by the dir's name, not its path.
-    pytest.param("<run_dir>", "paper", "my-run_Amsterdam_2010_59.json", id="run-dir-named-by-dir"),
+    # A registered run dir's files are named <arm>_seed<seed>, not by its dir (seed100) (#48).
+    pytest.param("<registered run dir>", "paper", RUN_FILE, id="run-dir-named-by-arm-and-seed"),
 ]
 
 
@@ -584,20 +793,24 @@ EXISTING_CASES = [
 def test_cli_refuses_an_existing_output_file_before_any_env(
     controller, split, existing, tmp_path, monkeypatch, capsys
 ):
-    """An output file that already exists is refused, naming it, and left as it was. The refusal
-    comes before any env is built or season played, so nothing else is written either: the out dir
-    holds only that file."""
+    """Done when: an output file that already exists is refused, naming it, and left as it was.
+    The refusal comes before any env is built or season played, so nothing else is written either:
+    the out dir holds only that file. A registered run dir (E6-shaped tmp ledger, its result row
+    selecting seed 100 at "1500000") passes the lookup and is refused on its new name,
+    residual_w05_seed100_Amsterdam_2010_59.json."""
     import greenleaf_control.export_replay as export_replay
 
-    if controller == "<run_dir>":
-        controller = str(_fake_run_dir(tmp_path / "my-run"))
+    ledger_path = tmp_path / "ledger.jsonl"
+    if controller == "<registered run dir>":
+        ledger_path, _, runs, _ = _e6(tmp_path, [{100: CHECKPOINT, 101: "final"}])
+        controller = str(runs[100][1])
     out = tmp_path / "site"
     out.mkdir()
     (out / existing).write_bytes(b"an earlier export\n")
     _trip(monkeypatch, export_replay, ALL_ENV_ROUTES)
 
     with pytest.raises((SystemExit, FileExistsError)) as excinfo:
-        export_replay.main(_argv(controller, split, out))
+        _main(export_replay, _argv(controller, split, out), ledger_path)
     assert existing in _refusal(excinfo, capsys)
     assert (out / existing).read_bytes() == b"an earlier export\n"
     assert [p.name for p in out.iterdir()] == [existing]
@@ -611,17 +824,27 @@ class _Routed(Exception):
 
 
 @pytest.mark.usefixtures("no_2012_reads")
-def test_cli_plays_a_run_dir_through_run_policy_final_checkpoint_60_days(tmp_path, monkeypatch):
-    """Done when: --controller <run_dir> goes through evaluate.run_policy, the one evaluation path.
+def test_cli_plays_a_run_dir_through_run_policy_at_its_selected_checkpoint(tmp_path, monkeypatch):
+    """Done when: --controller <run_dir> goes through evaluate.run_policy, the one evaluation path,
+    at the checkpoint its registration's result row selected, not "final".
+
+    The tmp ledger is E6-shaped (_e6): E6's one result row selects seed 100 at "1500000" and seed
+    101 at "final"; the decoy experiment's selects its own seed 100 at "1750000"; and the run dir
+    holds a selected.json naming "1750000" too, so only the ledger's E6 result row gives "1500000".
+    The CLI is handed the dir through a ".." (resolved, it is the run row's).
 
     run_policy is replaced by a spy that records its arguments and raises _Routed (so what export
     does with the season isn't tested here); run_rb, run_baseline and build_vec_env fail if called,
     so the run dir can't be played any other way. On --split paper, run_policy is called once
-    before anything is written, with the run dir, checkpoint "final", the PAPER scenario, a
-    60-day season and record_steps True (the per-step frame)."""
+    before anything is written, with the run dir, checkpoint "1500000", the PAPER scenario, a
+    60-day season, record_steps True (the per-step frame), return_trace True (the raw trace for
+    the counters) and allow_test False (it never opens the 2012 weather)."""
     import greenleaf_control.export_replay as export_replay
 
-    run_dir = _fake_run_dir(tmp_path / "my-run")
+    ledger_path, _, runs, _ = _e6(tmp_path, [{100: CHECKPOINT, 101: "final"}])
+    run_dir = runs[100][1]
+    (run_dir / "selected.json").write_text(json.dumps({"checkpoint": "1750000"}))
+    given = run_dir.parent / ".." / ARM / run_dir.name
     out = tmp_path / "site"
     out.mkdir()
     signature = inspect.signature(evaluate.run_policy)
@@ -639,14 +862,178 @@ def test_cli_plays_a_run_dir_through_run_policy_final_checkpoint_60_days(tmp_pat
         monkeypatch.setattr(export_replay, "run_policy", run_policy)
 
     with pytest.raises(_Routed):
-        export_replay.main(_argv(str(run_dir), "paper", out))
+        _main(export_replay, _argv(str(given), "paper", out), ledger_path)
     [call] = calls
     assert Path(call["run_dir"]).resolve() == run_dir.resolve()
-    assert call["checkpoint"] == "final"
+    assert call["checkpoint"] == CHECKPOINT
     assert call["scenario"] == PAPER
     assert call["season_length"] == 60
     assert call["record_steps"] is True
+    assert call["return_trace"] is True
+    assert call["allow_test"] is False
     assert list(out.iterdir()) == []
+
+
+# --- The CLI: a run dir is a registered run, and meta names it (Done when, #48) -----------------
+
+
+def _bytes(path: Path) -> bytes | None:
+    return path.read_bytes() if path.exists() else None
+
+
+UNREGISTERED_CASES = [
+    # No ledger file: ledger.rows reads no rows, so no run row names the dir.
+    pytest.param(False, id="no-ledger"),
+    # The E6-shaped ledger, and a copy of seed 100's dir under another root: E6's registration, the
+    # arm, the seed and the dir's name are all in its path, but no run row names it.
+    pytest.param(True, id="same-name-elsewhere"),
+]
+
+
+@pytest.mark.parametrize("e6", UNREGISTERED_CASES)
+@pytest.mark.usefixtures("no_2012_reads")
+def test_cli_refuses_an_unregistered_run_dir_before_any_env(e6, tmp_path, monkeypatch, capsys):
+    """Done when: a run dir (it holds a manifest.json) that no ledger run row names is refused
+    before any env, naming the dir and "not a registered run" (the site replays registered runs
+    only), with nothing written: the out dir stays empty and the tmp ledger is as it was.
+    - no-ledger: ledger_path doesn't exist.
+    - same-name-elsewhere: the E6-shaped ledger (_e6), its result row selecting seed 100; the dir
+      is tmp/copy/<E6's registered>/residual_w05/seed100, so a lookup by the dir's name, or by
+      the arm and seed in its path, finds a run row it shouldn't."""
+    import greenleaf_control.export_replay as export_replay
+
+    ledger_path, registered = tmp_path / "ledger.jsonl", "registered-00000000"
+    if e6:
+        ledger_path, reg, _, _ = _e6(tmp_path, [{100: CHECKPOINT, 101: "final"}])
+        registered = reg["row_id"]
+    run_dir = _fake_run_dir(tmp_path / "copy" / registered / ARM / "seed100")
+    before = _bytes(ledger_path)
+    out = tmp_path / "site"
+    out.mkdir()
+    _trip(monkeypatch, export_replay, ALL_ENV_ROUTES)
+
+    with pytest.raises((SystemExit, ValueError)) as excinfo:
+        _main(export_replay, _argv(str(run_dir), "validation", out), ledger_path)
+    text = _refusal(excinfo, capsys)
+    assert "not a registered run" in text, text
+    assert str(run_dir) in text, text
+    assert list(out.iterdir()) == []
+    assert _bytes(ledger_path) == before
+
+
+LOOKUP_CASES = [
+    # E6's registration has no result row yet (the decoy experiment's has one: it doesn't count).
+    pytest.param([], 0, id="no-result-row"),
+    # One result row, selecting seed 101 only.
+    pytest.param([{101: "final"}], 1, id="result-selects-another-seed"),
+    # One result row, selecting no run.
+    pytest.param([{}], 1, id="result-selects-no-run"),
+    # Two result rows, both selecting seed 100 at different checkpoints: either would be a guess.
+    pytest.param(
+        [{100: CHECKPOINT, 101: "final"}, {100: "1750000", 101: "final"}], 2, id="two-result-rows"
+    ),
+]
+
+
+@pytest.mark.parametrize(("results", "count"), LOOKUP_CASES)
+@pytest.mark.usefixtures("no_2012_reads")
+def test_cli_refuses_a_run_dir_without_exactly_one_result_row_selecting_it(
+    results, count, tmp_path, monkeypatch, capsys
+):
+    """Done when: a registered run dir (seed 100 of the E6-shaped tmp ledger, its run row naming
+    the dir) is refused before any env unless its registration has exactly one result row and
+    that row's selected names the run. The refusal names the run's row id and the count of its
+    registration's result rows, as a number (0, 1 or 2 here; the decoy experiment's result row is
+    another registration's), and nothing is written: the out dir stays empty and the tmp ledger is
+    as it was."""
+    import greenleaf_control.export_replay as export_replay
+
+    ledger_path, _, runs, _ = _e6(tmp_path, results)
+    run, run_dir = runs[100]
+    before = _bytes(ledger_path)
+    out = tmp_path / "site"
+    out.mkdir()
+    _trip(monkeypatch, export_replay, ALL_ENV_ROUTES)
+
+    with pytest.raises((SystemExit, ValueError)) as excinfo:
+        _main(export_replay, _argv(str(run_dir), "validation", out), ledger_path)
+    text = _refusal(excinfo, capsys)
+    assert run["row_id"] in text, text
+    assert _names_count(text, count, tmp_path), f"the count {count} isn't named: {text}"
+    assert list(out.iterdir()) == []
+    assert _bytes(ledger_path) == before
+
+
+@pytest.mark.usefixtures("no_2012_reads")
+def test_cli_run_dir_meta_names_its_registered_run_and_its_own_commit(
+    tmp_path, monkeypatch, seasons
+):
+    """Done when: a run dir's file is <arm>_seed<seed>_<location>_<year>_<start day>.json, and its
+    meta.run is the 7-key dict from the ledger, whose commit is the run dir's manifest's, not the
+    stamp's.
+
+    The E6-shaped tmp ledger's run row names seed 100's dir through a ".." (resolved, it is the dir
+    the CLI is handed). run_policy is a spy that returns the 1-day PAPER rb default season as
+    run_policy(..., return_trace=True) does, (result, frame, (states, controls, params)), so no
+    checkpoint loads. main(--controller <seed 100's dir> --split paper) returns 0, calls run_policy
+    once at "1500000", and writes exactly residual_w05_seed100_Amsterdam_2010_59.json, whose meta:
+    - has exactly the 10 keys;
+    - controller "residual_w05_seed100", scenario PAPER with season_length 1 (96 frame rows),
+      split "paper", note "a simulator replay of a paper season, not the final result";
+    - run {id: seed 100's run row, registered: E6's registration, result: E6's result row, arm
+      "residual_w05", seed 100, checkpoint "1500000", commit RUN_COMMIT (the manifest's)};
+    - commit the checkout's (git rev-parse HEAD), which is not RUN_COMMIT.
+    The tmp ledger is as it was: the lookup only reads it."""
+    import greenleaf_control.export_replay as export_replay
+
+    ledger_path, reg, runs, [res] = _e6(tmp_path, [{100: CHECKPOINT, 101: "final"}], hop=True)
+    run, run_dir = runs[100]
+    before = _bytes(ledger_path)
+    out = tmp_path / "site"
+    out.mkdir()
+    season = seasons["rb_default"]
+    signature = inspect.signature(evaluate.run_policy)
+    _trip(monkeypatch, export_replay, ("run_baseline", "build_vec_env", "run_rb"))
+    calls = []
+
+    def run_policy(*args, **kwargs):
+        bound = signature.bind(*args, **kwargs)
+        bound.apply_defaults()
+        calls.append(dict(bound.arguments))
+        trace = (season["states"], season["controls"], season["params"])
+        return season["result"], season["frame"], trace
+
+    monkeypatch.setattr(evaluate, "run_policy", run_policy)
+    if hasattr(export_replay, "run_policy"):
+        monkeypatch.setattr(export_replay, "run_policy", run_policy)
+
+    assert _main(export_replay, _argv(str(run_dir), "paper", out), ledger_path) == 0
+
+    assert [call["checkpoint"] for call in calls] == [CHECKPOINT]
+    assert [p.name for p in out.iterdir()] == [RUN_FILE]
+    meta = json.loads((out / RUN_FILE).read_text(encoding="utf-8"))["meta"]
+    head = subprocess.run(
+        ["git", "-C", str(manifest.REPO_ROOT), "rev-parse", "HEAD"],
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    assert set(meta) == META_KEYS
+    assert meta["controller"] == "residual_w05_seed100"
+    assert meta["scenario"] == {**PAPER, "season_length": 1}
+    assert meta["split"] == "paper"
+    assert meta["note"] == NOTE_PAPER
+    assert meta["run"] == {
+        "id": run["row_id"],
+        "registered": reg["row_id"],
+        "result": res["row_id"],
+        "arm": ARM,
+        "seed": 100,
+        "checkpoint": CHECKPOINT,
+        "commit": RUN_COMMIT,
+    }
+    assert meta["commit"] == head != RUN_COMMIT
+    assert _bytes(ledger_path) == before
 
 
 def test_cli_runs_as_a_module_and_lists_its_flags_and_every_split(tmp_path):
@@ -669,8 +1056,8 @@ def test_cli_runs_as_a_module_and_lists_its_flags_and_every_split(tmp_path):
 
 
 def test_signatures_match_the_design_and_no_test_wrote_the_real_ledger_runs_or_results():
-    """export(frame, result, states, controls, params, *, controller, scenario, stamp) and
-    main(argv=None).
+    """Done when: export(frame, result, states, controls, params, *, controller, scenario, stamp,
+    split, run) and main(argv=None, *, ledger_path=ledger.LEDGER), as selection.main.
 
     This test runs last in the module and checks the real ledger's size and mtime, and the
     listings of control/runs/ and control/results/, are as they were when the module was
@@ -681,11 +1068,13 @@ def test_signatures_match_the_design_and_no_test_wrote_the_real_ledger_runs_or_r
     positional = [n for n, p in export.items() if p.kind is p.POSITIONAL_OR_KEYWORD]
     keyword = [n for n, p in export.items() if p.kind is p.KEYWORD_ONLY]
     assert positional == ["frame", "result", "states", "controls", "params"]
-    assert keyword == ["controller", "scenario", "stamp"]
-    assert len(export) == 8
+    assert keyword == ["controller", "scenario", "stamp", "split", "run"]
+    assert len(export) == 10
     main = inspect.signature(export_replay.main).parameters
-    assert list(main) == ["argv"]
+    assert list(main) == ["argv", "ledger_path"]
     assert main["argv"].default is None
+    assert main["ledger_path"].kind is inspect.Parameter.KEYWORD_ONLY
+    assert main["ledger_path"].default == ledger.LEDGER
     assert _stat(REAL_LEDGER) == REAL_LEDGER_BEFORE
     assert _listing(REAL_RUNS) == REAL_RUNS_BEFORE
     assert _listing(REAL_RESULTS) == REAL_RESULTS_BEFORE
