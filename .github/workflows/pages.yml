@@ -1,0 +1,50 @@
+name: pages
+
+# The demo site: built by greenleaf_control.site_build from committed data and deployed to GitHub
+# Pages from master only. Keyless: no secrets, no Modal.
+on:
+  push:
+    branches: [master]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: control
+    steps:
+      - uses: actions/checkout@v7.0.1
+      # Same pins as control-ci.yml, so the site builds on the toolchain the fast tests pass on.
+      - uses: astral-sh/setup-uv@v10.3.2
+        with:
+          version: "0.12.3"
+          python-version: "3.12"
+      - name: Install
+        run: uv sync --locked
+      - name: Build site
+        run: uv run python -m greenleaf_control.site_build --out ../_site
+      - uses: actions/configure-pages@v6.0.0
+      # uses-steps ignore working-directory, so this path is from the repo root.
+      - uses: actions/upload-pages-artifact@v5.0.0
+        with:
+          path: _site
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v5.0.1

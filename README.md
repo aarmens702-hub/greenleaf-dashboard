@@ -11,6 +11,8 @@ over 60 days: the tuned rules (`rb_tuned`) above, the rules plus the fixed-penal
 107, run-66b245e3, checkpoint 1750000, the lower-median seed of E6 by day-59 profit, not the best seed). A replay of a
 recorded validation result (result-d1f0b8e7). Click the image for the day-by-day replay.*
 
+Live demo: https://aarmens702-hub.github.io/greenleaf-dashboard/ (simulated seasons, replayed in the browser)
+
 The write-up, with every experiment, drop and limitation, is [docs/REPORT.md](docs/REPORT.md).
 
 ## Results (2012 test weather, scored once)
