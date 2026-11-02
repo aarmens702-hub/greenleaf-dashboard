@@ -7,10 +7,10 @@
       "growth_year": 2010,
       "start_day": 59
     },
-    "commit": "7e5b56b7babbda364b993318eb8cc6b9c419c62b",
+    "commit": "bfb59001c5204d89fa37aa78164e94cd145483fd",
     "dirty": false,
     "gl_gym": "2d3febb1ea002b24b452e32293e990beb78d3ce1",
-    "made_at": "2026-11-02T05:45:54.077704+00:00",
+    "made_at": "2026-11-02T07:14:47.689000+00:00",
     "metrics": {
       "profit_eur_m2": -4.697726335099438,
       "viol_hours_co2": 0.0,
@@ -37,10 +37,10 @@
       "growth_year": 2010,
       "start_day": 59
     },
-    "commit": "7e5b56b7babbda364b993318eb8cc6b9c419c62b",
+    "commit": "bfb59001c5204d89fa37aa78164e94cd145483fd",
     "dirty": false,
     "gl_gym": "2d3febb1ea002b24b452e32293e990beb78d3ce1",
-    "made_at": "2026-11-02T05:45:54.077704+00:00",
+    "made_at": "2026-11-02T07:14:47.689000+00:00",
     "metrics": {
       "profit_eur_m2": -4.697726335099438,
       "viol_hours_co2": 0.0,
@@ -67,10 +67,10 @@
       "growth_year": 2010,
       "start_day": 59
     },
-    "commit": "7e5b56b7babbda364b993318eb8cc6b9c419c62b",
+    "commit": "bfb59001c5204d89fa37aa78164e94cd145483fd",
     "dirty": false,
     "gl_gym": "2d3febb1ea002b24b452e32293e990beb78d3ce1",
-    "made_at": "2026-11-02T05:45:54.077704+00:00",
+    "made_at": "2026-11-02T07:14:47.689000+00:00",
     "metrics": {
       "rb_default": {
         "profit_eur_m2": -4.697726335099438,
@@ -145,10 +145,10 @@
         "start_day": 75
       }
     ],
-    "commit": "7e5b56b7babbda364b993318eb8cc6b9c419c62b",
+    "commit": "bfb59001c5204d89fa37aa78164e94cd145483fd",
     "dirty": false,
     "gl_gym": "2d3febb1ea002b24b452e32293e990beb78d3ce1",
-    "made_at": "2026-11-02T05:45:54.077704+00:00",
+    "made_at": "2026-11-02T07:14:47.689000+00:00",
     "metrics": {
       "points": [
         {
@@ -370,5 +370,197 @@
       "decision-960905e6",
       "result-525a6e90"
     ]
+  },
+  {
+    "file": "hero.png",
+    "source": "rb_tuned vs run-66b245e3 (residual_w05 seed 107, checkpoint 1750000, trained at 3ac74be), result-d1f0b8e7, decision-eab26197, result-525a6e90, rb_tuned_validation.parquet",
+    "scenario": {
+      "location": "Amsterdam",
+      "growth_year": 2010,
+      "start_day": 59
+    },
+    "commit": "bfb59001c5204d89fa37aa78164e94cd145483fd",
+    "dirty": false,
+    "gl_gym": "2d3febb1ea002b24b452e32293e990beb78d3ce1",
+    "made_at": "2026-11-02T07:14:47.689000+00:00",
+    "metrics": {
+      "rb_tuned": {
+        "profit_eur_m2": 1.309662861062611,
+        "viol_hours_co2": 0.0,
+        "pct_in_bounds_co2": 100.0,
+        "viol_hours_temp": 98.0,
+        "pct_in_bounds_temp": 93.19444444444444,
+        "viol_hours_rh": 251.0,
+        "pct_in_bounds_rh": 82.56944444444446,
+        "yield_kg_m2": 9.470840263302783,
+        "heat_cost": 9.165141795210177,
+        "elec_cost": 2.8535999999999997,
+        "co2_cost": 1.8249397650116654,
+        "paper_return": 3643.3635961653595,
+        "solver_failures": 0,
+        "steps": 5760,
+        "valid": true,
+        "paper_reward_sum": 3643.3635866978525
+      },
+      "residual_w05": {
+        "profit_eur_m2": 1.833872647840674,
+        "viol_hours_co2": 0.25,
+        "pct_in_bounds_co2": 99.98263888888889,
+        "viol_hours_temp": 47.25,
+        "pct_in_bounds_temp": 96.71875,
+        "viol_hours_rh": 175.0,
+        "pct_in_bounds_rh": 87.84722222222221,
+        "yield_kg_m2": 9.932558676896495,
+        "heat_cost": 9.167918953134599,
+        "elec_cost": 2.6725828011912407,
+        "co2_cost": 2.2177194808678777,
+        "paper_return": 3724.026492443493,
+        "solver_failures": 0,
+        "steps": 5760,
+        "valid": true,
+        "paper_reward_sum": 3724.0264902724107
+      }
+    },
+    "split": "validation",
+    "ledger": [
+      "run-66b245e3",
+      "result-d1f0b8e7",
+      "decision-eab26197",
+      "result-525a6e90"
+    ],
+    "run": {
+      "seed": 107,
+      "checkpoint": "1750000",
+      "run_dir": "/Users/aarmensidhu/Desktop/greenleaf-dashboard/.worktrees/36/control/runs/registered-f2fd71e9/residual_w05/seed107",
+      "manifest_commit": "3ac74beed9f5fd8038c0eade193258aff65d55f9"
+    }
+  },
+  {
+    "file": "duel_replay.gif",
+    "source": "rb_tuned vs run-66b245e3 (residual_w05 seed 107, checkpoint 1750000, trained at 3ac74be), result-d1f0b8e7, decision-eab26197, result-525a6e90, rb_tuned_validation.parquet",
+    "scenario": {
+      "location": "Amsterdam",
+      "growth_year": 2010,
+      "start_day": 59
+    },
+    "commit": "bfb59001c5204d89fa37aa78164e94cd145483fd",
+    "dirty": false,
+    "gl_gym": "2d3febb1ea002b24b452e32293e990beb78d3ce1",
+    "made_at": "2026-11-02T07:14:47.689000+00:00",
+    "metrics": {
+      "rb_tuned": {
+        "profit_eur_m2": 1.309662861062611,
+        "viol_hours_co2": 0.0,
+        "pct_in_bounds_co2": 100.0,
+        "viol_hours_temp": 98.0,
+        "pct_in_bounds_temp": 93.19444444444444,
+        "viol_hours_rh": 251.0,
+        "pct_in_bounds_rh": 82.56944444444446,
+        "yield_kg_m2": 9.470840263302783,
+        "heat_cost": 9.165141795210177,
+        "elec_cost": 2.8535999999999997,
+        "co2_cost": 1.8249397650116654,
+        "paper_return": 3643.3635961653595,
+        "solver_failures": 0,
+        "steps": 5760,
+        "valid": true,
+        "paper_reward_sum": 3643.3635866978525
+      },
+      "residual_w05": {
+        "profit_eur_m2": 1.833872647840674,
+        "viol_hours_co2": 0.25,
+        "pct_in_bounds_co2": 99.98263888888889,
+        "viol_hours_temp": 47.25,
+        "pct_in_bounds_temp": 96.71875,
+        "viol_hours_rh": 175.0,
+        "pct_in_bounds_rh": 87.84722222222221,
+        "yield_kg_m2": 9.932558676896495,
+        "heat_cost": 9.167918953134599,
+        "elec_cost": 2.6725828011912407,
+        "co2_cost": 2.2177194808678777,
+        "paper_return": 3724.026492443493,
+        "solver_failures": 0,
+        "steps": 5760,
+        "valid": true,
+        "paper_reward_sum": 3724.0264902724107
+      }
+    },
+    "split": "validation",
+    "ledger": [
+      "run-66b245e3",
+      "result-d1f0b8e7",
+      "decision-eab26197",
+      "result-525a6e90"
+    ],
+    "run": {
+      "seed": 107,
+      "checkpoint": "1750000",
+      "run_dir": "/Users/aarmensidhu/Desktop/greenleaf-dashboard/.worktrees/36/control/runs/registered-f2fd71e9/residual_w05/seed107",
+      "manifest_commit": "3ac74beed9f5fd8038c0eade193258aff65d55f9"
+    }
+  },
+  {
+    "file": "duel_replay.mp4",
+    "source": "rb_tuned vs run-66b245e3 (residual_w05 seed 107, checkpoint 1750000, trained at 3ac74be), result-d1f0b8e7, decision-eab26197, result-525a6e90, rb_tuned_validation.parquet",
+    "scenario": {
+      "location": "Amsterdam",
+      "growth_year": 2010,
+      "start_day": 59
+    },
+    "commit": "bfb59001c5204d89fa37aa78164e94cd145483fd",
+    "dirty": false,
+    "gl_gym": "2d3febb1ea002b24b452e32293e990beb78d3ce1",
+    "made_at": "2026-11-02T07:14:47.689000+00:00",
+    "metrics": {
+      "rb_tuned": {
+        "profit_eur_m2": 1.309662861062611,
+        "viol_hours_co2": 0.0,
+        "pct_in_bounds_co2": 100.0,
+        "viol_hours_temp": 98.0,
+        "pct_in_bounds_temp": 93.19444444444444,
+        "viol_hours_rh": 251.0,
+        "pct_in_bounds_rh": 82.56944444444446,
+        "yield_kg_m2": 9.470840263302783,
+        "heat_cost": 9.165141795210177,
+        "elec_cost": 2.8535999999999997,
+        "co2_cost": 1.8249397650116654,
+        "paper_return": 3643.3635961653595,
+        "solver_failures": 0,
+        "steps": 5760,
+        "valid": true,
+        "paper_reward_sum": 3643.3635866978525
+      },
+      "residual_w05": {
+        "profit_eur_m2": 1.833872647840674,
+        "viol_hours_co2": 0.25,
+        "pct_in_bounds_co2": 99.98263888888889,
+        "viol_hours_temp": 47.25,
+        "pct_in_bounds_temp": 96.71875,
+        "viol_hours_rh": 175.0,
+        "pct_in_bounds_rh": 87.84722222222221,
+        "yield_kg_m2": 9.932558676896495,
+        "heat_cost": 9.167918953134599,
+        "elec_cost": 2.6725828011912407,
+        "co2_cost": 2.2177194808678777,
+        "paper_return": 3724.026492443493,
+        "solver_failures": 0,
+        "steps": 5760,
+        "valid": true,
+        "paper_reward_sum": 3724.0264902724107
+      }
+    },
+    "split": "validation",
+    "ledger": [
+      "run-66b245e3",
+      "result-d1f0b8e7",
+      "decision-eab26197",
+      "result-525a6e90"
+    ],
+    "run": {
+      "seed": 107,
+      "checkpoint": "1750000",
+      "run_dir": "/Users/aarmensidhu/Desktop/greenleaf-dashboard/.worktrees/36/control/runs/registered-f2fd71e9/residual_w05/seed107",
+      "manifest_commit": "3ac74beed9f5fd8038c0eade193258aff65d55f9"
+    }
   }
 ]
