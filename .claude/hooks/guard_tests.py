@@ -9,8 +9,10 @@ A test file is anything under a tests/ folder (control/tests/ included, and
 its golden/ and probes/ folders), a test_*.py or *_test.py file, or a
 conftest.py. The path is judged once resolved (against CLAUDE_PROJECT_DIR,
 or the cwd, and through symlinks), so tests/../ or a link can't pass app
-code off as a test, or a test as app code. Exit code 2 blocks the edit and
-tells the agent why, in one stderr line. It fails closed: a missing or
+code off as a test, or a test as app code. It is casefolded too, on every
+platform, since the Mac's filesystem ignores case: control/TESTS/ is
+control/tests/ there. Exit code 2 blocks the edit and tells the agent why,
+in one stderr line. It fails closed: a missing or
 unknown mode, stdin that isn't a JSON object, a tool_input that isn't an
 object, a file_path that isn't a string, or a crash all block; an empty
 file_path passes. Standard library only, so it runs on any python3. Ported
@@ -52,7 +54,7 @@ def main():
         return None
 
     root = os.environ.get("CLAUDE_PROJECT_DIR") or os.getcwd()
-    p = os.path.realpath(os.path.join(root, path)).replace("\\", "/")
+    p = os.path.realpath(os.path.join(root, path)).replace("\\", "/").casefold()
     name = p.rsplit("/", 1)[-1]
     is_test = bool(
         re.search(r"(^|/)tests/", p) or re.fullmatch(r"test_.*\.py|.*_test\.py|conftest\.py", name)
