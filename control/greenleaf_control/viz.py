@@ -16,6 +16,7 @@ from pathlib import Path
 import numpy as np
 from matplotlib import patheffects, transforms
 from matplotlib.figure import Figure
+from matplotlib.text import Text
 from tensorboard.backend.event_processing.event_accumulator import EventAccumulator
 
 from greenleaf_control import metrics
@@ -205,15 +206,17 @@ def _direct(ax, text: str, xy, at, color: str, **kwargs):
     return ax.annotate(text, xy, **{**style, **kwargs})
 
 
-def _spread(ax, texts: list) -> None:
-    """Moves ax's direct labels apart vertically until no two overlap, each keeping its x: those in
-    the lower half of the axes, lowest first, move up past every label already placed; the rest,
-    highest first, move down."""
+def _spread(ax, texts: list, avoid: dict | None = None) -> None:
+    """Moves ax's direct labels apart vertically until no two overlap and no label in avoid
+    ({label: drawn markers}) has its text over one of its markers, each keeping its x: those in the
+    lower half of the axes, lowest first, move up past every label already placed and marker hit;
+    the rest, highest first, move down. A label that covers nothing stays where it is."""
     if not texts:
         return
     fig = ax.get_figure(root=True)
     fig.draw_without_rendering()  # the layout, so the boxes are where the PNG puts them
     start = {t: t.get_window_extent() for t in texts}
+    marks = {t: [a.get_window_extent() for a in artists] for t, artists in (avoid or {}).items()}
     mid = (ax.bbox.y0 + ax.bbox.y1) / 2
     low = sorted(
         (t for t in texts if start[t].y0 + start[t].y1 < 2 * mid), key=lambda t: start[t].y0
@@ -222,11 +225,14 @@ def _spread(ax, texts: list) -> None:
     placed = []
     for t in low + high:
         box = start[t]
-        while hits := [b for b in placed if box.overlaps(b)]:
+        own = Text.get_window_extent(t)  # the text alone: its leader reaches its own marker
+        mine = marks.get(t, [])
+        while hits := [b for b in placed if box.overlaps(b)] + [m for m in mine if own.overlaps(m)]:
             if t in low:
-                box = box.translated(0, max(b.y1 for b in hits) + 1 - box.y0)
+                move = max(b.y1 for b in hits) + 1 - box.y0
             else:
-                box = box.translated(0, min(b.y0 for b in hits) - 1 - box.y1)
+                move = min(b.y0 for b in hits) - 1 - box.y1
+            box, own = box.translated(0, move), own.translated(0, move)
         placed.append(box)
         dx, dy = t.xyann
         t.xyann = (dx, dy + (box.y0 - start[t].y0) * 72 / fig.dpi)
@@ -267,7 +273,9 @@ def tradeoff(
     ax.set_ylim(y0, y1)
     ax.axhline(0.0, color=MUTED, lw=0.6)
     ax.axvline(0.0, color=MUTED, lw=0.6)
-    labels = []
+    # every drawn marker, and the off-scale points' labels: stacked on an edge, they mustn't cover
+    # one (#53: rb_tuned's diamond by the corner). The in-scale labels place as before (#47).
+    labels, marks, edge = [], [], []
     for p in points:
         (x, x_lo, x_hi), (y, y_lo, y_hi) = p["viol_hours"], p["profit"]
         fx, fy = (x - x0) / (x1 - x0), (y - y0) / (y1 - y0)
@@ -278,9 +286,12 @@ def tradeoff(
             name += f" (n={p['n']}, no claim)"
         if beyond[mark] > 0:
             at = (min(max(fx, 0.015), 0.985), min(max(fy, 0.015), 0.985))
-            ax.plot(*at, marker=mark, ms=7, color=GREY, transform=ax.transAxes, clip_on=False)
+            marks += ax.plot(
+                *at, marker=mark, ms=7, color=GREY, transform=ax.transAxes, clip_on=False
+            )
             text = f"{name} ({_num(x)}, {_num(y)})"
-            labels.append(_direct(ax, text, at, at, MUTED, xycoords="axes fraction"))
+            edge.append(_direct(ax, text, at, at, MUTED, xycoords="axes fraction"))
+            labels.append(edge[-1])
             continue
         if p["label"] == REFERENCE:
             look = {"fmt": "D", "color": INK, "mfc": GROUND, "ms": 6.5}
@@ -291,14 +302,28 @@ def tradeoff(
         else:  # dropped or undecided: only an adopted arm gets ink
             look = {"fmt": "o", "color": MUTED, "mfc": GROUND, "ms": 6}
         xerr, yerr = [[x - x_lo], [x_hi - x]], [[y - y_lo], [y_hi - y]]
-        ax.errorbar(x, y, xerr=xerr, yerr=yerr, elinewidth=0.8, label=p["label"], **look)
+        bars = ax.errorbar(x, y, xerr=xerr, yerr=yerr, elinewidth=0.8, label=p["label"], **look)
+        marks.append(bars.lines[0])
         ink = INK if look["color"] == INK else MUTED
         labels.append(_direct(ax, name, (x, y), (fx, fy), ink))
     ax.set_xlabel(xlabel, **AXIS)
     ax.set_ylabel(ylabel, **AXIS)
-    _spread(ax, labels)
+    _spread(ax, labels, avoid=dict.fromkeys(edge, marks))
     fig.savefig(out)
     return fig
+
+
+def _dot_boxes(ax) -> list:
+    """The drawn box of every scatter dot on ax, in pixels: its centre padded by its marker path's
+    reach at its size (s is in points², so a path unit is sqrt(s) points)."""
+    dpi = ax.get_figure(root=True).dpi
+    boxes = []
+    for dots in ax.collections:
+        reach = np.abs(dots.get_paths()[0].vertices).max(axis=0) * np.sqrt(dots.get_sizes()[0])
+        dx, dy = reach * dpi / 72
+        for x, y in dots.get_offset_transform().transform(dots.get_offsets()):
+            boxes.append(transforms.Bbox.from_extents(x - dx, y - dy, x + dx, y + dy))
+    return boxes
 
 
 def per_scenario(
@@ -315,7 +340,8 @@ def per_scenario(
     title up to KEY_BESIDE_TITLE scenarios, else in its own band under it.
 
     The x limits fit every label but a FAR baseline, and 0; a FAR baseline's values outside them
-    are a triangle on the row's edge with their true range. A panel with other labels than the
+    are a triangle on the row's edge with their true range, beside it, or under the row (over it on
+    the last row) where it would cover an in-scale dot. A panel with other labels than the
     first's, or an array whose column count isn't len(scenario_labels), raises a ValueError.
     """
     if not panels:
@@ -334,6 +360,7 @@ def per_scenario(
                 )
     fig = _ground((4.8 * len(panels), 1.6 + 0.3 * len(rows)), title, footer)
     axes = fig.subplots(1, len(panels), sharey=True, squeeze=False)[0]
+    ranges = []  # per axes: (it, its row transform, [(range text, edge, row)])
     for ax, (key, arrays) in zip(axes, panels.items(), strict=True):
         _instrument(ax)
         x0, x1 = _fit([v for label in rows if label not in FAR for v in np.ravel(arrays[label])])
@@ -356,6 +383,7 @@ def per_scenario(
                 label=scenario,
             )
         xy = ax.get_yaxis_transform()  # x in axes fractions, y in rows
+        ranges.append((ax, xy, []))
         for row, values in enumerate(arrays.values()):
             v = np.ravel(values)
             for off, edge, mark in ((v[v < x0], 0.012, "<"), (v[v > x1], 0.988, ">")):
@@ -364,7 +392,8 @@ def per_scenario(
                     text = lo if lo == hi else f"{lo} to {hi}"
                     ax.plot(edge, row, marker=mark, ms=6, color=GREY, transform=xy, clip_on=False)
                     beside = {"xytext": (8 if edge < 0.5 else -8, 0), "va": "center"}
-                    _direct(ax, text, (edge, row), (edge, 0.5), MUTED, xycoords=xy, **beside)
+                    t = _direct(ax, text, (edge, row), (edge, 0.5), MUTED, xycoords=xy, **beside)
+                    ranges[-1][2].append((t, edge, row))
         ax.set_xlabel(key, **AXIS)
     axes[0].set_yticks(range(len(rows)), rows)
     axes[0].set_ylim(len(rows) - 0.5, -0.5)  # inverted: the first label on top
@@ -393,6 +422,18 @@ def per_scenario(
         layout = fig.get_layout_engine()
         x, y, w, h = layout.get()["rect"]
         layout.set(rect=(x, y, w, h - key.get_window_extent().height / fig.bbox.height))
+    if any(texts for _, _, texts in ranges):
+        fig.draw_without_rendering()  # the layout, so the boxes are where the PNG puts them
+    for ax, xy, texts in ranges:
+        dots = _dot_boxes(ax)
+        for t, edge, row in texts:
+            if any(Text.get_window_extent(t).overlaps(d) for d in dots):
+                # under the row (over it on the last), past every dot's reach and short of the next
+                over = row == len(rows) - 1 and row > 0
+                at = (edge, 0.5 if over else 0.95)  # _direct's flip: 0.95 hangs it below
+                shift = {"xytext": (8 if edge < 0.5 else -8, 5 if over else -5)}
+                t.remove()
+                _direct(ax, t.get_text(), (edge, row), at, MUTED, xycoords=xy, **shift)
     fig.savefig(out)
     return fig
 

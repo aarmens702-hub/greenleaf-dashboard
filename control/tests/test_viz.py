@@ -71,6 +71,7 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 import pytest
+from matplotlib.backends.backend_agg import FigureCanvasAgg
 from matplotlib.collections import PathCollection
 from matplotlib.colors import to_hex, to_rgba
 from matplotlib.container import ErrorbarContainer
@@ -78,6 +79,7 @@ from matplotlib.figure import Figure
 from matplotlib.markers import MarkerStyle
 from matplotlib.patches import Rectangle
 from matplotlib.text import Text
+from matplotlib.transforms import Bbox
 from stable_baselines3.common.logger import configure
 from tensorboard.backend.event_processing.event_accumulator import EventAccumulator
 
@@ -910,6 +912,89 @@ def test_tradeoff_inks_only_adopted_arms(tmp_path):
             )
 
 
+# The report's trade-off on london_2012 and abbotsford_2012 (#53's review): every learning arm
+# gains a little profit and saves hours, so the y axis bottoms out at -0.096 (0.06 x 1.6 below 0)
+# and x at -12, and rb_tuned's origin sits near the lower-left corner, where random and
+# rb_default (-312 h, -6.47 €/m²), both off-scale left and below, are clamped; zero_controls is
+# off on the left only.
+CORNER = [
+    {
+        "label": "ppo_paper",
+        "profit": (1.2, 0.9, 1.6),
+        "viol_hours": (150.0, 120.0, 200.0),
+        "status": "adopted",
+        "n": 5,
+    },
+    {
+        "label": "residual_w05",
+        "profit": (0.5, 0.2, 0.8),
+        "viol_hours": (60.0, 40.0, 90.0),
+        "status": "adopted",
+        "n": 10,
+    },
+    {
+        "label": "lag_b100",
+        "profit": (0.3, 0.05, 0.6),
+        "viol_hours": (20.0, 5.0, 35.0),
+        "status": None,
+        "n": 10,
+    },
+    {"label": "rb_tuned", "profit": (0.0,) * 3, "viol_hours": (0.0,) * 3},
+    {"label": "zero_controls", "profit": (0.4,) * 3, "viol_hours": (-2500.0,) * 3},
+    {"label": "random", "profit": (-28.0,) * 3, "viol_hours": (-1400.0,) * 3},
+    {"label": "rb_default", "profit": (-6.47,) * 3, "viol_hours": (-312.0,) * 3},
+]
+
+
+def _drawn(fig: Figure):
+    """fig drawn on an Agg canvas, its layout run as for the PNG; returns the renderer, so every
+    extent below is in the PNG's pixels."""
+    canvas = FigureCanvasAgg(fig)
+    canvas.draw()
+    return canvas.get_renderer()
+
+
+def _text_box(text: Text, renderer) -> Bbox:
+    """A text's own drawn box: for an annotation, without its leader (a hairline)."""
+    return Text.get_window_extent(text, renderer)
+
+
+@pytest.mark.parametrize(
+    ("points", "off_scale"),
+    [
+        pytest.param(CORNER, ("zero_controls", "random", "rb_default"), id="london-shaped"),
+        pytest.param(SPREAD, tuple(OFF_LIMITS), id="validation-shaped"),
+    ],
+)
+def test_tradeoff_off_scale_labels_never_cover_the_rb_tuned_marker(points, off_scale, tmp_path):
+    """Regression for #53 (the reviewer's FIX): on london_2012 and abbotsford_2012 the y axis
+    bottoms out near -0.1, so rb_tuned's diamond at the origin sits next to the lower-left corner
+    where random's and rb_default's off-scale labels are stacked, and they run across it. However
+    the labels are placed, no text naming an off-scale baseline may overlap the rb_tuned marker's
+    drawn box (its marker size included), in the drawn figure's pixels. Each off-scale baseline
+    keeps a text naming it (test_tradeoff_draws_an_off_limit_point_as_an_edge_marker_with_its_true_
+    values pins its true values). The validation-shaped case (SPREAD: y down to about -0.9)
+    doesn't collide today and must not start to."""
+    tradeoff = _viz("tradeoff")
+    out = tmp_path / "tradeoff.png"
+    fig = tradeoff(points, out)
+    _assert_png(out)
+    renderer = _drawn(fig)
+    ax = fig.axes[0]
+    [rb] = [
+        c for c in ax.containers if isinstance(c, ErrorbarContainer) and c.get_label() == "rb_tuned"
+    ]
+    diamond = rb.lines[0].get_window_extent(renderer)
+    for label in off_scale:
+        texts = [t for t in fig.findobj(Text) if _names(t.get_text(), label)]
+        assert texts, (label, _texts(fig))
+        for t in texts:
+            box = _text_box(t, renderer)
+            assert not box.overlaps(diamond), (
+                f"{t.get_text()!r} at {box} covers rb_tuned's marker at {diamond}"
+            )
+
+
 @pytest.mark.parametrize("plot", ["tradeoff", "profiles"])
 def test_tradeoff_and_profiles_carry_a_one_line_mono_key_to_their_encoding(plot, tmp_path):
     """With direct labels and no colour legend, one line of MONO text names the encoding (exact
@@ -1009,6 +1094,99 @@ def test_per_scenario_draws_a_far_baselines_values_as_a_triangle_on_its_rows_edg
         assert any(abs(xy[0] - edge) <= 0.05 for xy in on_row), (key, _triangles(ax))
         texts = [t.get_text() for t in ax.texts]
         assert any(_gives(t, lo) and _gives(t, hi) for t in texts), (key, lo, hi, texts)
+
+
+# amsterdam_2012's per_scenario (#53's review): 8 scenarios, and zero_controls (a far baseline)
+# has five profit seasons in scale near the right edge (2.33 to 3.47) and three off it (3.80 to
+# 3.90). The learning arms and rb_tuned span -0.5..3.5, so the profit x limits are -0.74..3.74
+# (0.06 x 4 each side); in hours zero_controls is wholly off the right edge.
+AMSTERDAM_LABELS = [f"Amsterdam day {d}" for d in (45, 49, 53, 57, 61, 65, 69, 73)]
+NEAR_EDGE = {
+    PROFIT_KEY: {
+        "zero_controls": np.array([[2.33, 2.68, 2.99, 3.27, 3.47, 3.80, 3.85, 3.90]]),
+        "rb_tuned": np.array([[0.1, 0.4, 0.7, 1.0, 1.3, 1.6, 1.9, 2.2]]),
+        "ppo_paper": np.array(
+            [
+                [-0.5, 0.25, 0.75, 1.25, 1.75, 2.25, 2.75, 3.25],
+                [0.0, 0.5, 1.0, 1.5, 2.0, 2.5, 3.0, 3.5],
+            ]
+        ),
+    },
+    HOURS_KEY: {
+        "zero_controls": np.array(
+            [[2600.0, 2650.0, 2700.0, 2750.0, 2800.0, 2850.0, 2900.0, 2950.0]]
+        ),
+        "rb_tuned": np.array([[20.0, 25.0, 30.0, 35.0, 40.0, 45.0, 50.0, 55.0]]),
+        "ppo_paper": np.array(
+            [
+                [10.0, 15.0, 20.0, 30.0, 40.0, 50.0, 60.0, 70.0],
+                [5.0, 12.0, 18.0, 26.0, 34.0, 42.0, 51.0, 66.0],
+            ]
+        ),
+    },
+}
+
+
+def _dot_boxes(ax) -> list[Bbox]:
+    """The drawn box of every scatter dot on ax (the in-scale values), in pixels: its centre padded
+    by its marker path's reach at its size (s is in points², so a path unit is sqrt(s) points)."""
+    dpi = ax.get_figure(root=True).dpi
+    boxes = []
+    for coll in ax.collections:
+        if not isinstance(coll, PathCollection):
+            continue
+        paths, sizes = coll.get_paths(), coll.get_sizes()
+        offsets = np.asarray(coll.get_offsets(), dtype=float).reshape(-1, 2)
+        for i, (x, y) in enumerate(coll.get_offset_transform().transform(offsets)):
+            reach = np.abs(paths[i % len(paths)].vertices).max(axis=0)
+            dx, dy = reach * np.sqrt(sizes[i % len(sizes)]) * dpi / 72
+            boxes.append(Bbox.from_extents(x - dx, y - dy, x + dx, y + dy))
+    return boxes
+
+
+@pytest.mark.parametrize(
+    ("panels", "scenario_labels", "ranges"),
+    [
+        pytest.param(
+            NEAR_EDGE,
+            AMSTERDAM_LABELS,
+            {PROFIT_KEY: (3.80, 3.90), HOURS_KEY: (2600.0, 2950.0)},
+            id="amsterdam-shaped",
+        ),
+        pytest.param(
+            {key: {"random": FAR_ROW[key], **arrays} for key, arrays in PANELS.items()},
+            SCENARIO_LABELS,
+            {key: FAR_SIDES[key][1:3] for key in PANELS},
+            id="validation-shaped",
+        ),
+    ],
+)
+def test_per_scenario_off_scale_range_text_never_covers_an_in_scale_dot(
+    panels, scenario_labels, ranges, tmp_path
+):
+    """Regression for #53 (the reviewer's FIX): on amsterdam_2012, zero_controls' off-scale range
+    text "3.80 to 3.90" is right-aligned from its row's right edge across x 2.3 to 3.5, and its
+    own in-scale dots (2.33 ... 3.47) are drawn on top of it. However the text is placed, the
+    text giving a panel's off-scale range (its true lo and hi) may not overlap any in-scale dot's
+    drawn box on that panel (in practice its row's), in the drawn figure's pixels. The
+    validation-shaped case (random's far values with one in-scale value mid-axes) doesn't collide
+    today and must not start to."""
+    per_scenario = _viz("per_scenario")
+    out = tmp_path / "per_scenario.png"
+    fig = per_scenario(panels, scenario_labels, out)
+    _assert_png(out)
+    renderer = _drawn(fig)
+    for ax in fig.axes:
+        lo, hi = ranges[ax.get_xlabel()]
+        texts = [
+            t for t in fig.findobj(Text) if _gives(t.get_text(), lo) and _gives(t.get_text(), hi)
+        ]
+        assert texts, (ax.get_xlabel(), lo, hi, _texts(fig))
+        dots = _dot_boxes(ax)
+        for t in texts:
+            box = _text_box(t, renderer)
+            hits = [d for d in dots if box.overlaps(d)]
+            assert not hits, f"{t.get_text()!r} at {box} covers {len(hits)} in-scale dot(s): {hits}"
 
 
 @pytest.mark.parametrize("columns", [2, 4])

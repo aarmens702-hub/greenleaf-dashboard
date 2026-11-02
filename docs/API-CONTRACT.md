@@ -438,8 +438,9 @@ Paths are relative to `control/`. Scenario dicts are `{"location": str, "growth_
   viol_hours_co2, viol_hours_temp, viol_hours_rh, yield_kg_m2, paper_return)`; `SCORED_ONCE` = `"2012 test weather,
   scored once"`.
 - **Splits:** validation, and the three TEST splits (A1c) once the ledger holds the `final-result` row. Until then a
-  test split is refused (a ValueError naming it and the seal, PROTOCOL §8) before a file is opened. `train_eval` and
-  `paper` are always refused (a ValueError naming the split from `load_scores`, an argparse error from the CLI).
+  test split is refused (a ValueError naming it and the seal, PROTOCOL §8) before any parquet is read (only the ledger
+  is read). `train_eval` and `paper` are always refused (a ValueError naming the split from `load_scores`, an argparse
+  error from the CLI).
 - `load_scores(split, *, ledger_path=ledger.LEDGER) -> pd.DataFrame`: one row per label × run × scenario.
   - **Columns:** `label, arm, issue, registered, result, decision, protocol, run, seed, crashed, split, location,
     growth_year, start_day`, every `ledger.RESULT_KEYS` key, `valid`, `viol_hours_total` (co2 + temp + rh). `issue`,
