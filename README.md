@@ -42,10 +42,9 @@ What didn't hold:
   passes on every split.
 - **Plain PPO earned more, with fewer hours.** `ppo` and `ppo_paper` (5 seeds each), which ignore the rules, beat
   either co-pilot on profit and on Σ hours on every split (gains of 2.08 to 3.36 €/m² at Σ 227.1 to 260.8 h) while
-  growing about 30% less fruit than the co-pilots (REPORT.md §5.2). Profit charges for that fruit at €1.60/kg, but
+  growing about 30% less fruit than the co-pilots (REPORT.md §5.2). Profit counts that fruit at €1.60/kg, but
   the energy and CO₂ costs PPO saves, with the lamps and CO₂ dosing off in almost every hour of the seed-0 replays
-  (REPORT.md §5.2), are larger than the fruit revenue it loses; nothing in #45's rule guards fruit growth, and nothing
-  values the crop still on the plants at day 60 (REPORT.md §6).
+  (REPORT.md §5.2), are larger than the fruit revenue it loses; nothing in #45's rule guards fruit growth, and nothing values the crop's condition at day 60 (REPORT.md §6).
 - **Doing nothing earns the most.** `zero_controls`, every actuator off, has the highest profit on every split (3.10,
   3.21 and 1.91 €/m²) at Σ 2977.5, 3058.7 and 3013.1 h, which is why profit is read only next to violation hours.
 - **The margins are small.** The co-pilots' gains are a few tenths of a euro per m² a season, on profits that stay
