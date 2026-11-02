@@ -198,15 +198,43 @@ Paths are relative to `control/`. Scenario dicts are `{"location": str, "growth_
   default False, and only `evaluate --final` sets it.
 - **Result dict** (both): `metrics.episode_metrics(...)` graded with the env's own `p` and `season_steps = N`, plus
   `paper_reward_sum` = Σ `info["paper_reward"]` in step order with `+=` (a reproduction check, not a graded metric).
-- **CLI:** `--controller {zero_controls|random|rb_default|rb_tuned|<run_dir>}`
-  `--split {train_eval|validation|paper|<the three test splits>} --out <parquet>`.
-  - The three test splits are refused as sealed (PROTOCOL §8) without `--final <final-registered row>`; `--final`
-    itself is refused until F1 (Stage 3) implements it.
+- **`main(argv=None, *, ledger_path=ledger.LEDGER)`**; `ledger_path` is the ledger `--final` reads.
+- **CLI, scoring:** `--controller {zero_controls|random|rb_default|rb_tuned|<run_dir>}`
+  `--split {train_eval|validation|paper|<the three test splits>} --out <parquet>`, all three required (argparse's
+  message) when there is no `--final`.
+  - The three test splits are refused as sealed (PROTOCOL §8) without `--final`.
   - `--out` must not exist (created exclusively). One row per scenario in split order, 60-day seasons. Identity
     columns `controller, checkpoint` (None for a baseline, `final` for a run dir), `split, location, growth_year,
     start_day, season_length`, then the result keys.
   - `<run_dir>` is a directory holding `manifest.json`, scored at its `final` checkpoint. `zero_controls` and
     `random` go through `envs.run_baseline`, `rb_*` through `run_rb`.
+- **CLI, the final:** `--final <final-registered row>`, with no `--controller`, `--split` or `--out` (refused,
+  naming the flag).
+  - **Refuses, in this order**, before any env is built, any weather is read or any file is written: (1) any
+    `final-result` in the ledger (the seal is spent); (2) a row that isn't a `final-registered` row, or isn't the
+    newest one (names the newer); (3) `manifest.fingerprints()` unequal to the row's (names the keys); (4) a
+    non-empty `FINAL_RESULTS`; (5) for any run in `ledger.final_arms(row)`: a run dir without `manifest.json`,
+    `ckpt_<c>.zip`, `vecnorm_<c>.pkl` or `selected.json`, or a `selected.json` whose `checkpoint` isn't `<c>`
+    (names the run's row id, arm, seed and dir); (6) a dirty tree (`manifest.code_stamp(smoke=False)` raises).
+  - **Scores**, for each TEST split in `ledger.TEST_SPLITS` order and each scenario in split order, 60-day seasons:
+    each learning arm (by name), its runs by ascending seed, with `run_policy(run_dir, c, s, 60, allow_test=True)`;
+    then each of the row's `baselines` in its order, as the scoring CLI scores it, with `allow_test=True`.
+  - **Writes `FINAL_RESULTS/<row>/` once** (`mkdir(exist_ok=False)`, each file opened exclusively): `stamp.json`
+    (the code stamp) before the first season; `seasons.parquet`, one row per split × scenario × arm × run, identity
+    columns `arm, run, seed, checkpoint` (null for a baseline), `split, location, growth_year, start_day,
+    season_length`, then the result keys; last `per_split.json`, `{"per_split": ...}` in the ledger's `final-result`
+    shape with sorted keys, indent 2 and no NaN. Per split and arm, `stats.iqm_ci` (defaults: 2,000 reps, seed 0) on
+    the runs × scenarios array (a baseline is one run) gives `iqm, ci_low, ci_high` on `FINAL_PRIMARY` and `guards`
+    on each of `FINAL_GUARDS`; `invalid_episodes` counts seasons with `valid == False`; `prob_improvement` is
+    `stats.prob_improvement(arm, rb_tuned)` on the primary, null for `rb_tuned`; `scored` is `final_arms`' (`{}` for
+    a baseline).
+  - **Prints** one line per split × arm (primary and each guard as `iqm [lo, hi]`, `P(improvement)`, `n_runs`,
+    `invalid_episodes`, and `n<5: no claim` for a learning arm under 5 runs), then last
+    `next: python -m greenleaf_control.ledger final-result --final-registered <row> --numbers <per_split.json>`.
+  - **Writes no ledger row.** Every `allow_test=True` in evaluate is inside `_final`, this path.
+- **Names:** `FINAL_RESULTS` (`control/results/final/`), `FINAL_PRIMARY = "profit_eur_m2"`, `FINAL_GUARDS =
+  ("viol_hours_co2", "viol_hours_temp", "viol_hours_rh", "paper_return", "yield_kg_m2", "solver_failures")`, each a
+  `ledger.RESULT_KEYS` entry.
 - **Per-step frame** (`record_steps`): `t, co2, temp, rh, u_*` (6), `u_rb_*` (residual only), `profit`, `cost_*`.
   - `t` is 0..T-1; co2 [ppm], temp [°C] and rh [%] from the state after the step; `u_*` (the applied absolute
     controls) and `u_rb_*` in upstream order: boil, co2, thscr, vent, lamp, blscr; `profit` and `cost_*` are the

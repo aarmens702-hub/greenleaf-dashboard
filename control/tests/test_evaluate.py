@@ -50,7 +50,7 @@ from gl_gym.environments.utils import co2dens2ppm, vaporPres2rh
 from stable_baselines3 import PPO
 from stable_baselines3.common.vec_env import DummyVecEnv, VecEnvWrapper, VecMonitor, VecNormalize
 
-from greenleaf_control import envs, metrics, rule_based, scenarios, train
+from greenleaf_control import envs, ledger, metrics, rule_based, scenarios, train
 
 # greenleaf_control.evaluate is imported inside each test body, so while it is missing each test
 # FAILS rather than ERRORs at collection.
@@ -544,24 +544,30 @@ def test_cli_refuses_a_test_split_without_final(split, tmp_path, monkeypatch, ca
     assert list(tmp_path.iterdir()) == []
 
 
-@pytest.mark.parametrize("split", ["paper", "amsterdam_2012"])
+@pytest.mark.parametrize(
+    "missing",
+    [("--controller",), ("--split",), ("--out",), ("--controller", "--split", "--out")],
+    ids=["controller", "split", "out", "all-three"],
+)
 @pytest.mark.usefixtures("no_2012_reads")
-def test_cli_refuses_final_as_f1s_not_implemented(split, tmp_path, monkeypatch, capsys):
-    """Any --final is refused: the final evaluation is F1's (Stage 3), not implemented here. On a
-    non-test split and on a test split alike, with a well-formed final-registered row id, it is
-    refused naming F1 and "not implemented", before any env, weather read or file."""
+def test_cli_without_final_still_requires_controller_split_and_out(
+    missing, tmp_path, monkeypatch, capsys
+):
+    """Issue #43: --controller, --split and --out stop being argparse-required (--final takes none
+    of them), but without --final main still requires all three, with argparse's message: exit 2,
+    stderr's last line ending "error: the following arguments are required: <the missing flags,
+    comma-joined in that order>", before any env or file. A guard: it passes before the change."""
     import greenleaf_control.evaluate as evaluate
 
+    given = {"--controller": "rb_default", "--split": "paper", "--out": str(tmp_path / "x.parquet")}
+    argv = [word for flag, value in given.items() if flag not in missing for word in (flag, value)]
     _no_env_built(monkeypatch, evaluate)
-    argv = _argv(
-        "rb_default", split, tmp_path / "x.parquet", "--final", "final-registered-deadbeef"
-    )
 
-    with pytest.raises((SystemExit, NotImplementedError)) as excinfo:
+    with pytest.raises(SystemExit) as excinfo:
         evaluate.main(argv)
-    text = _refusal(excinfo, capsys)
-    assert "F1" in text, text
-    assert "not implemented" in text.lower(), text
+    assert excinfo.value.code == 2
+    last = capsys.readouterr().err.strip().splitlines()[-1]
+    assert last.endswith(f"error: the following arguments are required: {', '.join(missing)}")
     assert list(tmp_path.iterdir()) == []
 
 
@@ -729,8 +735,9 @@ def test_build_vec_env_builds_the_residual_arm_at_the_recorded_scale(scale, expe
 
 # --- allow_test, the final's only door to the 2012 weather (issue #41) --------------------------
 
-# The modules that must never pass allow_test=True; only F1a-3's evaluate --final will.
-NO_ALLOW_TEST = ("train", "selection", "tune_rb", "run_grid", "export_replay", "media", "evaluate")
+# The modules that must never pass allow_test=True. evaluate passes it inside its --final path
+# only (issue #43); test_final.py checks every one lies inside evaluate._final.
+NO_ALLOW_TEST = ("train", "selection", "tune_rb", "run_grid", "export_replay", "media")
 ALLOW_TEST_TRUE = re.compile(r"allow_test\s*=\s*True")
 
 
@@ -834,10 +841,10 @@ def test_build_vec_env_with_allow_test_is_the_default_stack_on_a_synthetic_test_
 
 
 def test_no_module_but_the_final_passes_allow_test_true():
-    """Issue #41: the sources of train, selection, tune_rb, run_grid, export_replay, media and
-    evaluate contain no match for allow_test\\s*=\\s*True, so no caller of the pass-through opens
-    TEST weather until F1a-3's evaluate --final. A guard: it passes before the change too.
-    Non-vacuous: the regex does match a spaced allow_test = True."""
+    """Issue #41: the sources of train, selection, tune_rb, run_grid, export_replay and media
+    contain no match for allow_test\\s*=\\s*True, so no caller of the pass-through but evaluate's
+    --final path (issue #43; test_final.py holds evaluate's to _final) opens TEST weather. A guard:
+    it passes before the change too. Non-vacuous: the regex does match a spaced allow_test = True."""
     assert ALLOW_TEST_TRUE.search("make_raw_env(allow_test = True)")
     package = Path(envs.__file__).parent
     found = {
@@ -850,9 +857,9 @@ def test_no_module_but_the_final_passes_allow_test_true():
 def test_signatures_match_the_contract_and_no_test_wrote_the_real_ledger_or_runs():
     """run_rb(params, scenario, season_length=60, record_steps=False, *, allow_test=False),
     run_policy(run_dir, checkpoint, scenario, season_length=60, record_steps=False,
-    return_trace=False, *, allow_test=False) and main(argv=None). return_trace (#24) and
-    allow_test (#41) are backward-compatible extensions: off by default, so every earlier call is
-    unchanged.
+    return_trace=False, *, allow_test=False) and main(argv=None, *, ledger_path=ledger.LEDGER).
+    return_trace (#24), allow_test (#41) and ledger_path (#43, the ledger --final reads) are
+    backward-compatible extensions: defaulted, so every earlier call is unchanged.
 
     This test runs last in the module and checks the real ledger's size and mtime, and the
     listing of control/runs/, are as they were when the module was collected.
@@ -877,7 +884,9 @@ def test_signatures_match_the_contract_and_no_test_wrote_the_real_ledger_or_runs
         assert params["allow_test"].default is False
     assert policy["return_trace"].default is False
     main = inspect.signature(evaluate.main).parameters
-    assert list(main) == ["argv"]
+    assert list(main) == ["argv", "ledger_path"]
     assert main["argv"].default is None
+    assert main["ledger_path"].kind is inspect.Parameter.KEYWORD_ONLY
+    assert main["ledger_path"].default == ledger.LEDGER
     assert _stat(REAL_LEDGER) == REAL_LEDGER_BEFORE
     assert _listing(REAL_RUNS) == REAL_RUNS_BEFORE
