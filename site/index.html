@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>GreenLeaf: a simulated tomato season</title>
-  <meta name="description" content="A grower's tuned rules run a simulated tomato greenhouse for one validation season, alone and with an AI co-pilot on top. A GreenLight-Gym simulator replay, not real-world results and not the final result.">
+  <meta name="description" content="Two controllers run the same simulated tomato greenhouse side by side: a grower's tuned rules, the rules with an AI co-pilot on top, and others. A GreenLight-Gym simulator replay, not real-world results.">
   <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Geist+Mono:wght@400;500&family=Schibsted+Grotesk:wght@500;700&family=Source+Serif+4:opsz,wght@8..60,400;8..60,600&display=swap">
   <link rel="stylesheet" href="style.css">
 </head>
@@ -13,8 +13,8 @@
     <div class="ticks" aria-hidden="true"><i></i><i></i><i></i><i></i><i></i></div>
     <header>
       <h1>GreenLeaf: a simulated tomato season</h1>
-      <p class="label">Validation-season replay, not the final result. The co-pilot's checkpoint was chosen on these same seasons.</p>
-      <p class="lede">The grower's tuned rules run the same simulated greenhouse twice, for <span data-fill="days"></span> days of <span data-fill="place"></span> weather: once on their own, and once with the AI co-pilot on top, a reinforcement-learning policy that nudges the rules' equipment settings every 15 minutes. Press play.</p>
+      <p id="label" class="label"></p>
+      <p class="lede">Two controllers run the same simulated greenhouse side by side, for <span data-fill="days"></span> days of <span data-fill="place"></span> weather. By default the grower's tuned rules are on the left, and on the right the same rules with the AI co-pilot on top, a reinforcement-learning policy that nudges the rules' equipment settings every 15 minutes. Pick a city, a start day and any two controllers, then press play.</p>
     </header>
     <div class="layout">
       <nav class="side" aria-label="Sections">
@@ -27,8 +27,13 @@
           <span class="num">01</span>
           <div>
             <h2 id="replay-title">One season, hour by hour</h2>
+            <section class="controls picks" aria-label="Season and controllers">
+              <label class="pick">City <select id="city"></select></label>
+              <label class="pick">Start day <select id="season"></select></label>
+              <label class="pick">Left <select id="left"></select></label>
+              <label class="pick">Right <select id="right"></select></label>
+            </section>
             <section class="controls" aria-label="Replay controls">
-              <label class="pick">Season <select id="season"></select></label>
               <button id="play" type="button" disabled>Play</button>
               <label class="pick">Speed
                 <select id="speed">
@@ -50,6 +55,10 @@
             </p>
             <p id="status" class="status" role="status">Loading the season...</p>
             <div id="panels" class="panels"></div>
+            <div id="diff" class="diff" hidden>
+              <h3>What the right side changed</h3>
+              <p class="legend">Right minus left, hour by hour, for each control, each strip scaled to its own largest difference (by its name): ink above the line where the right ran it higher, grey below where lower; at the end, the mean so far. All in percentage points.</p>
+            </div>
           </div>
         </section>
         <section id="scoreboard" class="sec" aria-labelledby="score-title">
@@ -65,6 +74,7 @@
           <div>
             <h2 id="source-title">Source</h2>
             <p>Simulated with GreenLight-Gym on <span data-fill="place"></span> weather; not real-world results. Tuned rules: experiment E1, ledger row <code>result-525a6e90</code>.</p>
+            <p data-fill="final"></p>
             <p data-fill="run"></p>
             <p><a href="https://github.com/aarmens702-hub/greenleaf-dashboard">Source on GitHub</a></p>
           </div>

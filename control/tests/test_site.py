@@ -1,8 +1,9 @@
-"""Tests for the demo site (issue #28, D3a; #52, D3b-2a; #49, D3b-2b): site/, a static page that
-replays one simulated 60-day VALIDATION season, the grower's tuned rules (rb_tuned, E1, adopted) on
+"""Tests for the demo site (issue #28, D3a; #52, D3b-2a; #49, D3b-2b; #59, S2): site/, a static
+page that replays one simulated 60-day season, the grower's tuned rules (rb_tuned, E1, adopted) on
 the left against the same rules with the AI co-pilot on top on the right (residual_w05_seed100:
-E6's arm residual_w05, seed 100, at its selected checkpoint), from JSON written by
-greenleaf_control.export_replay.
+E6's arm residual_w05, seed 100, at its selected checkpoint) by default, from JSON written by
+greenleaf_control.export_replay. Since #59 the page picks the season and both sides from
+site_build's data/index.json (see the last convention).
 
 The conventions pinned here.
 - The page is site/index.html, site/style.css and site/app.js at the repo root, plain files with no
@@ -15,8 +16,9 @@ The conventions pinned here.
   {"meta", "hourly", "totals"} for a 60-day season: 60 days x 24 h = 1,440 points in each of the
   14 hourly series.
 - Every file says what it is: meta.split is "validation" and meta.note is export_replay's "a
-  simulator replay of a validation season, not the final result" (D3b-1). index.html's static text
-  says it too: "validation" and "not the final result".
+  simulator replay of a validation season, not the final result" (D3b-1). Until #59, index.html's
+  static text said it too: "validation" and "not the final result" (#59 moves the label to
+  results.json's note; see the last convention).
 - Sizes are decimal: 250 KB is 250,000 bytes, 1 MB is 1,000,000 bytes.
 - The rules' numbers are E1's: each rb_tuned file's totals equal, to 1e-9, its season's row of
   control/results/validation/rb_tuned_validation.parquet (E1's result-525a6e90, recorded with the
@@ -33,6 +35,23 @@ The conventions pinned here.
 - Issue #52 (D3b-2a, the Instrument restyle): one Google Fonts stylesheet becomes the page's only
   remote load (Aarmen's design comment on #49), and index.html and app.js carry the Instrument
   layout's hooks (nav.side, numbered section.sec blocks, drawGrid).
+- Issue #59 (S2, the comparison view; Aarmen, 2026-11-02: "yes build it and use github pages"):
+  the page plays any season site_build's data/index.json lists (the three 2012 test cities and
+  Amsterdam 2010 validation) with any two of its controllers side by side, and shows what the
+  right side changed. That changes some of #28's and #49's pinned requirements. These are
+  requirement changes Aarmen asked for, not loosened checks:
+  - index.html no longer says "not the final result" or "validation-season" (true of validation
+    views only); app.js fills the label from results.json's note, and index.html's static text
+    still says "simulated";
+  - #49's `const SIDES` (rb_tuned, residual_w05_seed100) gives way to `const DEFAULTS` (left
+    rb_tuned, right residual_w05: index.json's controller ids, not file prefixes);
+  - the "Co-pilot minus rules" column becomes "Right − left", true of any pair;
+  - a failed load clears the difference block (ui.diff) too.
+  New: app.js reads data/index.json and data/results.json at relative URLs; index.html has the
+  city, start-day (id season, kept), left and right selects and the "What the right side changed"
+  block (id diff); and the final-result row id is read from index.json's final_result, never
+  typed. site/data/ still holds exactly the six validation files: site_build adds the 2012 replays
+  in its output dir, never in site/.
 
 Every check reads files inside its test body, so while site/ is missing each test FAILS on an
 assertion rather than ERRORs. Nothing here builds an env, reads weather or trains.
@@ -47,7 +66,7 @@ from urllib.parse import parse_qs, urlsplit
 import pandas as pd
 import pytest
 
-from greenleaf_control import ledger, scenarios
+from greenleaf_control import ledger, scenarios, site_build
 
 ROOT = Path(__file__).resolve().parents[2]
 SITE = ROOT / "site"
@@ -71,6 +90,12 @@ TOLERANCE = 1e-9
 PAGE_FILES = ("index.html", "style.css", "app.js")
 FONTS_CSS2 = "https://fonts.googleapis.com/css2?"  # Google Fonts' css2 API (#52)
 FONT_FAMILIES = ("Geist Mono", "Schibsted Grotesk", "Source Serif 4")  # decoded family= names
+DEFAULTS = {"left": "rb_tuned", "right": "residual_w05"}  # index.json controller ids (#59)
+SELECT_IDS = {"city", "season", "left", "right"}  # city, start day, left, right (#59)
+DIFF_TITLE = "what the right side changed"  # the difference block's heading (#59), lowercased
+FINAL_RESULT_ID = re.compile(r"final-result-[0-9a-f]{8}")  # a ledger final-result row id
+# "Right − left": U+2212, its JS or HTML escape, a hyphen or "minus", on lowercased text (#59).
+RIGHT_MINUS_LEFT = re.compile(r"right\s*(?:−|\\u2212|&minus;|-|minus)\s*left")
 HOURLY_KEYS = [
     "t_hour",
     "co2",
@@ -222,6 +247,19 @@ class _Text(HTMLParser):
     def handle_data(self, data):
         if self._in_body and not self._skipping:
             self.text += data
+
+
+class _Ids(HTMLParser):
+    """index.html's elements that carry an id: (tag, id) for each, in page order."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.ids: list[tuple[str, str]] = []
+
+    def handle_starttag(self, tag, attrs):
+        found = dict(attrs).get("id")
+        if found is not None:
+            self.ids.append((tag, found.strip()))
 
 
 def _close(text: str, start: int) -> int:
@@ -461,21 +499,67 @@ def test_site_index_has_the_instrument_layout_hooks():
     assert gutter == [f"{i:02d}" for i in range(1, n + 1)], f"the gutter numbers are {gutter}"
 
 
-def test_site_index_static_text_says_validation_not_the_final_result():
-    """Done when (#49 step 3, the label): index.html's static text, the character data inside
-    <body> outside <script>, <style> and <template>, whitespace collapsed, any case, contains
-    "validation" and "not the final result", so the label is there before app.js runs. Attribute
-    text (the meta description, an aria-label) doesn't count. That it is visible without scrolling
-    at 1280 px and 390 px is checked in Chrome (the issue's QA item). #28's page says neither."""
+def test_site_index_header_is_true_of_test_and_validation_views_and_says_simulated():
+    """Done when (#59 step 5; a requirement change from #49 step 3, Aarmen 2026-11-02, not a
+    loosened check): the header is true of a 2012 test view and a validation view alike, so
+    site/index.html, all of it (the meta description and other attributes included), whitespace
+    collapsed, any case, no longer contains "not the final result" or "validation-season": a 2012
+    test view is the final result. app.js fills the label from results.json's note instead. And
+    index.html's static text, the character data inside <body> outside <script>, <style> and
+    <template>, still contains "simulated", so every view says it before app.js runs (AGENTS.md).
+    That the label switches with the city is checked in Chrome (the issue's QA item). #49's page
+    says "Validation-season replay, not the final result"."""
     index = SITE / "index.html"
     assert index.is_file(), f"{index} is missing"
+    html = index.read_text(encoding="utf-8")
     page = _Text()
+    page.feed(html)
+    page.close()
+
+    whole = " ".join(html.split()).lower()
+    stale = [p for p in ("not the final result", "validation-season") if p in whole]
+    assert not stale, f"site/index.html still says {stale}, untrue of a 2012 test view"
+    text = " ".join(page.text.split()).lower()
+    assert "simulated" in text, "index.html's static text doesn't say simulated"
+
+
+def test_site_index_has_city_start_day_left_and_right_selects():
+    """Done when (#59 step 1): site/index.html, parsed with html.parser, has a <select> with each
+    of the ids city (Amsterdam, London, Abbotsford 2012 and Amsterdam 2010 validation), season (the
+    start day: #49's id, kept, since id="day" is the scrub's output), left and right (the two
+    controllers). Other selects (speed) are free. Their options come from index.json, filled by
+    app.js, and the defaults, the hash and the same-controller rule are checked in Chrome (the
+    issue's QA item). #49's page has the season and speed selects only."""
+    index = SITE / "index.html"
+    assert index.is_file(), f"{index} is missing"
+    page = _Ids()
     page.feed(index.read_text(encoding="utf-8"))
     page.close()
 
+    selects = {found for tag, found in page.ids if tag == "select"}
+    missing = sorted(SELECT_IDS - selects)
+    assert not missing, f"index.html has no <select> with the id(s) {missing}; its: {selects}"
+
+
+def test_site_index_has_the_what_the_right_side_changed_block():
+    """Done when (#59 step 3): site/index.html has an element with id="diff", where app.js draws
+    the six controls' right-minus-left strips, and its static text (as above, whitespace
+    collapsed, any case) contains the block's heading, "What the right side changed". The strips,
+    their legend and their end values (one hour checked by hand against the two replay files) are
+    checked in Chrome (the issue's QA item). #49's page has neither."""
+    index = SITE / "index.html"
+    assert index.is_file(), f"{index} is missing"
+    html = index.read_text(encoding="utf-8")
+    ids = _Ids()
+    ids.feed(html)
+    ids.close()
+    page = _Text()
+    page.feed(html)
+    page.close()
+
+    assert "diff" in {found for _, found in ids.ids}, 'index.html has no element with id="diff"'
     text = " ".join(page.text.split()).lower()
-    missing = [p for p in ("validation", "not the final result") if p not in text]
-    assert not missing, f"index.html's static text lacks {missing}"
+    assert DIFF_TITLE in text, f'index.html\'s static text lacks "{DIFF_TITLE}"'
 
 
 def test_site_app_js_defines_draw_grid():
@@ -489,53 +573,86 @@ def test_site_app_js_defines_draw_grid():
     assert defined, "site/app.js defines no drawGrid function"
 
 
-def test_site_app_js_sides_are_the_tuned_rules_then_the_copilot():
-    """Done when (#49 step 2): app.js's `const SIDES = [[controller, title], ...];` names exactly
-    rb_tuned, then residual_w05_seed100: the rules on the left, the co-pilot on the right, and
-    rb_default gone. A text check of the controller, the first string of each pair; the titles are
-    read in the browser. #28's SIDES is rb_default, rb_tuned."""
+def test_site_app_js_defaults_are_the_tuned_rules_left_and_the_copilot_right():
+    """Done when (#59 step 1; a requirement change from #49 step 2, Aarmen 2026-11-02, not a
+    loosened check): app.js's `const DEFAULTS = {...}` sets left "rb_tuned" and right
+    "residual_w05" (keys bare or quoted, any quote; other keys free): the tuned rules on the left
+    and the co-pilot, fixed penalty, on the right, named by index.json's controller ids, not by
+    file prefix (residual_w05_seed100 is the validation files' prefix, read from index.json).
+    Non-vacuous: both are ids site_build writes, and validation, which offers only its two,
+    offers both, so the default pair plays in every city. The default city and start day are
+    index.json's first, read, not typed; that and the hash fallback are checked in Chrome (the
+    issue's QA item). #49's app.js has `const SIDES` and no DEFAULTS."""
+    ids = set(DEFAULTS.values())
+    assert ids <= set(site_build.VALIDATION) <= set(site_build.CONTROLLERS)
     app = SITE / "app.js"
     assert app.is_file(), f"{app} is missing"
-    sides = re.search(r"\bconst\s+SIDES\s*=\s*\[(.*?)\];", app.read_text(encoding="utf-8"), re.S)
-    assert sides, "site/app.js defines no `const SIDES = [...];`"
+    js = app.read_text(encoding="utf-8")
+    found = re.search(r"\bconst\s+DEFAULTS\s*=\s*(?:Object\.freeze\(\s*)?\{(.*?)\}", js, re.S)
+    assert found, "site/app.js defines no `const DEFAULTS = {...}`"
 
-    names = re.findall(r"\[\s*[\"'`]([\w-]+)[\"'`]\s*,", sides.group(1))
-    assert names == list(CONTROLLERS), f"SIDES names {names}"
+    pairs = dict(re.findall(r"[\"'`]?(\w+)[\"'`]?\s*:\s*[\"'`]([\w-]+)[\"'`]", found.group(1)))
+    got = {k: pairs.get(k) for k in DEFAULTS}
+    assert got == DEFAULTS, f"DEFAULTS sets {got}"
 
 
-def test_site_app_js_failed_load_clears_the_panels_and_scoreboard():
-    """Done when (#49 step 6, #28's reviewer carry): a failed season load doesn't leave the old
-    season's panels and scoreboard under the new season's name. A light text check: app.js's catch
-    handlers (a promise's .catch(...) argument or a try's catch block, where a failed fetch in load
-    or start lands), taken together, reference both ui.panels and ui.score themselves, not only
-    through a helper they call. How they clear or hide them is free; that no stale panel shows is
-    checked in Chrome with a data file removed (the issue's QA item). #28's only handler, start's
-    .catch, touches ui.status alone."""
+def test_site_app_js_reads_index_and_results_json_at_relative_urls():
+    """Done when (#59 steps 1 and 5): app.js loads site_build's data/index.json (the splits, their
+    start days, controllers and file prefixes, and the final-result row) and data/results.json
+    (each split's note, and n_runs for "the lowest of its k"), so it names both paths; and no
+    string in app.js starts "/data/": GitHub Pages serves the site under /greenleaf-dashboard/,
+    where a root-relative URL misses (S4). That both load and every city plays is checked in
+    Chrome on site_build's output (the issue's QA item). #49's app.js types its file names and
+    reads neither."""
+    app = SITE / "app.js"
+    assert app.is_file(), f"{app} is missing"
+    js = app.read_text(encoding="utf-8")
+
+    missing = [p for p in ("data/index.json", "data/results.json") if p not in js]
+    assert not missing, f"site/app.js never names {missing}"
+    rooted = re.findall(r"[\"'`]/data/[^\"'`]*", js)
+    assert not rooted, f"site/app.js has root-relative data URLs {rooted}"
+
+
+def test_site_app_js_failed_load_clears_the_panels_scoreboard_and_diff():
+    """Done when (#49 step 6, #28's reviewer carry; extended by #59 step 3): a failed season load
+    doesn't leave the old season's panels, scoreboard or (#59) right-minus-left strips under the
+    new season's name. A light text check: app.js's catch handlers (a promise's .catch(...)
+    argument or a try's catch block, where a failed fetch in load or start lands), taken together,
+    reference ui.panels, ui.score and ui.diff themselves, not only through a helper they call. How
+    they clear or hide them is free; that nothing stale shows is checked in Chrome with a data
+    file removed (the issue's QA item). #28's only handler, start's .catch, touches ui.status
+    alone; #49's touches ui.panels and ui.score but there is no ui.diff yet."""
     app = SITE / "app.js"
     assert app.is_file(), f"{app} is missing"
     handlers = _catch_handlers(app.read_text(encoding="utf-8"))
     assert handlers, "site/app.js has no catch handler"
 
     failure = "\n".join(handlers)
-    missing = [el for el in ("ui.panels", "ui.score") if el not in failure]
+    missing = [el for el in ("ui.panels", "ui.score", "ui.diff") if el not in failure]
     assert not missing, (
         f"no catch handler in site/app.js touches {missing}: a failed load leaves the old season"
     )
 
 
-def test_site_scoreboard_has_a_co_pilot_minus_rules_column():
-    """Done when (#49 step 5): the scoreboard gets a third column headed "Co-pilot minus rules"
-    (any case, whitespace collapsed), in app.js, which builds the table, or in index.html. A text
-    check: its signed values, computed in JS from the two files' totals, are checked against the
-    issue's table in Chrome (day 45: profit -5.03 vs -4.44, +0.59)."""
+def test_site_scoreboard_has_a_right_minus_left_column():
+    """Done when (#59 step 4; a requirement change from #49 step 5, Aarmen 2026-11-02, not a
+    loosened check): the scoreboard's third column is #49's generalised to any pair, headed
+    "Right − left" (U+2212, its JS or HTML escape, a hyphen or "minus"; any case, whitespace
+    collapsed), in app.js, which builds the table, or in index.html; and neither says "Co-pilot
+    minus rules" any more, untrue of most pairs. A text check: its signed values, computed in JS
+    from the two files' totals, are checked in Chrome (the issue's QA item; #49's day 45: profit
+    -5.03 vs -4.44, +0.59). #49's column is "Co-pilot minus rules"."""
     sources = [SITE / "app.js", SITE / "index.html"]
     missing = [p for p in sources if not p.is_file()]
     assert not missing, f"{missing} missing"
 
     texts = [" ".join(p.read_text(encoding="utf-8").split()).lower() for p in sources]
-    assert any("co-pilot minus rules" in t for t in texts), (
-        'neither site/app.js nor site/index.html has the "Co-pilot minus rules" column'
+    assert any(RIGHT_MINUS_LEFT.search(t) for t in texts), (
+        'neither site/app.js nor site/index.html has the "Right − left" column'
     )
+    stale = [p.name for p, t in zip(sources, texts, strict=True) if "co-pilot minus rules" in t]
+    assert not stale, f'{stale} still head the column "Co-pilot minus rules"'
 
 
 def test_site_footer_provenance_is_read_from_meta_run_not_typed():
@@ -565,6 +682,32 @@ def test_site_footer_provenance_is_read_from_meta_run_not_typed():
         literals.append(f"{int(checkpoint):,}")
     typed = [v for v in literals if v in js or v in html]
     assert not typed, f"site/ types meta.run's {typed} by hand"
+
+
+def test_site_final_result_row_is_read_from_index_json_not_typed():
+    """Done when (#59 Context, the honesty text; step 6): a 2012 test view names the final-result
+    row, read from index.json, never typed:
+    - app.js names final_result as a whole word, index.json's key (however it reads it:
+      index.final_result, a destructuring, index["final_result"]);
+    - neither app.js nor index.html contains a final-result row id, "final-result-" and 8 hex
+      digits. Non-vacuous: the ledger's one final-result row (only read) has that form, so typing
+      it fails.
+    That a test view shows "2012 test weather, scored once in the final" with the row id, and a
+    validation view doesn't, is checked in Chrome (the issue's QA item). #49's app.js names
+    neither."""
+    finals = [r["row_id"] for r in ledger.rows(kind="final-result", path=ledger.LEDGER)]
+    assert len(finals) == 1 and FINAL_RESULT_ID.fullmatch(finals[0]), (
+        f"the ledger's final-result rows are {finals}"
+    )
+    app = SITE / "app.js"
+    index = SITE / "index.html"
+    assert app.is_file() and index.is_file(), f"{app} or {index} is missing"
+    js = app.read_text(encoding="utf-8")
+    html = index.read_text(encoding="utf-8")
+
+    assert re.search(r"\bfinal_result\b", js), "site/app.js never names index.json's final_result"
+    typed = sorted({m for t in (js, html) for m in FINAL_RESULT_ID.findall(t)})
+    assert not typed, f"site/ types the final-result row id(s) {typed} by hand"
 
 
 # --- site/: the whole page (Done when) ----------------------------------------------------------

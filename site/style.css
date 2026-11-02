@@ -81,10 +81,13 @@ h4 { margin: 18px 0 8px; font: 500 13px/1.3 var(--sans); color: var(--muted); }
   border-top: 1px solid var(--hair);
   border-bottom: 1px solid var(--hair);
 }
-.controls label { display: flex; align-items: center; gap: 8px; font: 500 14px/1.3 var(--sans); color: var(--muted); }
+/* The season and controller picks sit above the playback row and scroll away; playback stays. */
+.picks { position: static; margin: 0; border-bottom: 0; }
+.controls label { display: flex; align-items: center; gap: 8px; max-width: 100%; font: 500 14px/1.3 var(--sans); color: var(--muted); }
 /* Square selects everywhere (iOS Safari rounds a native one): no native look, and a chevron drawn
    with two borders on the select's label. */
 select {
+  max-width: 100%; /* a long controller name doesn't scroll a phone sideways */
   min-height: 44px;
   padding: 6px 30px 6px 8px;
   appearance: none;
@@ -160,6 +163,13 @@ canvas[data-g] { display: block; width: 100%; height: auto; aspect-ratio: 60 / 2
 .bar { height: 6px; overflow: hidden; background: var(--hair); }
 .bar i { display: block; height: 100%; background: var(--ink); }
 
+/* What the right side changed: one right-minus-left strip per control, on .act's grid. */
+.diff { margin-top: 32px; padding-top: 16px; border-top: 1px solid var(--ink); }
+.diff .legend { margin-bottom: 14px; }
+.diff .act { grid-template-columns: minmax(0, 10.5rem) 1fr 4.5rem; }
+.diff .act small { font: 11px var(--mono); color: var(--muted); white-space: nowrap; } /* the strip's scale */
+canvas[data-d] { display: block; width: 100%; height: 36px; }
+
 .hint { margin: 0; font-size: 15px; color: var(--muted); }
 table { width: 100%; max-width: 720px; border-collapse: collapse; font: 13px/1.4 var(--mono); }
 th, td { padding: 10px 12px; border-bottom: 1px solid var(--hair); text-align: right; }
@@ -167,6 +177,7 @@ thead th { font: 500 13px/1.3 var(--sans); border-bottom-color: var(--ink); }
 th[scope="row"], thead th:first-child { padding-left: 0; text-align: left; font: 14px/1.4 var(--sans); color: var(--muted); }
 
 #source p { max-width: 40rem; margin: 0 0 10px; }
+#source p:empty { display: none; } /* no final line on validation, no run line for two baselines */
 code { font: 0.85em var(--mono); white-space: nowrap; } /* a ledger id doesn't break at its hyphen */
 a { color: var(--ink); text-decoration-thickness: 1px; text-underline-offset: 3px; }
 a:hover { color: var(--muted); }
@@ -184,5 +195,6 @@ a:hover { color: var(--muted); }
   .controls { position: static; }
   .num { padding: 0 0 8px; text-align: left; }
   .act { grid-template-columns: minmax(0, 9rem) 1fr 2.6rem; }
+  .diff .act { grid-template-columns: minmax(0, 8rem) 1fr 4.5rem; }
   th, td { padding: 8px 6px; }
 }
