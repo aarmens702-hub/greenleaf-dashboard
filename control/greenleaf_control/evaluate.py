@@ -13,7 +13,9 @@ one frame row per step t = 0..T-1, read from the state after the step.
 The TEST splits are sealed (PROTOCOL §8): only --final <final-registered row> may score them, once.
 It refuses anything that could break the seal before any env is built, then scores the row's runs
 at their registered checkpoints and its baselines on the TEST splits, and writes FINAL_RESULTS/<row>/
-(stamp.json, seasons.parquet, per_split.json) for `ledger final-result` to record. make_raw_env
+(stamp.json, seasons.parquet, per_split.json) for `ledger final-result` to record, then replays/:
+export_replay's hourly JSON of every season of each arm's lowest registered seed and of every
+baseline, from the seasons it scored. make_raw_env
 refuses TEST weather too. run_rb and run_policy pass allow_test through (default False); only the
 --final path (_final) sets it.
 """
@@ -85,10 +87,13 @@ def run_rb(
     scenario: dict,
     season_length: int = 60,
     record_steps: bool = False,
+    return_trace: bool = False,
     *,
     allow_test: bool = False,
-) -> tuple[dict, pd.DataFrame | None]:
-    """The rule-based controller with params, one season on the raw env."""
+) -> tuple:
+    """The rule-based controller with params, one season on the raw env.
+
+    With return_trace, also the graded season's (states, controls, params) as a third item."""
     env = envs.SolverFailureFlag(
         envs.make_raw_env(
             scenario=scenario,
@@ -105,8 +110,12 @@ def run_rb(
         infos.append(info)
         done = terminated or truncated
     result = _grade(infos, env.unwrapped)
+    params = np.asarray(env.unwrapped.p, dtype=np.float64)
     env.close()
-    return result, _frame(infos) if record_steps else None
+    frame = _frame(infos) if record_steps else None
+    if return_trace:
+        return result, frame, (*metrics.trace_from_infos(infos), params)
+    return result, frame
 
 
 def run_policy(
@@ -148,11 +157,22 @@ def run_policy(
     return result, frame
 
 
-def _score(controller: str, scenario: dict, *, allow_test: bool = False) -> dict:
-    """One 60-day season of a BASELINES entry or a run dir's final checkpoint."""
+def _score(
+    controller: str, scenario: dict, *, return_trace: bool = False, allow_test: bool = False
+) -> dict | tuple:
+    """One 60-day season of a BASELINES entry or a run dir's final checkpoint: its result, or with
+    return_trace (result, frame, (states, controls, params)) from that same season."""
     if controller in ("rb_default", "rb_tuned"):
         params = rule_based.load_rb_params(controller.removeprefix("rb_"))
-        return run_rb(params, scenario, SEASON_LENGTH, allow_test=allow_test)[0]
+        scored = run_rb(
+            params,
+            scenario,
+            SEASON_LENGTH,
+            record_steps=return_trace,
+            return_trace=return_trace,
+            allow_test=allow_test,
+        )
+        return scored if return_trace else scored[0]
     if controller in envs.BASELINES:  # zero_controls, random
         infos = envs.run_baseline(controller, scenario, SEASON_LENGTH, allow_test=allow_test)
         env = envs.make_raw_env(
@@ -162,9 +182,21 @@ def _score(controller: str, scenario: dict, *, allow_test: bool = False) -> dict
             allow_test=allow_test,
         )
         result = _grade(infos, env.unwrapped)  # the model's params and N
+        params = np.asarray(env.unwrapped.p, dtype=np.float64)
         env.close()
+        if return_trace:
+            return result, _frame(infos), (*metrics.trace_from_infos(infos), params)
         return result
-    return run_policy(Path(controller), "final", scenario, SEASON_LENGTH, allow_test=allow_test)[0]
+    scored = run_policy(
+        Path(controller),
+        "final",
+        scenario,
+        SEASON_LENGTH,
+        record_steps=return_trace,
+        return_trace=return_trace,
+        allow_test=allow_test,
+    )
+    return scored if return_trace else scored[0]
 
 
 def _by_run(seasons: list[dict], split: str, arm: str, key: str) -> np.ndarray:
@@ -187,7 +219,9 @@ def _shown(ci: dict) -> str:
 def _final(row_id: str, ledger_path: Path, parser: argparse.ArgumentParser) -> int:
     """evaluate --final <row>: the refusals in order, before any env, weather read or write; then
     every registered run at its checkpoint and every baseline on each TEST split, written once to
-    FINAL_RESULTS/<row>/. Writes no ledger row; prints the command that records per_split.json."""
+    FINAL_RESULTS/<row>/, with replays/ of the traced seasons last. Writes no ledger row; prints the
+    command that records per_split.json, or raises with it after the replays if a traced season
+    ended early (it gets no replay)."""
     rows = ledger.rows(path=ledger_path)
     if any(r["kind"] == "final-result" for r in rows):
         parser.error(f"--final {row_id}: a final-result is in the ledger; the seal is spent")
@@ -228,26 +262,68 @@ def _final(row_id: str, ledger_path: Path, parser: argparse.ArgumentParser) -> i
                 )
     stamp = manifest.code_stamp(smoke=False)  # a dirty tree raises
 
-    out = FINAL_RESULTS / row_id
-    out.mkdir(parents=True, exist_ok=False)
-    with (out / "stamp.json").open("x") as f:
-        f.write(json.dumps(stamp, sort_keys=True, indent=2) + "\n")
     learning = [
         (arm, runs[run_id], c)
         for arm in sorted(arms)
         for run_id, c in sorted(arms[arm].items(), key=lambda item: runs[item[0]]["seed"])
     ]
-    seasons = []
+    # Each arm's lowest registered seed is traced: its seasons, and every baseline's, are replayed.
+    traced = {arm: min(arms[arm], key=lambda run_id: runs[run_id]["seed"]) for arm in arms}
+    # Imported here: export_replay imports evaluate, so a module-level import would be circular.
+    from greenleaf_control import export_replay
+
+    # The replays' stamp and each traced run's meta.run (export_replay's provenance), built before
+    # the weather opens, so after it nothing but a season can fail.
+    replay_stamp = {
+        "commit": stamp["commit"],
+        "dirty": stamp["dirty"],
+        "gl_gym": manifest._versions()["gl-gym"],
+    }
+    provenance = {}
+    for arm, run_id in traced.items():
+        c = arms[arm][run_id]
+        selected_by = next(
+            r for r in rows if r["kind"] == "result" and r["selected"].get(run_id) == c
+        )
+        trained = json.loads((Path(runs[run_id]["run_dir"]) / "manifest.json").read_text())
+        provenance[arm] = {
+            "id": run_id,
+            "registered": runs[run_id]["registered"],
+            "result": selected_by["row_id"],
+            "arm": runs[run_id]["arm"],
+            "seed": runs[run_id]["seed"],
+            "checkpoint": c,
+            "commit": trained["commit"],
+        }
+
+    out = FINAL_RESULTS / row_id
+    out.mkdir(parents=True, exist_ok=False)
+    with (out / "stamp.json").open("x") as f:
+        f.write(json.dumps(stamp, sort_keys=True, indent=2) + "\n")
+    seasons, replays = [], []
     for split in ledger.TEST_SPLITS:
         for s in scenarios.TEST[split]:
             where = {"split": split, **s, "season_length": SEASON_LENGTH}
             for arm, run, c in learning:
-                result = run_policy(Path(run["run_dir"]), c, s, SEASON_LENGTH, allow_test=True)[0]
+                trace = run["row_id"] == traced[arm]
+                scored = run_policy(
+                    Path(run["run_dir"]),
+                    c,
+                    s,
+                    SEASON_LENGTH,
+                    record_steps=trace,
+                    return_trace=trace,
+                    allow_test=True,
+                )
                 identity = {"arm": arm, "run": run["row_id"], "seed": run["seed"], "checkpoint": c}
-                seasons.append({**identity, **where, **result})
+                seasons.append({**identity, **where, **scored[0]})
+                if trace:
+                    replays.append((arm, provenance[arm], split, s, scored))
             for b in row["baselines"]:
+                scored = _score(b, s, return_trace=True, allow_test=True)
                 identity = {"arm": b, "run": None, "seed": None, "checkpoint": None}
-                seasons.append({**identity, **where, **_score(b, s, allow_test=True)})
+                seasons.append({**identity, **where, **scored[0]})
+                replays.append((b, None, split, s, scored))
     with (out / "seasons.parquet").open("xb") as f:
         pd.DataFrame(seasons).to_parquet(f)
 
@@ -283,10 +359,44 @@ def _final(row_id: str, ledger_path: Path, parser: argparse.ArgumentParser) -> i
     numbers_path = out / "per_split.json"
     with numbers_path.open("x") as f:
         f.write(text + "\n")
-    print(
-        "next: python -m greenleaf_control.ledger final-result"
+
+    record = (
+        "python -m greenleaf_control.ledger final-result"
         f" --final-registered {row_id} --numbers {numbers_path}"
     )
+
+    full, short = SEASON_LENGTH * export_replay.N_DAY, []
+    (out / "replays").mkdir()
+    for name, run, split, s, (result, frame, (states, controls, params)) in replays:
+        if len(frame) != full:  # a solver failure ended it early: no replay of a partial season
+            short.append(f"{name} {split} day {s['start_day']}: {len(frame)} of {full} steps")
+            continue
+        payload = export_replay.export(
+            frame,
+            result,
+            states,
+            controls,
+            params,
+            controller=name,
+            scenario=s,
+            stamp=replay_stamp,
+            split=split,
+            run=run,
+        )
+        named = (
+            name if run is None else f"{name} seed {run['seed']} at checkpoint {run['checkpoint']}"
+        )
+        payload["meta"]["note"] = f"registered final {row_id}: {named}"
+        path = out / "replays" / f"{name}_{s['location']}_{s['growth_year']}_{s['start_day']}.json"
+        with path.open("x", encoding="utf-8") as f:
+            f.write(json.dumps(payload, allow_nan=False, separators=(",", ":")))
+    if short:
+        raise RuntimeError(
+            f"--final {row_id}: {len(short)} traced season(s) ended early, so they have no replay:"
+            f" {'; '.join(short)}. Every other replay is written, and seasons.parquet and"
+            f" per_split.json are complete; record them with: {record}"
+        )
+    print(f"next: {record}")
     return 0
 
 

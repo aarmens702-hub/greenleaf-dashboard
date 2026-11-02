@@ -1,6 +1,10 @@
 """Tests for evaluate --final (issue #43, F1a-3): score every registered run at its registered
 checkpoint and every registered baseline once on the three test splits, after refusing anything that
-could break the seal (PROTOCOL §8).
+could break the seal (PROTOCOL §8). Issue #44 (F1a-4): the same --final writes export_replay's
+hourly JSON for every season of each learning arm's lowest registered seed and of every baseline,
+from the seasons it scores (no second season), into FINAL_RESULTS/<row>/replays/. #44's fix round:
+a replay that fails, or a traced season cut short, costs no scored file; a short season isn't
+replayed, the rest are, and one RuntimeError names it.
 
 The test rule (F1a): no test opens the real 2012 weather. One module fixture, under a single
 pytest.MonkeyPatch.context() for the whole module:
@@ -20,10 +24,12 @@ pytest.MonkeyPatch.context() for the whole module:
   days 45 and 49 per split; sets evaluate.SEASON_LENGTH to 1 day (96 steps) and
   evaluate.FINAL_RESULTS to tmp "final_out".
 
-One full --final runs once (final_run) and is shared. A test that changes the ledger, a run dir or
-FINAL_RESULTS works on its own copies (_copy_world). evaluate.main runs in-process, since
-guard_runs blocks `evaluate --final` on the command line. No fixture calls the --final, so while it
-is missing every test FAILS in its own body rather than ERRORs.
+One full --final runs once (final_run) and is shared; pass-through spies record its calls to
+evaluate.run_policy, evaluate.run_rb, envs.run_baseline and manifest.code_stamp. A test that
+changes the ledger, a run dir or FINAL_RESULTS works on its own copies (_copy_world).
+evaluate.main runs in-process, since guard_runs blocks `evaluate --final` on the command line. No
+fixture calls the --final, so while it is missing every test FAILS in its own body rather than
+ERRORs.
 """
 
 import ast
@@ -31,6 +37,7 @@ import contextlib
 import inspect
 import io
 import json
+import re
 import shutil
 from pathlib import Path
 from types import SimpleNamespace
@@ -41,7 +48,18 @@ import pytest
 import torch
 from stable_baselines3 import PPO
 
-from greenleaf_control import envs, evaluate, ledger, manifest, rule_based, scenarios, stats, train
+from greenleaf_control import (
+    envs,
+    evaluate,
+    export_replay,
+    ledger,
+    manifest,
+    metrics,
+    rule_based,
+    scenarios,
+    stats,
+    train,
+)
 
 CONTROL = Path(__file__).resolve().parents[1]
 REAL_LEDGER = CONTROL / "ledger" / "ledger.jsonl"
@@ -90,6 +108,22 @@ IDENTITY = [
 RB_DEFAULT = rule_based.load_rb_params("default")
 DIAGNOSTICS = {"min_approx_kl": 0.002, "final_entropy": -1.5, "final_explained_variance": 0.8}
 CHECKPOINTS = ("final", "1024")  # seed 0's and seed 1's registered (and selected) checkpoints
+DAYS = (45, 49)  # the start days of each test split's two scenarios (scenarios.TEST is cut to them)
+# #44: a replay's file prefix: the residual arm's lowest registered seed (seed 0), then each baseline.
+TRACED = (ARM, *BASELINES)
+REPLAY_META = {
+    "controller",
+    "scenario",
+    "split",
+    "run",
+    "commit",
+    "dirty",
+    "gl_gym",
+    "note",
+    "bounds",
+    "units",
+}
+MAX_BYTES = 250_000  # export_replay's ceiling, 250 KB, in decimal kilobytes
 
 
 @pytest.fixture(scope="module", autouse=True)
@@ -217,20 +251,49 @@ def _main(argv: list[str], ledger_path: Path) -> int:
     return evaluate.main(argv, ledger_path=ledger_path)
 
 
+def _spy(real, calls: list[dict]):
+    """real, passed through, recording each call's bound arguments (defaults applied) in calls."""
+    signature = inspect.signature(real)
+
+    def spy(*args, **kwargs):
+        bound = signature.bind(*args, **kwargs)
+        bound.apply_defaults()
+        calls.append(dict(bound.arguments))
+        return real(*args, **kwargs)
+
+    return spy
+
+
 @pytest.fixture(scope="module")
 def final_run(world):
     """A function that runs one full evaluate --final <the world's row> into world.results on its
-    first call and returns {code, stdout, dir}. A failed attempt isn't cached, so each test that
-    needs it fails in its own body."""
+    first call and returns {code, stdout, dir, calls}. calls maps run_policy, run_rb, run_baseline
+    and code_stamp to the run's calls of evaluate.run_policy, evaluate.run_rb, envs.run_baseline
+    and manifest.code_stamp, each call's bound arguments (pass-through spies: the real function
+    still plays the season). A failed attempt isn't cached, so each test that needs it fails in
+    its own body."""
     done = {}
 
     def run() -> SimpleNamespace:
         if not done:
-            out = io.StringIO()
+            out, calls = io.StringIO(), {}
             with pytest.MonkeyPatch.context() as mp, contextlib.redirect_stdout(out):
                 mp.setattr(evaluate, "FINAL_RESULTS", world.results)
+                for module, name in [
+                    (evaluate, "run_policy"),
+                    (evaluate, "run_rb"),
+                    (envs, "run_baseline"),
+                    (manifest, "code_stamp"),
+                ]:
+                    calls[name] = []
+                    mp.setattr(module, name, _spy(getattr(module, name), calls[name]))
                 code = _main(["--final", world.freg_id], world.ledger)
-            done.update(code=code, stdout=out.getvalue(), dir=world.results / world.freg_id)
+            done.update(
+                code=code,
+                stdout=out.getvalue(),
+                dir=world.results / world.freg_id,
+                calls=calls,
+            )
         return SimpleNamespace(**done)
 
     return run
@@ -504,9 +567,10 @@ def test_final_refuses_what_could_break_the_seal_before_any_env(
 # --- A full --final ----------------------------------------------------------------------------
 
 
-def test_a_full_final_writes_three_files_with_36_seasons_in_order(world, final_run):
+def test_a_full_final_writes_three_files_and_replays_with_36_seasons_in_order(world, final_run):
     """Done when: a full --final returns 0 and writes exactly FINAL_RESULTS/<row>/ holding
-    per_split.json, seasons.parquet and stamp.json (the code stamp), nothing else in FINAL_RESULTS.
+    per_split.json, replays/ (#44; its files are tested below), seasons.parquet and stamp.json (the
+    code stamp), nothing else in FINAL_RESULTS.
 
     seasons.parquet has the 9 identity columns in order (arm, run, seed, checkpoint, split,
     location, growth_year, start_day, season_length), then the result keys (RESULT_KEYS plus
@@ -520,7 +584,7 @@ def test_a_full_final_writes_three_files_with_36_seasons_in_order(world, final_r
 
     assert final.code == 0
     assert _listing(world.results) == [world.freg_id]
-    assert _listing(final.dir) == ["per_split.json", "seasons.parquet", "stamp.json"]
+    assert _listing(final.dir) == ["per_split.json", "replays", "seasons.parquet", "stamp.json"]
     assert json.loads((final.dir / "stamp.json").read_text()) == world.stamp
     df = pd.read_parquet(final.dir / "seasons.parquet")
     assert list(df.columns[: len(IDENTITY)]) == IDENTITY
@@ -658,6 +722,381 @@ def test_each_run_is_scored_at_its_registered_checkpoint(world, final_run):
 
     assert {k: row[k] for k in at_1024} == at_1024
     assert at_1024 != at_final, "seed 1's 1024 and final play one season, so this proves nothing"
+
+
+# --- #44: the replays of the traced seasons ----------------------------------------------------
+
+
+def _reject_constant(name: str):
+    raise AssertionError(f"{name} in a replay: json.dumps(allow_nan=False) can't have written it")
+
+
+def _replay_names() -> dict[str, tuple[str, str, str, int]]:
+    """Every replay a full --final writes, by file name: (prefix, split, location, start_day)."""
+    return {
+        f"{prefix}_{site}_2012_{day}.json": (prefix, split, site, day)
+        for prefix in TRACED
+        for split, site in SITES.items()
+        for day in DAYS
+    }
+
+
+def test_a_full_final_writes_one_replay_per_traced_season(world, final_run):
+    """Done when (which replays, #44): FINAL_RESULTS/<row>/replays/ holds exactly the 30 files
+    <prefix>_<location>_2012_<start_day>.json, prefix residual or a baseline, on the 3 test sites x
+    days 45 and 49: (1 traced run + 4 baselines) x 3 splits x 2 scenarios. The residual arm's
+    traced run is its lowest registered seed, seed 0 (at "final"), not seed 1 (the next test tells
+    their seasons apart by totals). Each file:
+    - is under 250,000 bytes, and is json.dumps(payload, allow_nan=False, separators=(",", ":"))
+      byte for byte, as export_replay writes it: compact, no NaN or infinity, no trailing newline;
+    - is export's {meta, hourly, totals}, with 24 hourly points (a 1-day season);
+    - has export's 10 meta keys: controller is the file's prefix; scenario the season's, with
+      season_length 1; split its test split; run, for the residual arm, export's provenance of
+      seed 0's run (its run row id, registration, result row, arm, seed 0, checkpoint "final" and
+      its manifest's commit) and None for a baseline; commit and dirty the --final's code stamp
+      and gl_gym manifest's gl-gym commit; note "registered final <row>: residual seed 0 at
+      checkpoint final" or "registered final <row>: <baseline>", naming the row; bounds and units
+      export's.
+    """
+    final = final_run()
+    replays = final.dir / "replays"
+    want = _replay_names()
+    assert len(want) == 30  # (1 traced run + 4 baselines) x 3 splits x 2 scenarios
+
+    assert _listing(replays) == sorted(want)
+    [result_row] = ledger.rows(kind="result", path=world.ledger)
+    seed0 = {
+        "id": world.run_ids[0],
+        "registered": world.reg_id,
+        "result": result_row["row_id"],
+        "arm": ARM,
+        "seed": 0,
+        "checkpoint": "final",
+        "commit": json.loads((world.run_dirs[0] / "manifest.json").read_text())["commit"],
+    }
+    gl_gym = manifest._versions()["gl-gym"]
+    for name, (prefix, split, site, day) in want.items():
+        path = replays / name
+        size = path.stat().st_size
+        assert size < MAX_BYTES, f"{name}: {size:,} bytes"
+        text = path.read_text(encoding="utf-8")
+        payload = json.loads(text, parse_constant=_reject_constant)
+        assert text == json.dumps(payload, allow_nan=False, separators=(",", ":")), name
+        assert set(payload) == {"meta", "hourly", "totals"}, name
+        assert payload["hourly"]["t_hour"] == list(range(24)), name
+        meta = payload["meta"]
+        assert set(meta) == REPLAY_META, name
+        named = "residual seed 0 at checkpoint final" if prefix == ARM else prefix
+        assert meta == {
+            "controller": prefix,
+            "scenario": {
+                "location": site,
+                "growth_year": 2012,
+                "start_day": day,
+                "season_length": 1,
+            },
+            "split": split,
+            "run": seed0 if prefix == ARM else None,
+            "commit": world.stamp["commit"],
+            "dirty": world.stamp["dirty"],
+            "gl_gym": gl_gym,
+            "note": f"registered final {world.freg_id}: {named}",
+            "bounds": {c: list(bounds) for c, bounds in metrics.BOUNDS.items()},
+            "units": export_replay.UNITS,
+        }, name
+
+
+def test_each_replays_totals_are_its_seasons_row_in_seasons_parquet(world, final_run):
+    """Done when (same season, #44): each replay's totals is its season's seasons.parquet row, key
+    for key and exactly: the parquet's result columns (RESULT_KEYS plus valid), no more and no
+    fewer; the residual replay's row is seed 0's on its split and day, a baseline's its own.
+    Non-vacuous: on every scenario the residual replay's totals differ from seed 1's row (seed 1
+    plays its "1024", which is the RB exactly), so a replay of seed 1 fails here, and so does one of
+    the other day's season (days 45 and 49 differ). The three sites' 2012.csv are one copy, so their
+    seasons are equal: the first replay test ties each file to its site through meta.scenario."""
+    final = final_run()
+    df = pd.read_parquet(final.dir / "seasons.parquet")
+    keys = set(df.columns[len(IDENTITY) :])
+    assert keys == {*ledger.RESULT_KEYS, "valid"}
+
+    for name, (prefix, split, _, day) in _replay_names().items():
+        path = final.dir / "replays" / name
+        assert path.is_file(), f"no replay {name}"
+        totals = json.loads(path.read_text(encoding="utf-8"))["totals"]
+        rows = df[(df["split"] == split) & (df["start_day"] == day) & (df["arm"] == prefix)]
+        if prefix == ARM:
+            [seed1] = rows[rows["run"] == world.run_ids[1]].to_dict("records")
+            rows = rows[rows["run"] == world.run_ids[0]]
+        [row] = rows.to_dict("records")
+        assert set(totals) == keys, name
+        assert {k: row[k] for k in keys} == totals, name
+        if prefix == ARM:
+            assert {k: seed1[k] for k in keys} != totals, f"{name}: seed 1's season is seed 0's"
+
+
+def test_each_traced_season_is_its_scored_season_played_once(world, final_run):
+    """Done when (no second season, #44): the replays come from the seasons --final scores, so the
+    full --final plays each scored season once (final_run's pass-through spies):
+    - seasons.parquet still has 36 rows;
+    - evaluate.run_policy is called 12 times, once per run x scenario (seed 0's run dir at
+      "final", seed 1's at "1024"); evaluate.run_rb 12 times (rb_default's and rb_tuned's params,
+      from load_rb_params, once per scenario); envs.run_baseline 12 times (zero_controls and random
+      once per scenario); every call a 1-day season with allow_test=True;
+    - the traced calls ask for the trace: seed 0's 6 run_policy calls (its lowest seed) and all 12
+      run_rb calls (rb_default and rb_tuned are baselines, all traced) have record_steps=True and
+      return_trace=True;
+    - manifest.code_stamp is called exactly once, with smoke=False: the replays reuse the stamp
+      taken at refusal 6.
+    """
+    final = final_run()
+    df = pd.read_parquet(final.dir / "seasons.parquet")
+    calls = final.calls
+    scored = [(site, day) for site in SITES.values() for day in DAYS]
+
+    assert len(df) == 36  # (2 runs + 4 baselines) x 3 splits x 2 scenarios
+    played = sorted(
+        (str(c["run_dir"]), c["checkpoint"], c["scenario"]["location"], c["scenario"]["start_day"])
+        for c in calls["run_policy"]
+    )
+    assert played == sorted(
+        (str(d), cp, site, day)
+        for d, cp in zip(world.run_dirs, CHECKPOINTS, strict=True)
+        for site, day in scored
+    )
+    rb_params = {"rb_default": RB_DEFAULT, "rb_tuned": rule_based.load_rb_params("tuned")}
+    assert rb_params["rb_default"] != rb_params["rb_tuned"]
+    rb = sorted(  # a call with neither's params is dropped, so the count below fails
+        (b, c["scenario"]["location"], c["scenario"]["start_day"])
+        for c in calls["run_rb"]
+        for b, params in rb_params.items()
+        if c["params"] == params
+    )
+    assert rb == sorted((b, *s) for b in ("rb_default", "rb_tuned") for s in scored)
+    baselines = sorted(
+        (c["name"], c["scenario"]["location"], c["scenario"]["start_day"])
+        for c in calls["run_baseline"]
+    )
+    assert baselines == sorted((b, *s) for b in ("zero_controls", "random") for s in scored)
+    every = [*calls["run_policy"], *calls["run_rb"], *calls["run_baseline"]]
+    assert {(c["season_length"], c["allow_test"]) for c in every} == {(1, True)}
+    traced = [c for c in calls["run_policy"] if Path(c["run_dir"]) == world.run_dirs[0]]
+    traced += calls["run_rb"]
+    flags = [(c["record_steps"], c.get("return_trace")) for c in traced]
+    assert flags == [(True, True)] * 18  # 6 seed 0 seasons + 12 rb_default and rb_tuned seasons
+    assert calls["code_stamp"] == [{"smoke": False}]
+
+
+# --- #44's fix round: a failed or short replay costs no scored file ----------------------------
+
+# The short season of the test below: seed 0's (the traced run's) london_2012 day 49, mid-loop, so
+# replays come both before it and after it.
+SHORT_SPLIT = "london_2012"
+SHORT = {"location": "London", "growth_year": 2012, "start_day": 49}
+
+
+def _outcome(argv: list[str], ledger_path: Path) -> int | RuntimeError | ValueError:
+    """--final's return code, or the RuntimeError or ValueError it raised. A ValueError is what
+    export_replay.export's hourly reshape raises on a frame that isn't whole hours."""
+    try:
+        return _main(argv, ledger_path)
+    except (RuntimeError, ValueError) as error:
+        return error
+
+
+def _same_scored_files(out: Path, shared: Path) -> None:
+    """out's stamp.json and per_split.json are the shared full run's byte for byte, and its
+    seasons.parquet (36 rows) is the shared run's frame."""
+    for name in ("stamp.json", "per_split.json", "seasons.parquet"):
+        assert (out / name).is_file(), f"no {name}: the scored files come before any replay"
+    for name in ("stamp.json", "per_split.json"):
+        assert (out / name).read_bytes() == (shared / name).read_bytes(), name
+    df = pd.read_parquet(out / "seasons.parquet")
+    assert len(df) == 36  # (2 runs + 4 baselines) x 3 splits x 2 scenarios
+    pd.testing.assert_frame_equal(df, pd.read_parquet(shared / "seasons.parquet"))
+
+
+def test_a_failing_replay_export_leaves_seasons_and_per_split_complete(
+    world, final_run, tmp_path, monkeypatch
+):
+    """Done when (#44 fix round): seasons.parquet and per_split.json are always written before any
+    replay work, so a replay that fails can't cost the scored numbers. With export_replay.export
+    patched to raise RuntimeError("boom"), --final on a copied world raises it, and
+    FINAL_RESULTS/<row>/ still holds stamp.json and per_split.json byte for byte the shared full
+    run's and seasons.parquet equal to its (36 rows), so `ledger final-result` can record them."""
+    final = final_run()  # first: it plays the real run_policy and export
+    w = _copy_world(world, tmp_path, monkeypatch)
+
+    def boom(*args, **kwargs):
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr(export_replay, "export", boom)
+
+    with pytest.raises(RuntimeError, match="boom"):
+        _main(["--final", w.freg_id], w.ledger)
+
+    _same_scored_files(w.results / w.freg_id, final.dir)
+
+
+def test_a_failing_replay_stamp_fails_before_final_results_is_made(world, tmp_path, monkeypatch):
+    """Done when (#44 fix round, the reviewer's note): the replays' stamp (gl_gym, from
+    manifest._versions) and each traced run's meta.run are built before FINAL_RESULTS/<row>/ is
+    made and before any env, so a failure there costs neither the seal nor a season. With
+    manifest._versions patched to raise, --final on a copied world raises that error, no env is
+    built (_no_env_built), and FINAL_RESULTS doesn't exist afterwards. (The fixture's code_stamp
+    and manifest.fingerprints don't call _versions, so the replay stamp is the call that raises.)"""
+    w = _copy_world(world, tmp_path, monkeypatch)
+
+    def no_versions():
+        raise RuntimeError("no gl-gym install record")
+
+    monkeypatch.setattr(manifest, "_versions", no_versions)
+    _no_env_built(monkeypatch)
+
+    with pytest.raises(RuntimeError, match="no gl-gym install record"):
+        _main(["--final", w.freg_id], w.ledger)
+
+    assert not w.results.exists(), _tree(w.results)
+
+
+@pytest.mark.parametrize("steps", [94, 92])
+def test_a_short_traced_season_is_named_not_replayed_and_the_rest_are(
+    steps, world, final_run, tmp_path, monkeypatch
+):
+    """Done when (#44 fix round): a traced season whose frame isn't SEASON_LENGTH x 96 steps long
+    (a solver failure ends a season early) is not exported, every full-length one still is, and
+    after the replay loop --final raises one RuntimeError naming the short season.
+
+    evaluate.run_policy is wrapped so seed 0's (the traced run's) london_2012 day-49 season returns
+    its frame and trace cut to `steps` steps (frame.iloc[:steps], states[:steps + 1],
+    controls[:steps]) with its real result, so the scoring is the full run's. 94 steps isn't whole
+    hours (export's hourly reshape raises ValueError today); 92 is 23 whole hours (export writes a
+    0-day replay today, and --final returns 0). Then:
+    - stamp.json, per_split.json and seasons.parquet are the shared full run's;
+    - replays/ holds exactly the other 29 files, each byte for byte the shared run's, and no
+      residual_London_2012_49.json;
+    - --final raises RuntimeError (it doesn't return 0 or raise export's ValueError) whose message
+      names the season: "residual", "london_2012", start day 49 and the step count, each found
+      with the tmp paths and row ids taken out (so no number comes from a path); names
+      seasons.parquet and per_split.json; and gives `final-result --final-registered <row>
+      --numbers <per_split.json>`.
+    """
+    final = final_run()  # first: its spies must wrap the real run_policy, not the cut below
+    w = _copy_world(world, tmp_path, monkeypatch)
+    real, cuts = evaluate.run_policy, []
+
+    def cut(run_dir, checkpoint, scenario, *args, **kwargs):
+        played = real(run_dir, checkpoint, scenario, *args, **kwargs)
+        if Path(run_dir) != w.run_dirs[0] or scenario != SHORT:
+            return played
+        result, frame, (states, controls, params) = played
+        cuts.append(len(frame))
+        return result, frame.iloc[:steps], (states[: steps + 1], controls[:steps], params)
+
+    monkeypatch.setattr(evaluate, "run_policy", cut)
+
+    outcome = _outcome(["--final", w.freg_id], w.ledger)
+
+    assert cuts == [N_DAY], "seed 0's london_2012 day-49 season should be played, and cut, once"
+    out = w.results / w.freg_id
+    _same_scored_files(out, final.dir)
+    short = f"{ARM}_{SHORT['location']}_2012_{SHORT['start_day']}.json"
+    want = {name: data for name, data in _tree(final.dir / "replays").items() if name != short}
+    assert len(want) == 29  # 30 traced seasons, less the short one
+    got = _tree(out / "replays") or {}
+    assert sorted(got) == sorted(want), f"the 29 full seasons' replays, and no {short}"
+    for name, data in want.items():
+        assert got[name] == data, name
+    assert type(outcome) is RuntimeError, (
+        f"--final should raise one RuntimeError naming the short season, not {outcome!r}"
+    )
+    text = str(outcome)
+    numbers = out / "per_split.json"
+    assert f"final-result --final-registered {w.freg_id} --numbers {numbers}" in text, text
+    rest = re.sub(r"-[0-9a-f]{8}\b", "-<id>", text.replace(str(tmp_path), "<tmp>"))
+    for named in (ARM, SHORT_SPLIT, "seasons.parquet", "per_split.json"):
+        assert named in rest, (named, text)
+    for number in (SHORT["start_day"], steps):
+        assert re.search(rf"(?<![\d.]){number}(?!\d)", rest), (number, text)
+
+
+def test_the_traced_run_is_the_lowest_seed_not_the_first_registered(
+    world, final_run, tmp_path, monkeypatch
+):
+    """Done when (#44, the reviewer's note): the residual arm's traced run is its lowest registered
+    seed, whatever the ledger's order. A fresh tmp ledger chain over the copied run dirs puts seed 1
+    first everywhere, as stored: its run row before seed 0's, and first in the stored result's
+    selected and the stored final-registered row's checkpoints, {seed 1: "1024", seed 0: "final"}.
+    The ledger writes each row with sort_keys=True, so a stored {run row_id: checkpoint} is in row
+    id order, and row ids are random; here ledger's secrets.token_hex is patched to count up
+    (00000000, 00000001, ...), so seed 1's run row, created first, has the smaller id and sorts
+    first every time. --final returns 0 and each of the 6 residual replays is seed 0's: meta.run is
+    seed 0's run row at checkpoint "final", the note names seed 0, and its totals are the shared
+    run's seed-0 replay's on that scenario (seed 1 at "1024" plays the RB exactly, so its totals
+    differ; the totals test above shows it). A --final that traced the first registered run would
+    trace seed 1 here."""
+    final = final_run()
+    w = _copy_world(world, tmp_path, monkeypatch)
+    ids = iter(range(1 << 32))
+    monkeypatch.setattr(ledger.secrets, "token_hex", lambda nbytes: f"{next(ids):0{2 * nbytes}x}")
+    path = tmp_path / "seed1_first.jsonl"
+    reg = ledger.register(
+        issue=44,
+        hypothesis="the same two residual smoke runs, seed 1 recorded first",
+        arms=[{"name": ARM, "method": "residual", "config": {}}],
+        seeds=[0, 1],
+        timesteps=2048,
+        scenarios=["validation"],
+        primary=PRIMARY,
+        guards=["viol_hours_temp"],
+        rule="a test fixture",
+        budget={"cpu_hours": 0.0, "usd": 0.0, "backend": "local"},
+        path=path,
+    )["row_id"]
+    run_ids = {}
+    for seed in (1, 0):
+        run = ledger.run_start(
+            registered=reg, arm=ARM, seed=seed, run_dir=str(w.run_dirs[seed]), path=path
+        )
+        ledger.run_end(
+            run=run["row_id"],
+            status="finished",
+            wall_s=6.0,
+            timesteps=2048,
+            solver_failures=0,
+            cost_usd=None,
+            diagnostics=DIAGNOSTICS,
+            path=path,
+        )
+        run_ids[seed] = run["row_id"]
+    checkpoints = {run_ids[1]: "1024", run_ids[0]: "final"}
+    numbers = {"iqm": 1.0, "ci_low": 0.0, "ci_high": 2.0, "guards": {}, "invalid_episodes": 0}
+    ledger.record_result(registered=reg, per_arm={ARM: numbers}, selected=checkpoints, path=path)
+    freg = ledger.final_register(
+        issue=44,
+        checkpoints=checkpoints,
+        baselines=list(BASELINES),
+        approved_by="Aarmen",
+        path=path,
+    )
+    assert [r["seed"] for r in ledger.rows(kind="run", path=path)] == [1, 0]
+    [result] = ledger.rows(kind="result", path=path)
+    [stored] = ledger.rows(kind="final-registered", path=path)
+    assert list(result["selected"]) == [run_ids[1], run_ids[0]]
+    assert list(stored["checkpoints"]) == [run_ids[1], run_ids[0]]
+
+    assert _main(["--final", freg["row_id"]], path) == 0
+
+    replays = w.results / freg["row_id"] / "replays"
+    for site, day in [(site, day) for site in SITES.values() for day in DAYS]:
+        name = f"{ARM}_{site}_2012_{day}.json"
+        assert (replays / name).is_file(), f"no replay {name}"
+        payload = json.loads((replays / name).read_text(encoding="utf-8"))
+        run = payload["meta"]["run"]
+        assert (run["id"], run["seed"], run["checkpoint"]) == (run_ids[0], 0, "final"), name
+        note = f"registered final {freg['row_id']}: residual seed 0 at checkpoint final"
+        assert payload["meta"]["note"] == note, name
+        shared = json.loads((final.dir / "replays" / name).read_text(encoding="utf-8"))
+        assert payload["totals"] == shared["totals"], name
 
 
 def test_the_only_allow_test_true_in_evaluate_is_inside_final():

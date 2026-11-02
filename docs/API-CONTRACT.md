@@ -183,17 +183,17 @@ Paths are relative to `control/`. Scenario dicts are `{"location": str, "growth_
   (-1.0 for the residual arms).
 
 ## `greenleaf_control.evaluate`
-- `run_rb(params: dict, scenario: dict, season_length: int = 60, record_steps: bool = False, *, allow_test: bool = False)
-  -> tuple[dict, pd.DataFrame | None]`
+- `run_rb(params: dict, scenario: dict, season_length: int = 60, record_steps: bool = False,
+  return_trace: bool = False, *, allow_test: bool = False) -> tuple[dict, pd.DataFrame | None]`
 - `run_policy(run_dir: Path, checkpoint: str, scenario: dict, season_length: int = 60, record_steps: bool = False,
-  return_trace: bool = False, *, allow_test: bool = False) -> tuple[dict, pd.DataFrame | None]`, or with
-  `return_trace=True`
-  `(result, frame, (states, controls, params))`: the same season's raw trace that metrics graded (no second season).
+  return_trace: bool = False, *, allow_test: bool = False) -> tuple[dict, pd.DataFrame | None]`
   - Rebuilds the training stack with `train.build_vec_env(manifest["config"], 1, scenario=..., season_length=...)`
     (`DummyVecEnv` → `VecMonitor` → `VecLagrangianReward` for residual_lag), loads
     `VecNormalize.load(run_dir/"vecnorm_<checkpoint>.pkl", <that stack>)`, sets `training = False` and
     `norm_reward = False` before reset, then `PPO.load(run_dir/"ckpt_<checkpoint>.zip", device="cpu")` and
     deterministic predict until the season ends.
+- **`return_trace`** (both, default False): with True, `(result, frame, (states, controls, params))`: the same
+  season's raw trace that metrics graded (no second season).
 - **`allow_test`** (both): passes through, `run_rb` to `make_raw_env` and `run_policy` to `train.build_vec_env`;
   default False, and only `evaluate --final` sets it.
 - **Result dict** (both): `metrics.episode_metrics(...)` graded with the env's own `p` and `season_steps = N`, plus
@@ -219,15 +219,32 @@ Paths are relative to `control/`. Scenario dicts are `{"location": str, "growth_
   - **Scores**, for each TEST split in `ledger.TEST_SPLITS` order and each scenario in split order, 60-day seasons:
     each learning arm (by name), its runs by ascending seed, with `run_policy(run_dir, c, s, 60, allow_test=True)`;
     then each of the row's `baselines` in its order, as the scoring CLI scores it, with `allow_test=True`.
+    Traced seasons, each arm's lowest registered seed and every baseline, are scored with `record_steps=True,
+    return_trace=True` (`zero_controls` and `random`: the frame and trace from `run_baseline`'s infos); each
+    season is played once.
   - **Writes `FINAL_RESULTS/<row>/` once** (`mkdir(exist_ok=False)`, each file opened exclusively): `stamp.json`
     (the code stamp) before the first season; `seasons.parquet`, one row per split × scenario × arm × run, identity
     columns `arm, run, seed, checkpoint` (null for a baseline), `split, location, growth_year, start_day,
-    season_length`, then the result keys; last `per_split.json`, `{"per_split": ...}` in the ledger's `final-result`
+    season_length`, then the result keys; then `per_split.json`, `{"per_split": ...}` in the ledger's `final-result`
     shape with sorted keys, indent 2 and no NaN. Per split and arm, `stats.iqm_ci` (defaults: 2,000 reps, seed 0) on
     the runs × scenarios array (a baseline is one run) gives `iqm, ci_low, ci_high` on `FINAL_PRIMARY` and `guards`
     on each of `FINAL_GUARDS`; `invalid_episodes` counts seasons with `valid == False`; `prob_improvement` is
     `stats.prob_improvement(arm, rb_tuned)` on the primary, null for `rb_tuned`; `scored` is `final_arms`' (`{}` for
     a baseline).
+  - **Then `replays/`** (after `per_split.json`, before the `next:` line): one
+    `<prefix>_<location>_<growth_year>_<start_day>.json` per traced season, `<prefix>` the arm's name or the
+    baseline's, each `export_replay.export(...)` of its scored season (so `totals` is its `seasons.parquet` row),
+    written exclusively, compact, no NaN, under 250 KB. `meta.controller` is `<prefix>`; the stamp is
+    `{commit, dirty}` of the one `code_stamp(smoke=False)` plus `gl_gym`; `meta.run` is export's
+    {id, registered, result, arm, seed, checkpoint, commit} for the traced run (`result` the result row selecting
+    its checkpoint), `None` for a baseline; `meta.note` is `"registered final <row>: <arm> seed <k> at checkpoint
+    <c>"` or `"registered final <row>: <baseline>"`. The stamp and each `meta.run` are built before
+    `FINAL_RESULTS/<row>/` is made.
+  - **A short traced season** (its frame isn't `season_length × 96` steps, e.g. a solver failure ended it) gets no
+    replay; every full-length one is still written. After the replays, `--final` raises one `RuntimeError` naming
+    each short season (`<prefix> <split> day <start_day>: <n> of <N> steps`), saying `seasons.parquet` and
+    `per_split.json` are complete, and giving the `final-result --final-registered <row> --numbers
+    <per_split.json>` command in place of the `next:` line.
   - **Prints** one line per split × arm (primary and each guard as `iqm [lo, hi]`, `P(improvement)`, `n_runs`,
     `invalid_episodes`, and `n<5: no claim` for a learning arm under 5 runs), then last
     `next: python -m greenleaf_control.ledger final-result --final-registered <row> --numbers <per_split.json>`.

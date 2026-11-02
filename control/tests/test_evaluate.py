@@ -486,6 +486,40 @@ def test_run_policy_return_trace_adds_the_graded_raw_trace_and_changes_nothing_e
     assert metrics.episode_metrics(states, controls, params, season_steps=N_DAY) == graded
 
 
+@pytest.mark.usefixtures("no_2012_reads")
+def test_run_rb_return_trace_adds_the_graded_raw_trace_and_changes_nothing_else():
+    """#44: run_rb(..., return_trace=True) returns a third item, the graded season's raw trace
+    (states, controls, params), as run_policy's does (#24), so evaluate --final can write a
+    baseline's replay from the season it scores, with no second season.
+
+    On rb default over a 1-day PAPER season (96 steps):
+    - run_rb takes return_trace (checked first, so a missing one fails here, not in a TypeError);
+    - the result == the plain call's, and the frame equals the plain call's exactly (the RB and the
+      raw env are deterministic, so it is the same season);
+    - states is (97, nx), the first step's x_prev then each step's x, and controls (96, 6) are the
+      frame's applied u_* exactly;
+    - the trace is the one graded: metrics.episode_metrics(states, controls, params,
+      season_steps=96) == the result without paper_reward_sum, exactly.
+    """
+    import greenleaf_control.evaluate as evaluate
+
+    assert "return_trace" in inspect.signature(evaluate.run_rb).parameters, (
+        "run_rb takes no return_trace: run_rb(..., record_steps=False, return_trace=False, *, ...)"
+    )
+    want, want_frame = evaluate.run_rb(RB_DEFAULT, PAPER, 1, record_steps=True)
+    result, frame, (states, controls, params) = evaluate.run_rb(
+        RB_DEFAULT, PAPER, 1, record_steps=True, return_trace=True
+    )
+
+    assert result == want
+    pd.testing.assert_frame_equal(frame, want_frame)
+    assert states.shape[0] == N_DAY + 1
+    assert controls.shape == (N_DAY, 6)
+    np.testing.assert_array_equal(controls, frame[U_COLS].to_numpy(dtype=np.float64))
+    graded = {k: v for k, v in result.items() if k != "paper_reward_sum"}
+    assert metrics.episode_metrics(states, controls, params, season_steps=N_DAY) == graded
+
+
 FRAME_CASES = [
     pytest.param("rb", RB_DEFAULT, id="rb-default"),
     pytest.param("rb", {**RB_DEFAULT, "co2_day": 2500}, id="rb-co2-day-2500"),
@@ -855,11 +889,12 @@ def test_no_module_but_the_final_passes_allow_test_true():
 
 
 def test_signatures_match_the_contract_and_no_test_wrote_the_real_ledger_or_runs():
-    """run_rb(params, scenario, season_length=60, record_steps=False, *, allow_test=False),
-    run_policy(run_dir, checkpoint, scenario, season_length=60, record_steps=False,
-    return_trace=False, *, allow_test=False) and main(argv=None, *, ledger_path=ledger.LEDGER).
-    return_trace (#24), allow_test (#41) and ledger_path (#43, the ledger --final reads) are
-    backward-compatible extensions: defaulted, so every earlier call is unchanged.
+    """run_rb(params, scenario, season_length=60, record_steps=False, return_trace=False, *,
+    allow_test=False), run_policy(run_dir, checkpoint, scenario, season_length=60,
+    record_steps=False, return_trace=False, *, allow_test=False) and main(argv=None, *,
+    ledger_path=ledger.LEDGER). return_trace (run_policy's #24, run_rb's #44), allow_test (#41)
+    and ledger_path (#43, the ledger --final reads) are backward-compatible extensions: defaulted,
+    so every earlier call is unchanged.
 
     This test runs last in the module and checks the real ledger's size and mtime, and the
     listing of control/runs/, are as they were when the module was collected.
@@ -867,7 +902,14 @@ def test_signatures_match_the_contract_and_no_test_wrote_the_real_ledger_or_runs
     import greenleaf_control.evaluate as evaluate
 
     rb = inspect.signature(evaluate.run_rb).parameters
-    assert list(rb) == ["params", "scenario", "season_length", "record_steps", "allow_test"]
+    assert list(rb) == [
+        "params",
+        "scenario",
+        "season_length",
+        "record_steps",
+        "return_trace",
+        "allow_test",
+    ]
     policy = inspect.signature(evaluate.run_policy).parameters
     assert list(policy) == [
         "run_dir",
@@ -882,7 +924,8 @@ def test_signatures_match_the_contract_and_no_test_wrote_the_real_ledger_or_runs
         assert (params["season_length"].default, params["record_steps"].default) == (60, False)
         assert params["allow_test"].kind is inspect.Parameter.KEYWORD_ONLY
         assert params["allow_test"].default is False
-    assert policy["return_trace"].default is False
+    for params in (rb, policy):
+        assert params["return_trace"].default is False
     main = inspect.signature(evaluate.main).parameters
     assert list(main) == ["argv", "ledger_path"]
     assert main["argv"].default is None
