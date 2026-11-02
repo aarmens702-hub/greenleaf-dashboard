@@ -127,18 +127,27 @@ Paths are relative to `control/`. Scenario dicts are `{"location": str, "growth_
   | `run-end` | `run`, `status`, `wall_s`, `timesteps`, `solver_failures`, `cost_usd`, `diagnostics` ({min_approx_kl, final_entropy, final_explained_variance}) |
   | `result` | `registered`, `per_arm` ({iqm, ci_low, ci_high (null when no run was scored), guards ({guard: {iqm, ci_low, ci_high}}), crashed, invalid_episodes, spend_usd (the arm's run-ends' cost_usd, null as 0)}), `selected` ({run row_id → `"<steps>"` \| `"final"`}, learning runs only) |
   | `decision` | `result`, `decision` (adopted or dropped), `note` |
-  | `final-registered` | `checkpoints`, `baselines`, `approved_by`, `approved_at` |
-  | `final-result` | `final-registered`, `per_split` |
+  | `final-registered` | `checkpoints` ({run row_id → `"<steps>"` \| `"final"`}; each pair is exactly a value of some `result` row's `selected`; a learning arm is named by its run rows' `arm` and comes from one registration; a learning arm's name is not one of the row's `baselines`), `baselines` (a list drawn from `FINAL_BASELINES`, no duplicates, with `rb_default` and `rb_tuned`), `approved_by`, `approved_at` |
+  | `final-result` | `final-registered`, `per_split` ({split: {arm: {iqm, ci_low, ci_high, guards ({g: {iqm, ci_low, ci_high}}, g in F1a-3's `FINAL_GUARDS`), invalid_episodes, prob_improvement, scored}}}). split is exactly `TEST_SPLITS`; arm is exactly `final_arms` plus `baselines`; iqm and ci_* are on the primary `profit_eur_m2`; prob_improvement is P(arm > rb_tuned) on the primary, null for rb_tuned; scored is {run row_id → checkpoint} as registered, `{}` for a baseline |
 
 - **CLI** (`python -m greenleaf_control.ledger`):
   - `register ... [--dry]`
   - `result --registered <row> --numbers <file>`: `<file>` is `{per_arm, selected}` as `selection` writes it; the ledger adds `crashed` and `spend_usd` from the run-ends and refuses them in the file
   - `decide --result <row> --adopted|--dropped --note "..."`
   - `show [--issue N] [--spend]`
-  - `final-register ... --approved-by Aarmen`
+  - `final-register --issue N --checkpoints JSON --baselines B... --approved-by Aarmen`
+  - `final-result --final-registered <row> --numbers <file>`: `<file>` is exactly `{per_split}` as F1a-3's `evaluate --final` will write it; prints the row id
+- **Names:** `TEST_SPLITS` and `FINAL_BASELINES` (written out; tests pin them to `tuple(scenarios.TEST)` and
+  `envs.BASELINES`), `FINAL_ARM_KEYS`, and `final_arms(final_registered: dict, rows: list[dict]) -> dict[str, dict[str, str]]`
+  (arm → {run row_id → checkpoint}).
 - **Appends only.** `register` refuses a third registration on one issue without `--owner-ok`, and any `primary`
   or `guards` entry not in `ledger.RESULT_KEYS` (checked on every append). `result` refuses
-  unless every registered arm × seed has a `run-end` row.
+  unless every registered arm × seed has a `run-end` row. `final-register` refuses a missing `approved_by`, a spent
+  seal, empty `checkpoints`, a pair no result's `selected` holds, one arm from two registrations, bad `baselines`, and
+  a learning arm named like one of its baselines. `final-result` refuses a second final-result first, then a `per_split` whose
+  splits, arms or entry keys aren't the above, a `prob_improvement` that isn't null exactly for `rb_tuned`, and a
+  `scored` that differs from the registration (guard names are checked in F1a-3 via `FINAL_GUARDS`, not here).
+  `check_locks` holds a result's and a final-result's fingerprints to their parent's.
 
 ## `greenleaf_control.train`
 - `python -m greenleaf_control.train --method M --seed S [--penalty-weight W] [--budget-frac B] [--timesteps N]

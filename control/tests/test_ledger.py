@@ -4,6 +4,7 @@ Every test passes path= under tmp_path. The defaults bind to the real control/le
 which no test may write; the last test in this module checks that.
 """
 
+import copy
 import inspect
 import json
 import math
@@ -83,8 +84,10 @@ REGISTRATION = {
     "budget": {"cpu_hours": 1.0, "usd": 0.0, "backend": "local"},
 }
 DIAGNOSTICS = {"min_approx_kl": 0.002, "final_entropy": -1.5, "final_explained_variance": 0.8}
-PER_SPLIT = {"heldout": {"iqm": 1.0, "ci_low": 0.5, "ci_high": 1.5}}
-CHECKPOINTS = {"run-0123abcd": "ckpt_final.zip"}
+# The final's test splits (scenarios.TEST's keys, in order) and the two baselines every final
+# registers. Written out, not read from ledger, so collection can't ERROR; a test pins them.
+SPLITS = ("amsterdam_2012", "london_2012", "abbotsford_2012")
+BASELINES = ("rb_default", "rb_tuned")
 # The CLI's register arguments, and the row fields they must parse to.
 CLI_ARMS = [
     {"name": "a", "method": "ppo", "config": {"learning_rate": 0.0003}},
@@ -165,41 +168,76 @@ def _per_arm(arms, iqm=1.5) -> dict:
     }
 
 
-def _final_register(ledger, path, *, issue=9, approved_by="Aarmen") -> dict:
+def _final_register(
+    ledger, path, checkpoints, *, issue=9, baselines=BASELINES, approved_by="Aarmen"
+) -> dict:
     return ledger.final_register(
         issue=issue,
-        checkpoints=CHECKPOINTS,
-        baselines=["rb_default", "rb_tuned"],
+        checkpoints=checkpoints,
+        baselines=list(baselines),
         approved_by=approved_by,
         path=path,
     )
 
 
-def _chain(ledger, path, *, final_result=True) -> dict:
-    """One row of every kind, keyed by kind: issue 7's experiment, then issue 9's final evaluation."""
+def _entry(arm: str, scored: dict) -> dict:
+    """One arm's numbers on one test split, scored at scored ({run row_id: checkpoint})."""
+    return {
+        "iqm": 31.5,
+        "ci_low": 30.0,
+        "ci_high": 33.0,
+        "guards": {"viol_hours_temp": {"iqm": 3.0, "ci_low": 2.0, "ci_high": 4.0}},
+        "invalid_episodes": 0,
+        "prob_improvement": None if arm == "rb_tuned" else 0.75,  # P(arm > rb_tuned)
+        "scored": dict(scored),
+    }
+
+
+def _per_split(scored: dict, baselines=BASELINES) -> dict:
+    """A final-result's per_split: each test split holds every learning arm, scored at its
+    registered checkpoints ({arm: {run row_id: checkpoint}}), and every baseline, scored at none."""
+    arms = {**scored, **{name: {} for name in baselines}}
+    return {split: {arm: _entry(arm, at) for arm, at in arms.items()} for split in SPLITS}
+
+
+def _experiment(ledger, path) -> dict:
+    """Issue 7's experiment, keyed by kind: arm a's one run, validation-selected at "final"."""
     reg = _register(ledger, path, issue=7, arms=("a",))
     run, end = _run(ledger, path, reg, "a", 0, cost_usd=0.5)
     res = ledger.record_result(
         registered=reg["row_id"],
         per_arm=_per_arm(["a"]),
-        selected={run["row_id"]: "ckpt_final.zip"},
+        selected={run["row_id"]: "final"},
         path=path,
     )
     dec = ledger.decide(result=res["row_id"], decision="adopted", note="CI excludes 0", path=path)
-    freg = _final_register(ledger, path, issue=9)
-    chain = {
-        "registered": reg,
-        "run": run,
-        "run-end": end,
-        "result": res,
-        "decision": dec,
-        "final-registered": freg,
-    }
+    return {"registered": reg, "run": run, "run-end": end, "result": res, "decision": dec}
+
+
+def _chain(ledger, path, *, final_result=True) -> dict:
+    """One row of every kind, keyed by kind: issue 7's experiment, then issue 9's final evaluation
+    of its selected checkpoint."""
+    chain = _experiment(ledger, path)
+    checkpoints = chain["result"]["selected"]
+    freg = _final_register(ledger, path, checkpoints, issue=9)
+    chain["final-registered"] = freg
     if final_result:
         chain["final-result"] = ledger.final_result(
-            final_registered=freg["row_id"], per_split=PER_SPLIT, path=path
+            final_registered=freg["row_id"], per_split=_per_split({"a": checkpoints}), path=path
         )
     return chain
+
+
+def _two_seeds_registered(ledger, path) -> tuple[dict, dict]:
+    """Issue 7's arm residual_w05 over seeds 0 and 1, validation-selected at "1750000" and "final",
+    and issue 9's final registration of exactly those; return (final-registered row, checkpoints)."""
+    reg = _register(ledger, path, issue=7, arms=("residual_w05",), seeds=(0, 1))
+    run0, run1 = (_run(ledger, path, reg, "residual_w05", s)[0]["row_id"] for s in (0, 1))
+    selected = {run0: "1750000", run1: "final"}
+    ledger.record_result(
+        registered=reg["row_id"], per_arm=_per_arm(["residual_w05"]), selected=selected, path=path
+    )
+    return _final_register(ledger, path, selected), selected
 
 
 def _show(ledger, path, via, *, issue=None, spend=False) -> None:
@@ -302,18 +340,18 @@ def test_rows_link_their_parents_and_keep_the_callers_values(tmp_path):
         "diagnostics": DIAGNOSTICS,
     }
     assert res["registered"] == reg["row_id"]
-    assert res["selected"] == {run["row_id"]: "ckpt_final.zip"}
+    assert res["selected"] == {run["row_id"]: "final"}
     assert {k: dec[k] for k in KIND_FIELDS["decision"]} == {
         "result": res["row_id"],
         "decision": "adopted",
         "note": "CI excludes 0",
     }
-    assert freg["checkpoints"] == CHECKPOINTS
+    assert freg["checkpoints"] == {run["row_id"]: "final"}
     assert freg["baselines"] == ["rb_default", "rb_tuned"]
     assert freg["approved_by"] == "Aarmen"
     assert t0 <= _utc(freg["approved_at"]) <= t1
     assert fres["final-registered"] == freg["row_id"]
-    assert fres["per_split"] == PER_SPLIT
+    assert fres["per_split"] == _per_split({"a": {run["row_id"]: "final"}})
 
 
 def test_rows_carry_manifest_fingerprints_computed_at_call_time(tmp_path, monkeypatch):
@@ -365,7 +403,7 @@ def test_appends_never_change_earlier_bytes(tmp_path):
     seen.append(path.read_bytes())
     ledger.run_end(
         run=run["row_id"],
-        status="crashed",
+        status="finished",
         wall_s=3.0,
         timesteps=96,
         solver_failures=2,
@@ -374,11 +412,12 @@ def test_appends_never_change_earlier_bytes(tmp_path):
         path=path,
     )
     seen.append(path.read_bytes())
+    selected = {run["row_id"]: "final"}  # the final registers this validation-selected checkpoint
     res = ledger.record_result(
-        registered=reg["row_id"], per_arm=_per_arm(["a"]), selected={}, path=path
+        registered=reg["row_id"], per_arm=_per_arm(["a"]), selected=selected, path=path
     )
     seen.append(path.read_bytes())
-    ledger.decide(result=res["row_id"], decision="dropped", note="it crashed", path=path)
+    ledger.decide(result=res["row_id"], decision="dropped", note="no gain", path=path)
     seen.append(path.read_bytes())
     _register(ledger, path, arms=("a",))  # the issue's second registration
     seen.append(path.read_bytes())
@@ -388,9 +427,11 @@ def test_appends_never_change_earlier_bytes(tmp_path):
     _register(ledger, path, issue=4, arms=("a",), dry=True)
     assert path.read_bytes() == seen[-1]
 
-    freg = _final_register(ledger, path)
+    freg = _final_register(ledger, path, selected)
     seen.append(path.read_bytes())
-    ledger.final_result(final_registered=freg["row_id"], per_split=PER_SPLIT, path=path)
+    ledger.final_result(
+        final_registered=freg["row_id"], per_split=_per_split({"a": selected}), path=path
+    )
     seen.append(path.read_bytes())
 
     for old, new in zip(seen, seen[1:], strict=False):
@@ -506,8 +547,9 @@ WRONG_KIND = {
 }
 
 
-def _link_kwargs(func: str) -> dict:
+def _link_kwargs(func: str, chain: dict) -> dict:
     """Valid arguments for func besides its link."""
+    checkpoints = chain["final-registered"]["checkpoints"]
     return {
         "run_start": {"arm": "a", "seed": 0, "run_dir": "runs/a-0-again"},
         "run_end": {
@@ -520,7 +562,7 @@ def _link_kwargs(func: str) -> dict:
         },
         "record_result": {"per_arm": _per_arm(["a"]), "selected": {}},
         "decide": {"decision": "dropped", "note": "no gain"},
-        "final_result": {"per_split": PER_SPLIT},
+        "final_result": {"per_split": _per_split({"a": checkpoints})},
     }[func]
 
 
@@ -541,7 +583,7 @@ def test_a_link_must_name_an_existing_row_of_its_kind(tmp_path, func, arg, kind,
     before = path.read_bytes()
 
     with pytest.raises(ValueError):
-        getattr(ledger, func)(**{arg: link}, **_link_kwargs(func), path=path)
+        getattr(ledger, func)(**{arg: link}, **_link_kwargs(func, chain), path=path)
     assert path.read_bytes() == before
 
 
@@ -854,37 +896,353 @@ def test_run_end_rejects_an_unknown_status(tmp_path, status):
 def test_final_register_refuses_without_approved_by(tmp_path, approved_by):
     """final_register with approved_by None, empty or blank raises ValueError naming approved_by.
 
-    Nothing is written; the file isn't even created.
+    Nothing is written; the file isn't even created. approved_by is checked first, so on this
+    empty ledger it is what's named, not the checkpoints no result has selected yet.
     """
     import greenleaf_control.ledger as ledger
 
     path = tmp_path / "ledger.jsonl"
 
     with pytest.raises(ValueError, match="approved_by"):
-        _final_register(ledger, path, approved_by=approved_by)
+        _final_register(ledger, path, {"run-0123abcd": "final"}, approved_by=approved_by)
     assert not path.exists()
 
 
 @pytest.mark.parametrize("second_on", ["the same final-registered", "another issue's"])
 def test_a_second_final_result_is_refused_on_any_issue(tmp_path, second_on):
     """The seal is spent once: after one final-result, any other raises ValueError naming
-    final-result, whichever final-registered row it names. Nothing is written."""
+    final-result, whichever final-registered row it names. Nothing is written.
+
+    Issue 10's final-registered row, of the same checkpoints, is written before the seal is spent:
+    after it, final_register itself is refused.
+    """
     import greenleaf_control.ledger as ledger
 
     path = tmp_path / "ledger.jsonl"
-    freg = _final_register(ledger, path, issue=9)
-    ledger.final_result(final_registered=freg["row_id"], per_split=PER_SPLIT, path=path)
-    target = (
-        freg
-        if second_on == "the same final-registered"
-        else _final_register(ledger, path, issue=10)
-    )
+    checkpoints = _experiment(ledger, path)["result"]["selected"]
+    per_split = _per_split({"a": checkpoints})
+    freg = _final_register(ledger, path, checkpoints, issue=9)
+    other = _final_register(ledger, path, checkpoints, issue=10)
+    ledger.final_result(final_registered=freg["row_id"], per_split=per_split, path=path)
+    target = freg if second_on == "the same final-registered" else other
     before = path.read_bytes()
 
     with pytest.raises(ValueError, match="final-result"):
-        ledger.final_result(final_registered=target["row_id"], per_split=PER_SPLIT, path=path)
+        ledger.final_result(final_registered=target["row_id"], per_split=per_split, path=path)
     assert path.read_bytes() == before
     assert len(ledger.rows(kind="final-result", path=path)) == 1
+
+
+def test_final_register_is_refused_once_the_seal_is_spent(tmp_path):
+    """After a final-result, a new final_register raises ValueError "the seal is spent", even
+    another issue's naming the same validation-selected checkpoint. The file is byte-identical."""
+    import greenleaf_control.ledger as ledger
+
+    path = tmp_path / "ledger.jsonl"
+    chain = _chain(ledger, path)
+    before = path.read_bytes()
+
+    with pytest.raises(ValueError, match="the seal is spent"):
+        _final_register(ledger, path, chain["result"]["selected"], issue=10)
+    assert path.read_bytes() == before
+    assert ledger.rows(kind="final-registered", path=path) == [chain["final-registered"]]
+
+
+@pytest.mark.parametrize("checkpoints", [{}, "a list"], ids=["empty", "not a dict"])
+def test_final_register_refuses_checkpoints_that_are_empty_or_not_a_dict(tmp_path, checkpoints):
+    """checkpoints is a non-empty {run row_id: checkpoint}. {} or a bare list of the selected run
+    ids raises ValueError naming checkpoints, the file byte-identical; the selected dict is then
+    accepted."""
+    import greenleaf_control.ledger as ledger
+
+    path = tmp_path / "ledger.jsonl"
+    selected = _experiment(ledger, path)["result"]["selected"]
+    broken = list(selected) if checkpoints == "a list" else checkpoints
+    before = path.read_bytes()
+
+    with pytest.raises(ValueError, match="checkpoints"):
+        _final_register(ledger, path, broken)
+    assert path.read_bytes() == before
+    assert _final_register(ledger, path, selected)["checkpoints"] == selected
+
+
+@pytest.mark.parametrize(
+    "case", ['"final" where selected says "1750000"', "a run no result selected", "a crashed run"]
+)
+def test_final_register_refuses_a_checkpoint_no_result_selected(tmp_path, case):
+    """Each registered (run, checkpoint) pair must be exactly a value of some result's selected.
+
+    Arm residual_w05's seed 0 was validation-selected at "1750000"; seed 1 crashed, so, as
+    selection builds it, the result's selected leaves it out. Registering seed 0 at "final", a
+    run id no result selected (run-0badc0de), or the crashed seed 1 raises ValueError naming
+    selected and that run, the file byte-identical (registered vs selected). The selected
+    checkpoints are then accepted.
+    """
+    import greenleaf_control.ledger as ledger
+
+    path = tmp_path / "ledger.jsonl"
+    reg = _register(ledger, path, issue=7, arms=("residual_w05",), seeds=(0, 1))
+    run0 = _run(ledger, path, reg, "residual_w05", 0)[0]["row_id"]
+    run1 = _run(ledger, path, reg, "residual_w05", 1, status="crashed")[0]["row_id"]
+    selected = {run0: "1750000"}  # the crashed run1 is absent, as selection builds it
+    ledger.record_result(
+        registered=reg["row_id"], per_arm=_per_arm(["residual_w05"]), selected=selected, path=path
+    )
+    broken, named = {
+        '"final" where selected says "1750000"': ({run0: "final"}, run0),
+        "a run no result selected": ({**selected, "run-0badc0de": "final"}, "run-0badc0de"),
+        "a crashed run": ({**selected, run1: "final"}, run1),
+    }[case]
+    before = path.read_bytes()
+
+    with pytest.raises(ValueError, match="selected") as excinfo:
+        _final_register(ledger, path, broken)
+    assert named in str(excinfo.value), str(excinfo.value)
+    assert path.read_bytes() == before
+    assert _final_register(ledger, path, selected)["checkpoints"] == selected
+
+
+def test_final_register_refuses_one_arm_from_two_registrations(tmp_path):
+    """A learning arm, named by its run rows' arm, comes from one registration.
+
+    Issues 7 and 8 each ran an arm named residual_w05 (as E4 and E6 did), and each result selected
+    its run. Registering both runs raises ValueError naming residual_w05 and both registered
+    row_ids, the file byte-identical; issue 8's run alone is then accepted.
+    """
+    import greenleaf_control.ledger as ledger
+
+    path = tmp_path / "ledger.jsonl"
+    picked = {}  # registered row_id -> that result's selected
+    for issue, checkpoint in [(7, "final"), (8, "1500000")]:
+        reg = _register(ledger, path, issue=issue, arms=("residual_w05",))
+        run = _run(ledger, path, reg, "residual_w05", 0)[0]["row_id"]
+        res = ledger.record_result(
+            registered=reg["row_id"],
+            per_arm=_per_arm(["residual_w05"]),
+            selected={run: checkpoint},
+            path=path,
+        )
+        picked[reg["row_id"]] = res["selected"]
+    (reg7, at7), (reg8, at8) = picked.items()
+    before = path.read_bytes()
+
+    with pytest.raises(ValueError, match="residual_w05") as excinfo:
+        _final_register(ledger, path, {**at7, **at8})
+    assert reg7 in str(excinfo.value), str(excinfo.value)
+    assert reg8 in str(excinfo.value), str(excinfo.value)
+    assert path.read_bytes() == before
+    assert _final_register(ledger, path, at8)["checkpoints"] == at8
+
+
+@pytest.mark.parametrize(
+    ("baselines", "named"),
+    [
+        pytest.param(["rb_default"], "rb_tuned", id="missing rb_tuned"),
+        pytest.param(["rb_tuned"], "rb_default", id="missing rb_default"),
+        pytest.param(["rb_default", "rb_tuned", "rb_magic"], "rb_magic", id="rb_magic"),
+        pytest.param(["rb_default", "rb_tuned", "rb_tuned"], "rb_tuned", id="a duplicate"),
+    ],
+)
+def test_final_register_refuses_bad_baselines(tmp_path, baselines, named):
+    """baselines are drawn from FINAL_BASELINES (envs.BASELINES) without a duplicate, and hold both
+    rb_default and rb_tuned. Otherwise ValueError naming baselines and the name at fault, the file
+    byte-identical. All four of envs.BASELINES are then accepted."""
+    import greenleaf_control.ledger as ledger
+
+    path = tmp_path / "ledger.jsonl"
+    checkpoints = _experiment(ledger, path)["result"]["selected"]
+    before = path.read_bytes()
+
+    with pytest.raises(ValueError, match="baselines") as excinfo:
+        _final_register(ledger, path, checkpoints, baselines=baselines)
+    assert named in str(excinfo.value), str(excinfo.value)
+    assert path.read_bytes() == before
+    every = ["zero_controls", "random", "rb_default", "rb_tuned"]
+    assert _final_register(ledger, path, checkpoints, baselines=every)["baselines"] == every
+
+
+@pytest.mark.parametrize(
+    ("arm", "baselines"),
+    [
+        pytest.param("rb_tuned", ["rb_default", "rb_tuned"], id="rb_tuned"),
+        pytest.param("random", ["rb_default", "rb_tuned", "random"], id="random"),
+    ],
+)
+def test_final_register_refuses_a_learning_arm_named_like_a_baseline(tmp_path, arm, baselines):
+    """per_split keys learning arms and baselines by name in one dict, so no learning arm may share
+    a name with one of the final's baselines.
+
+    Issue 7 ran arms <arm> (method ppo) and ppo, and its result selected both runs at "final".
+    Registering both, with <arm> among the baselines, raises ValueError naming the arm and saying
+    the learning arm shares a baseline's name, the file byte-identical; ppo's run alone, with the
+    same baselines, is then accepted.
+    """
+    import greenleaf_control.ledger as ledger
+
+    path = tmp_path / "ledger.jsonl"
+    reg = _register(ledger, path, issue=7, arms=(arm, "ppo"))
+    runs = {name: _run(ledger, path, reg, name, 0)[0]["row_id"] for name in (arm, "ppo")}
+    selected = {run: "final" for run in runs.values()}
+    ledger.record_result(
+        registered=reg["row_id"], per_arm=_per_arm([arm, "ppo"]), selected=selected, path=path
+    )
+    before = path.read_bytes()
+
+    with pytest.raises(ValueError, match="baseline") as excinfo:
+        _final_register(ledger, path, selected, baselines=baselines)
+    assert "arm" in str(excinfo.value), str(excinfo.value)
+    assert arm in str(excinfo.value), str(excinfo.value)
+    assert path.read_bytes() == before
+    ppo = {runs["ppo"]: "final"}
+    assert _final_register(ledger, path, ppo, baselines=baselines)["checkpoints"] == ppo
+
+
+def test_final_arms_maps_each_registered_arm_to_its_checkpoints(tmp_path):
+    """final_arms(final_registered, rows) is {arm: {run row_id: checkpoint}}, each arm named by its
+    run rows' arm.
+
+    Issue 7 ran arm ppo; issue 8 ran residual_w05 and residual_w4, seeds 0 and 1. The final
+    registers ppo's run and residual_w05's two, not residual_w4's, so final_arms holds exactly
+    ppo and residual_w05. A final-result holding those two arms and the baselines is accepted.
+    """
+    import greenleaf_control.ledger as ledger
+
+    path = tmp_path / "ledger.jsonl"
+    reg7 = _register(ledger, path, issue=7, arms=("ppo",))
+    ppo = _run(ledger, path, reg7, "ppo", 0)[0]["row_id"]
+    ledger.record_result(
+        registered=reg7["row_id"], per_arm=_per_arm(["ppo"]), selected={ppo: "final"}, path=path
+    )
+    arms8 = ("residual_w05", "residual_w4")
+    reg8 = _register(ledger, path, issue=8, arms=arms8, seeds=(0, 1))
+    run = {(a, s): _run(ledger, path, reg8, a, s)[0]["row_id"] for a in arms8 for s in (0, 1)}
+    w05 = {run["residual_w05", 0]: "1750000", run["residual_w05", 1]: "final"}
+    w4 = {run["residual_w4", 0]: "final", run["residual_w4", 1]: "500000"}
+    ledger.record_result(
+        registered=reg8["row_id"], per_arm=_per_arm(arms8), selected={**w05, **w4}, path=path
+    )
+    freg = _final_register(ledger, path, {ppo: "final", **w05})
+
+    arms = ledger.final_arms(freg, ledger.rows(path=path))
+
+    assert arms == {"ppo": {ppo: "final"}, "residual_w05": w05}
+    fres = ledger.final_result(
+        final_registered=freg["row_id"], per_split=_per_split(arms), path=path
+    )
+    assert ledger.rows(kind="final-result", path=path) == [fres]
+
+
+# A per_split fault, laid into the last test split so a check of the first split alone misses it,
+# and the names the refusal must give.
+PER_SPLIT_FAULTS = [
+    pytest.param("a fourth split", ["validation"], id="a fourth split"),
+    pytest.param("a missing arm", ["residual_w05"], id="a missing arm"),
+    # a FINAL_BASELINE, but not one this final registered
+    pytest.param("an extra arm", ["zero_controls"], id="an extra arm"),
+    pytest.param("scored drops a run", ["scored", "residual_w05"], id="scored drops a run"),
+    pytest.param("scored adds a run", ["scored", "residual_w05"], id="scored adds a run"),
+    pytest.param("scored names 250000", ["scored", "residual_w05"], id="scored names 250000"),
+    pytest.param("a baseline scored", ["scored", "rb_tuned"], id="a baseline's scored not {}"),
+    pytest.param("no prob_improvement", ["prob_improvement"], id="no prob_improvement"),
+]
+
+
+@pytest.mark.parametrize(("fault", "named"), PER_SPLIT_FAULTS)
+def test_final_result_refuses_a_per_split_that_breaks_the_registration(tmp_path, fault, named):
+    """per_split is exactly the three test splits; each holds exactly the registered arms plus the
+    baselines; each entry has exactly FINAL_ARM_KEYS; and scored is the arm's registered
+    checkpoints, {} for a baseline (registered vs scored).
+
+    residual_w05 is registered at seed 0's "1750000" and seed 1's "final". Each fault raises
+    ValueError naming its cause, the file byte-identical; the faithful per_split is then accepted.
+    """
+    import greenleaf_control.ledger as ledger
+
+    path = tmp_path / "ledger.jsonl"
+    freg, registered = _two_seeds_registered(ledger, path)
+    run0, run1 = registered
+    per_split = _per_split({"residual_w05": registered})
+    broken = copy.deepcopy(per_split)
+    last = broken["abbotsford_2012"]
+    w05 = last["residual_w05"]
+    {
+        "a fourth split": lambda: broken.update(validation=copy.deepcopy(last)),
+        "a missing arm": lambda: last.pop("residual_w05"),
+        "an extra arm": lambda: last.update(zero_controls=copy.deepcopy(last["rb_default"])),
+        "scored drops a run": lambda: w05.update(scored={run0: "1750000"}),
+        "scored adds a run": lambda: w05.update(scored={**registered, "run-0badc0de": "final"}),
+        "scored names 250000": lambda: w05.update(scored={run0: "250000", run1: "final"}),
+        "a baseline scored": lambda: last["rb_tuned"].update(scored={run1: "final"}),
+        "no prob_improvement": lambda: last["rb_default"].pop("prob_improvement"),
+    }[fault]()
+    before = path.read_bytes()
+
+    with pytest.raises(ValueError) as excinfo:
+        ledger.final_result(final_registered=freg["row_id"], per_split=broken, path=path)
+    for name in named:
+        assert name in str(excinfo.value), str(excinfo.value)
+    assert path.read_bytes() == before
+
+    fres = ledger.final_result(final_registered=freg["row_id"], per_split=per_split, path=path)
+    assert ledger.rows(kind="final-result", path=path) == [fres]
+
+
+# A prob_improvement fault, laid into the last test split only: the arm and the value it is given.
+PROB_IMPROVEMENT_FAULTS = [
+    pytest.param("rb_tuned", 0.5, id="rb_tuned with a number"),
+    pytest.param("residual_w05", None, id="a learning arm with null"),
+    pytest.param("rb_default", None, id="another baseline with null"),
+]
+
+
+@pytest.mark.parametrize(("arm", "value"), PROB_IMPROVEMENT_FAULTS)
+def test_final_result_refuses_prob_improvement_unless_null_exactly_for_rb_tuned(
+    tmp_path, arm, value
+):
+    """prob_improvement is P(arm > rb_tuned) on the primary: null for rb_tuned itself, a number for
+    every other arm, learning or baseline.
+
+    In abbotsford_2012 alone, rb_tuned given 0.5, or residual_w05 or rb_default given null, raises
+    ValueError naming prob_improvement and that arm, the file byte-identical; the faithful
+    per_split is then accepted.
+    """
+    import greenleaf_control.ledger as ledger
+
+    path = tmp_path / "ledger.jsonl"
+    freg, registered = _two_seeds_registered(ledger, path)
+    per_split = _per_split({"residual_w05": registered})
+    broken = copy.deepcopy(per_split)
+    broken["abbotsford_2012"][arm]["prob_improvement"] = value
+    before = path.read_bytes()
+
+    with pytest.raises(ValueError, match="prob_improvement") as excinfo:
+        ledger.final_result(final_registered=freg["row_id"], per_split=broken, path=path)
+    assert arm in str(excinfo.value), str(excinfo.value)
+    assert path.read_bytes() == before
+
+    fres = ledger.final_result(final_registered=freg["row_id"], per_split=per_split, path=path)
+    assert ledger.rows(kind="final-result", path=path) == [fres]
+
+
+def test_final_names_are_pinned_to_scenarios_and_envs():
+    """The ledger writes these out to stay stdlib-only, so they are pinned here: TEST_SPLITS is
+    scenarios.TEST's keys in order, FINAL_BASELINES is envs.BASELINES, and FINAL_ARM_KEYS is the
+    contract's per-split arm entry. This module's SPLITS copy is pinned too."""
+    import greenleaf_control.ledger as ledger
+    from greenleaf_control import envs, scenarios
+
+    assert ledger.TEST_SPLITS == tuple(scenarios.TEST)
+    assert ledger.FINAL_BASELINES == envs.BASELINES
+    assert ledger.FINAL_ARM_KEYS == {
+        "iqm",
+        "ci_low",
+        "ci_high",
+        "guards",
+        "invalid_episodes",
+        "prob_improvement",
+        "scored",
+    }
+    assert tuple(scenarios.TEST) == SPLITS
 
 
 def test_register_dry_returns_the_row_and_writes_nothing(tmp_path):
@@ -1206,20 +1564,23 @@ def test_cli_third_register_needs_the_owner_ok_flag(tmp_path, capsys):
 
 def test_cli_final_register_needs_approved_by(tmp_path, capsys):
     """final-register without --approved-by reaches the ledger's own refusal (ValueError naming
-    approved_by, no file); with --approved-by Aarmen it prints the new row's id."""
+    approved_by, the file byte-identical); with --approved-by Aarmen it prints the new row's id.
+    It registers issue 7's validation-selected checkpoint."""
     import greenleaf_control.ledger as ledger
 
     path = tmp_path / "ledger.jsonl"
+    checkpoints = _experiment(ledger, path)["result"]["selected"]
     argv = [
         "final-register",
         *("--issue", "9"),
-        *("--checkpoints", json.dumps(CHECKPOINTS)),
+        *("--checkpoints", json.dumps(checkpoints)),
         *("--baselines", "rb_default", "rb_tuned"),
     ]
+    before = path.read_bytes()
 
     with pytest.raises(ValueError, match="approved_by"):
         ledger.main(argv, path=path)
-    assert not path.exists()
+    assert path.read_bytes() == before
 
     capsys.readouterr()
     assert ledger.main([*argv, "--approved-by", "Aarmen"], path=path) == 0
@@ -1227,10 +1588,70 @@ def test_cli_final_register_needs_approved_by(tmp_path, capsys):
     [row] = ledger.rows(kind="final-registered", path=path)
     assert row["row_id"] == row_id
     assert row["issue"] == 9
-    assert row["checkpoints"] == CHECKPOINTS
+    assert row["checkpoints"] == checkpoints
     assert row["baselines"] == ["rb_default", "rb_tuned"]
     assert row["approved_by"] == "Aarmen"
     _utc(row["approved_at"])
+
+
+def test_cli_final_result_records_the_numbers_file(tmp_path, capsys):
+    """A valid chain records both rows through main. final-register prints its row id; then
+    final-result --final-registered <row> --numbers <file>, the file exactly {"per_split": ...},
+    prints the final-result's row id. That row links the final-registered row, takes its issue 9,
+    and its per_split equals the file's."""
+    import greenleaf_control.ledger as ledger
+
+    path = tmp_path / "ledger.jsonl"
+    checkpoints = _experiment(ledger, path)["result"]["selected"]
+    capsys.readouterr()
+    argv = [
+        "final-register",
+        *("--issue", "9"),
+        *("--checkpoints", json.dumps(checkpoints)),
+        *("--baselines", "rb_default", "rb_tuned"),
+        *("--approved-by", "Aarmen"),
+    ]
+    assert ledger.main(argv, path=path) == 0
+    freg_id = capsys.readouterr().out.strip()
+    numbers = tmp_path / "numbers.json"
+    numbers.write_text(json.dumps({"per_split": _per_split({"a": checkpoints})}))
+
+    argv = ["final-result", "--final-registered", freg_id, "--numbers", str(numbers)]
+    assert ledger.main(argv, path=path) == 0
+    fres_id = capsys.readouterr().out.strip()
+
+    [freg] = ledger.rows(kind="final-registered", path=path)
+    [fres] = ledger.rows(kind="final-result", path=path)
+    assert freg["row_id"] == freg_id
+    assert fres["row_id"] == fres_id
+    assert fres["final-registered"] == freg_id
+    assert fres["issue"] == 9
+    assert fres["per_split"] == json.loads(numbers.read_text())["per_split"]
+
+
+def test_cli_final_result_refuses_a_numbers_file_with_extra_keys(tmp_path, capsys):
+    """The numbers file is exactly {"per_split": ...}. One that also carries selected, as a
+    result's numbers file does, raises ValueError naming selected, the file byte-identical; the
+    exact file is then accepted and its row id printed."""
+    import greenleaf_control.ledger as ledger
+
+    path = tmp_path / "ledger.jsonl"
+    freg = _chain(ledger, path, final_result=False)["final-registered"]
+    per_split = _per_split({"a": freg["checkpoints"]})
+    numbers = tmp_path / "numbers.json"
+    numbers.write_text(json.dumps({"per_split": per_split, "selected": {}}))
+    argv = ["final-result", "--final-registered", freg["row_id"], "--numbers", str(numbers)]
+    before = path.read_bytes()
+
+    with pytest.raises(ValueError, match="selected"):
+        ledger.main(argv, path=path)
+    assert path.read_bytes() == before
+
+    numbers.write_text(json.dumps({"per_split": per_split}))
+    capsys.readouterr()
+    assert ledger.main(argv, path=path) == 0
+    [fres] = ledger.rows(kind="final-result", path=path)
+    assert capsys.readouterr().out.strip() == fres["row_id"]
 
 
 def test_default_path_is_the_real_ledger_and_no_test_wrote_it():
