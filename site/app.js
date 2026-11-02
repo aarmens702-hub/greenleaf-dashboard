@@ -1,11 +1,12 @@
-// GreenLeaf demo preview (issue #28): replays one simulated season from export_replay's JSON,
-// the grower's default rules against the tuned rules (E1). Plain canvas, no libraries.
+// GreenLeaf demo (issues #28, #49): replays one simulated VALIDATION season from export_replay's
+// JSON, the grower's tuned rules (E1) against the same rules with the AI co-pilot on top (E6's
+// residual_w05, seed 100, at its selected checkpoint). Plain canvas, no libraries.
 "use strict";
 
 const SEASONS = [45, 59, 75]; // VALIDATION start days, only used to name the files
 const SIDES = [
-  ["rb_default", "Grower's default rules"],
   ["rb_tuned", "Tuned rules (E1)"],
+  ["residual_w05_seed100", "Rules + co-pilot (E6)"],
 ];
 const CHARTS = [
   ["temp", "Air temperature"],
@@ -36,7 +37,7 @@ const COLOR = { ink: "#111311", muted: "#6A6F68", hair: "#D5D8D2" }; // style.cs
 
 const IDS = ["season", "play", "speed", "scrub", "day", "status", "panels", "score", "hint"];
 const ui = Object.fromEntries(IDS.map((id) => [id, document.getElementById(id)]));
-let runs = null; // [rb_default, rb_tuned] payloads for the selected season
+let runs = null; // [rb_tuned, co-pilot] for the selected season; null after a failed load
 let scale = {}; // one y-range per chart, shared by both sides so they compare at a glance
 let pos = 0; // the current hour, fractional while playing
 let playing = false;
@@ -70,6 +71,15 @@ async function load(day) {
     el.textContent = `${s.location} ${s.growth_year}`;
   }
   for (const el of document.querySelectorAll("[data-fill=days]")) el.textContent = s.season_length;
+  // The co-pilot's provenance: its file's meta.run, the ledger's rows, never typed here.
+  const { arm, seed, checkpoint, id, result, commit } = runs[1].meta.run;
+  const ckpt = /^\d+$/.test(checkpoint) // "<steps>" or "final"
+    ? `${Number(checkpoint).toLocaleString("en-US")}-step`
+    : checkpoint;
+  document.querySelector("[data-fill=run]").innerHTML =
+    `${SIDES[1][1]}: arm <code>${arm}</code>, seed ${seed} (the experiment's first seed, ` +
+    `not its best), at its ${ckpt} checkpoint; ledger rows <code>${id}</code> and ` +
+    `<code>${result}</code>; trained at commit <code>${commit.slice(0, 7)}</code>.`;
   scale = {};
   for (const [k] of CHARTS) {
     const all = runs.flatMap((r) => r.hourly[k]).concat(meta.bounds[k]);
@@ -115,11 +125,13 @@ function buildPanels(meta) {
 
 function fillScore(units) {
   const u = { ...units, fruit: "kg/m²" }; // export_replay has no unit for yield: net fruit growth
-  const head = SIDES.map(([, title]) => `<th scope="col">${title}</th>`).join("");
+  const titles = [...SIDES.map(([, title]) => title), "Co-pilot minus rules"];
+  const head = titles.map((title) => `<th scope="col">${title}</th>`).join("");
   const rows = SCORE.map(([k, name, unit]) => {
-    const cells = runs.map((r) => {
-      const v = r.totals[k];
-      return `<td>${unit === "hours" ? hours(v) : v.toFixed(2)}</td>`;
+    const d = runs[1].totals[k] - runs[0].totals[k];
+    const cells = [...runs.map((r) => r.totals[k]), d].map((v, i) => {
+      const sign = i === 2 && d > 0 ? "+" : "";
+      return `<td>${sign}${unit === "hours" ? hours(v) : v.toFixed(2)}</td>`;
     });
     return `<tr><th scope="row">${name} (${u[unit]})</th>${cells.join("")}</tr>`;
   });
@@ -153,7 +165,8 @@ function drawChart(canvas, run, k, h) {
   ctx.fillStyle = COLOR.hair;
   ctx.fillRect(0, y(bhi), w, y(blo) - y(bhi));
   ctx.fillStyle = COLOR.ink;
-  for (let i = 0; i <= h; i++) if (rose(viol, i)) ctx.fillRect(x(i), ht - 5, Math.max(1.5, w / n), 5);
+  const tw = Math.max(1.5, w / n); // a tick's width; the last hour's is drawn inside the canvas
+  for (let i = 0; i <= h; i++) if (rose(viol, i)) ctx.fillRect(Math.min(x(i), w - tw), ht - 5, tw, 5);
   ctx.beginPath();
   for (let i = 0; i <= h; i++) ctx.lineTo(x(i), y(series[i]));
   ctx.strokeStyle = COLOR.ink;
@@ -235,6 +248,13 @@ function tick(now) {
 
 function start(day) {
   load(day).catch((err) => {
+    runs = null; // no old season under the new one's name
+    ui.panels.innerHTML = "";
+    ui.score.hidden = true;
+    ui.score.innerHTML = "";
+    ui.play.disabled = true;
+    ui.scrub.disabled = true;
+    ui.day.textContent = "";
     ui.status.hidden = false;
     ui.status.textContent =
       `Could not load the season (${err.message}). ` +
