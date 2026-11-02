@@ -32,7 +32,7 @@ const SCORE = [
   ["viol_hours_rh", "Hours outside the humidity band", "hours"],
   ["yield_kg_m2", "Fruit growth", "fruit"],
 ];
-const COLOR = { leaf: "#2f6b4f", band: "#d5e7da", tomato: "#c23f29" };
+const COLOR = { ink: "#111311", muted: "#6A6F68", hair: "#D5D8D2" }; // style.css's --ink, --muted, --hair
 
 const IDS = ["season", "play", "speed", "scrub", "day", "status", "panels", "score", "hint"];
 const ui = Object.fromEntries(IDS.map((id) => [id, document.getElementById(id)]));
@@ -90,6 +90,10 @@ async function load(day) {
 function buildPanels(meta) {
   const units = meta.units;
   const viols = VIOLS.map(([k, name]) => `<span>${name}<strong data-k="${k}"></strong></span>`);
+  const grid =
+    `<figure class="dots"><canvas data-g role="img" aria-label="hours outside the safe ranges, day by day">` +
+    `</canvas><figcaption class="viols">Hours outside the safe band (${units.hours})${viols.join("")}` +
+    "</figcaption></figure>";
   const charts = CHARTS.map(
     ([k, name]) =>
       `<figure><figcaption><span>${name} (${units[k]}) <small>safe band ${meta.bounds[k].join(" to ")}` +
@@ -102,13 +106,10 @@ function buildPanels(meta) {
       `<strong data-k="${k}"></strong></div>`,
   );
   ui.panels.innerHTML = SIDES.map(
-    ([, title]) => `<section class="panel"><h2>${title}</h2>
-      <div class="counters">
-        <div class="stat">Profit so far (${units.profit})<strong class="big" data-k="profit"></strong></div>
-        <div class="stat">Hours outside the safe band (${units.hours})<div class="viols">${viols.join("")}</div></div>
-      </div>
-      ${charts.join("")}
-      <h3>Equipment this hour (0 to 100%)</h3>${acts.join("")}</section>`,
+    ([, title]) => `<section class="panel"><h3>${title}</h3>
+      <p class="stat">Profit so far (${units.profit})<strong data-k="profit"></strong></p>
+      ${grid}${charts.join("")}
+      <h4>Equipment this hour (0 to 100%)</h4>${acts.join("")}</section>`,
   ).join("");
 }
 
@@ -125,7 +126,8 @@ function fillScore(units) {
   ui.score.innerHTML = `<thead><tr><th></th>${head}</tr></thead><tbody>${rows.join("")}</tbody>`;
 }
 
-function drawChart(canvas, run, k, h) {
+// Size the canvas's backing store to its CSS box at the screen's pixel ratio, and clear it.
+function fit(canvas) {
   const dpr = window.devicePixelRatio || 1;
   const w = canvas.clientWidth;
   const ht = canvas.clientHeight;
@@ -136,6 +138,11 @@ function drawChart(canvas, run, k, h) {
   const ctx = canvas.getContext("2d");
   ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
   ctx.clearRect(0, 0, w, ht);
+  return [ctx, w, ht];
+}
+
+function drawChart(canvas, run, k, h) {
+  const [ctx, w, ht] = fit(canvas);
   const [lo, hi] = scale[k];
   const [blo, bhi] = run.meta.bounds[k];
   const series = run.hourly[k];
@@ -143,19 +150,40 @@ function drawChart(canvas, run, k, h) {
   const n = series.length;
   const x = (i) => (i / (n - 1)) * w;
   const y = (v) => 2 + (1 - (v - lo) / (hi - lo)) * (ht - 10);
-  ctx.fillStyle = COLOR.band;
+  ctx.fillStyle = COLOR.hair;
   ctx.fillRect(0, y(bhi), w, y(blo) - y(bhi));
-  ctx.fillStyle = COLOR.tomato;
+  ctx.fillStyle = COLOR.ink;
   for (let i = 0; i <= h; i++) if (rose(viol, i)) ctx.fillRect(x(i), ht - 5, Math.max(1.5, w / n), 5);
   ctx.beginPath();
   for (let i = 0; i <= h; i++) ctx.lineTo(x(i), y(series[i]));
-  ctx.strokeStyle = COLOR.leaf;
+  ctx.strokeStyle = COLOR.ink;
   ctx.lineWidth = 1.25;
   ctx.stroke();
   ctx.beginPath();
   ctx.arc(x(h), y(series[h]), 3, 0, 2 * Math.PI);
-  ctx.fillStyle = COLOR.leaf;
+  ctx.fillStyle = COLOR.ink;
   ctx.fill();
+}
+
+// One square per hour up to the play head: a column per day, hour 0 at the top. Black if the
+// temperature left its band in any part of that hour, grey if humidity did, hairline otherwise.
+function drawGrid(canvas, run, h) {
+  const [ctx, w, ht] = fit(canvas);
+  const { t_hour: t, viol_temp: temp, viol_rh: rh } = run.hourly;
+  const cw = w / run.meta.scenario.season_length;
+  const ch = ht / 24;
+  const s = 0.75 * Math.min(cw, ch);
+  const dots = { ink: new Path2D(), muted: new Path2D(), hair: new Path2D() };
+  for (let i = 0; i <= h; i++) {
+    const x = (Math.floor(t[i] / 24) + 0.5) * cw;
+    const y = ((t[i] % 24) + 0.5) * ch;
+    const p = dots[rose(temp, i) ? "ink" : rose(rh, i) ? "muted" : "hair"];
+    p.rect(x - s / 2, y - s / 2, s, s);
+  }
+  for (const [c, p] of Object.entries(dots)) {
+    ctx.fillStyle = COLOR[c];
+    ctx.fill(p);
+  }
 }
 
 function drawPanel(el, run, h) {
@@ -167,10 +195,10 @@ function drawPanel(el, run, h) {
     else if (k.startsWith("viol_")) s.textContent = hours(v);
     else if (k === "profit") s.textContent = v.toFixed(2);
     else s.textContent = v.toFixed(k === "co2" ? 0 : 1); // climate: ppm whole, °C and % to 0.1
-    s.classList.toggle("neg", k === "profit" && v < 0);
   }
   for (const b of el.querySelectorAll("[data-b]")) b.style.width = `${hourly[b.dataset.b][h] * 100}%`;
-  for (const c of el.querySelectorAll("canvas")) drawChart(c, run, c.dataset.c, h);
+  for (const c of el.querySelectorAll("canvas[data-c]")) drawChart(c, run, c.dataset.c, h);
+  drawGrid(el.querySelector("canvas[data-g]"), run, h);
 }
 
 function render() {

@@ -15,14 +15,19 @@ The conventions pinned here.
   control/results/validation/<controller>_validation.parquet for its season (E1's
   result-525a6e90, recorded with the CLIs). Those parquets are only read here, never written.
 - meta.dirty isn't checked: site/ is untracked when the CLI runs, so it is honestly true.
+- Issue #52 (D3b-2a, the Instrument restyle): one Google Fonts stylesheet becomes the page's only
+  remote load (Aarmen's design comment on #49), and index.html and app.js carry the Instrument
+  layout's hooks (nav.side, numbered section.sec blocks, drawGrid).
 
 Every check reads files inside its test body, so while site/ is missing each test FAILS on an
 assertion rather than ERRORs. Nothing here builds an env, reads weather or trains.
 """
 
 import json
+import re
 from html.parser import HTMLParser
 from pathlib import Path
+from urllib.parse import parse_qs, urlsplit
 
 import pandas as pd
 import pytest
@@ -41,6 +46,8 @@ MAX_FILE_BYTES = 250_000  # 250 KB, decimal
 MAX_SITE_BYTES = 1_000_000  # 1 MB, decimal
 TOLERANCE = 1e-9
 PAGE_FILES = ("index.html", "style.css", "app.js")
+FONTS_CSS2 = "https://fonts.googleapis.com/css2?"  # Google Fonts' css2 API (#52)
+FONT_FAMILIES = ("Geist Mono", "Schibsted Grotesk", "Source Serif 4")  # decoded family= names
 HOURLY_KEYS = [
     "t_hour",
     "co2",
@@ -116,6 +123,45 @@ class _Page(HTMLParser):
     def handle_data(self, data):
         if self._in_title:
             self.title += data
+
+
+class _Layout(HTMLParser):
+    """index.html's Instrument hooks: whether it has a <nav class="side">, and for each
+    <section class="sec">, in page order, the stripped text of every <span class="num"> inside it
+    (a span belongs to its innermost enclosing section.sec)."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.nav_side = False
+        self.sec_nums: list[list[str]] = []
+        self._sections: list[int | None] = []  # open <section>s: index into sec_nums, or None
+        self._num_owner: int | None = None  # the open span.num's section.sec, if any
+        self._num_text = ""
+
+    def handle_starttag(self, tag, attrs):
+        classes = (dict(attrs).get("class") or "").split()
+        if tag == "nav" and "side" in classes:
+            self.nav_side = True
+        if tag == "section":
+            if "sec" in classes:
+                self.sec_nums.append([])
+                self._sections.append(len(self.sec_nums) - 1)
+            else:
+                self._sections.append(None)
+        if tag == "span" and "num" in classes:
+            self._num_owner = next((i for i in reversed(self._sections) if i is not None), None)
+            self._num_text = ""
+
+    def handle_endtag(self, tag):
+        if tag == "section" and self._sections:
+            self._sections.pop()
+        if tag == "span" and self._num_owner is not None:
+            self.sec_nums[self._num_owner].append(self._num_text.strip())
+            self._num_owner = None
+
+    def handle_data(self, data):
+        if self._num_owner is not None:
+            self._num_text += data
 
 
 def _is_remote(url: str) -> bool:
@@ -200,14 +246,21 @@ def test_site_totals_are_e1s_recorded_numbers(controller, scenario, name):
 # --- site/index.html (Done when) ----------------------------------------------------------------
 
 
-def test_site_index_loads_only_local_scripts_and_stylesheets_and_says_simulated():
-    """Done when: site/index.html, parsed with html.parser,
-    - loads at least one script (<script src>) and one stylesheet (<link rel="stylesheet">), so
-      the check below isn't passed by an empty page;
-    - has no <script src> or <link href> served by another host: none contains "://" (http://,
-      https://) or starts with "//" (protocol-relative). An <a href> to the repo is fine;
-    - each script and stylesheet is a relative path to a file inside site/ (a leading "/" or a
-      missing file fails), ignoring any ?query or #fragment;
+def test_site_index_loads_local_files_plus_one_google_fonts_stylesheet_and_says_simulated():
+    """Done when (#28, changed by #52 step 4): site/index.html, parsed with html.parser,
+    - loads at least one script (<script src>) and one local stylesheet (<link rel="stylesheet">),
+      so the checks below aren't passed by an empty page;
+    - loads exactly one thing from another host (a <script src> or <link href> that contains "://"
+      or starts with "//"), and it is a <link rel="stylesheet"> to Google Fonts' css2 API: its
+      href starts "https://fonts.googleapis.com/css2?", its family= values name exactly Geist
+      Mono, Schibsted Grotesk and Source Serif 4 (Geist+Mono, Schibsted+Grotesk, Source+Serif+4
+      in the URL, any :axis@weights after a name), and it has display=swap. No remote script and
+      no other remote <link> (a preconnect included). An <a href> to the repo is fine.
+      A requirement change, not a loosened check: Aarmen's Instrument design comment on #49 sets
+      these three Google Fonts, and #52 (out of scope: self-hosting fonts) loads them from Google.
+      Until #52 any remote <link href> failed here;
+    - every script and every other stylesheet is a relative path to a file inside site/ (a
+      leading "/" or a missing file fails), ignoring any ?query or #fragment;
     - its <title> contains "simulated" (any case): a simulator number is never presented as
       real-world evidence (AGENTS.md)."""
     index = SITE / "index.html"
@@ -217,16 +270,61 @@ def test_site_index_loads_only_local_scripts_and_stylesheets_and_says_simulated(
     page.close()
 
     stylesheets = [href for rel, href in page.links if "stylesheet" in rel.split()]
+    local_sheets = [href for href in stylesheets if not _is_remote(href)]
     assert page.scripts, "index.html loads no script"
-    assert stylesheets, "index.html loads no stylesheet"
+    assert local_sheets, "index.html loads no local stylesheet"
     remote = [u for u in (*page.scripts, *(href for _, href in page.links)) if _is_remote(u)]
-    assert not remote, f"index.html loads from another host: {remote}"
+    fonts = [href for href in stylesheets if _is_remote(href)]
+    assert len(fonts) == 1 and remote == fonts, (
+        f"index.html must load exactly one thing from another host, the Google Fonts stylesheet; "
+        f"it loads {remote} (remote stylesheets: {fonts})"
+    )
+    href = fonts[0].strip()
+    assert href.startswith(FONTS_CSS2), f"{href} is not Google Fonts' css2 API"
+    query = parse_qs(urlsplit(href).query)
+    families = sorted(v.split(":")[0] for v in query.get("family", []))
+    assert families == sorted(FONT_FAMILIES), f"{href} names the families {families}"
+    assert query.get("display") == ["swap"], f"{href} lacks display=swap"
     site = SITE.resolve()
-    for url in (*page.scripts, *stylesheets):
+    for url in (*page.scripts, *local_sheets):
         target = (SITE / url.strip().split("#")[0].split("?")[0]).resolve()
         assert target.is_relative_to(site), f"{url} is not a relative path inside site/"
         assert target.is_file(), f"{url} is not a file in site/"
     assert "simulated" in page.title.lower(), f"<title> is {page.title!r}"
+
+
+def test_site_index_has_the_instrument_layout_hooks():
+    """Done when (#52 step 1, the Instrument layout from Aarmen's design comment on #49):
+    site/index.html, parsed with html.parser, has
+    - a <nav class="side"> (the sidebar nav);
+    - at least three <section class="sec"> blocks (Replay, Scoreboard, Source);
+    - in each, a <span class="num"> gutter number; the first one in each section, in page order,
+      reads 01, 02, 03, ... (two digits, consecutive from 01).
+    The grid's <canvas data-g> isn't required here: app.js builds it."""
+    index = SITE / "index.html"
+    assert index.is_file(), f"{index} is missing"
+    layout = _Layout()
+    layout.feed(index.read_text(encoding="utf-8"))
+    layout.close()
+
+    assert layout.nav_side, 'index.html has no <nav class="side">'
+    n = len(layout.sec_nums)
+    assert n >= 3, f'index.html has {n} <section class="sec">, not at least 3'
+    bare = [i + 1 for i, nums in enumerate(layout.sec_nums) if not nums]
+    assert not bare, f'section.sec number(s) {bare}, in page order, hold no <span class="num">'
+    gutter = [nums[0] for nums in layout.sec_nums]
+    assert gutter == [f"{i:02d}" for i in range(1, n + 1)], f"the gutter numbers are {gutter}"
+
+
+def test_site_app_js_defines_draw_grid():
+    """Done when (#52 step 3): site/app.js defines a function named drawGrid, the hour-by-hour dot
+    grid (`function drawGrid(` or `const|let|var drawGrid =`). A plain text check: the grid's
+    drawing is checked by eye in the browser (the issue's QA item)."""
+    app = SITE / "app.js"
+    assert app.is_file(), f"{app} is missing"
+    text = app.read_text(encoding="utf-8")
+    defined = re.search(r"\bfunction\s+drawGrid\s*\(|\b(?:const|let|var)\s+drawGrid\s*=", text)
+    assert defined, "site/app.js defines no drawGrid function"
 
 
 # --- site/: the whole page (Done when) ----------------------------------------------------------
