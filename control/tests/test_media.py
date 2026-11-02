@@ -22,10 +22,43 @@ media plays the baselines on PAPER and draws them:
   (the same 6-row hourly array), its result's numbers, and each day's share of steps outside each
   safe range (a 3 x days array, rows in metrics.CONSTRAINTS order). One text says what profit
   counts: fruit value minus heating, power and CO₂.
-- footer(source, stamp) -> str, and main(argv=None) -> int, the CLI. main refuses an invalid
-  season (a solver failure, or the wrong length) before writing anything, and titles the replay
-  as simulated, with the season's day count from the run and PAPER's location and year; its
-  subtitle names the controller and the simulator.
+- footer(source, stamp, *, place=PAPER_NAME, note="A simulator run, not a registered result")
+  -> str, and main(argv=None) -> int, the CLI. main refuses an invalid season (a solver failure,
+  or the wrong length) before writing anything, and titles the replay as simulated, with the
+  season's day count from the run and PAPER's location and year; its subtitle names the
+  controller and the simulator.
+
+The trade-off still (issue #50) draws recorded VALIDATION results, every number read from the
+ledger when the card is drawn:
+- TRADEOFF, (result_id, arm, status) entries (row ids and statuses, never numbers), and
+  E1_RESULT, rb_tuned's E1 result row; both read at call time, so the tests point them at
+  synthetic rows.
+- tradeoff_points(path=ledger.LEDGER) -> list[dict], one per TRADEOFF entry, in order: arm,
+  status, result, decision (the one decision row on that result), registered and seeds (the
+  registered row's); profit and each viol_hours_<c> as (iqm, ci_low, ci_high) from per_arm[arm]
+  and its guards; yield_kg_m2, the guard's iqm. ValueError naming the row for a row that is
+  missing or isn't a result, no decision row (or two), scenarios other than ["validation"], an
+  arm missing from per_arm, a null iqm, crashed or invalid_episodes > 0, or a missing guard.
+- rb_tuned_reference(n_seeds, path=ledger.LEDGER, parquet=selection.RESULTS /
+  "rb_tuned_validation.parquet") -> dict: first the parquet checked against E1's row (each
+  viol_hours_<c>'s per-season mean equal to its guard's iqm exactly, paper_return's to the iqm
+  within rel 1e-9; ValueError otherwise), then profit_eur_m2, each viol_hours_<c> and
+  yield_kg_m2 as stats.iqm_ci(np.tile(seasons, (n_seeds, 1)))[0], n_seeds, and sha256 (the
+  parquet file's).
+- tradeoff_card(points, references, out, *, footer) -> Figure, saved at exactly 1200 x 627 px:
+  three panels sharing the profit axis, x the hours outside each safe range in metrics.CONSTRAINTS
+  order. Each point is an errorbar at (its hours' iqm, its profit iqm) with bars to both CIs; the
+  dropped arm hollow and MUTED, residual_w05 LEAF, the other adopted arms filled. rb_tuned is a
+  distinct hollow marker with no bars at the largest-n reference. A legend outside the panels has
+  one line per point naming its result id; above the panels, the title (VALIDATION, Amsterdam
+  2010), the CI line and a note with rb_tuned's profit at each smaller seed count.
+- main also writes tradeoff.png and a media.json entry for it (split "validation", scenario
+  VALIDATION, ledger [row ids], metrics {points, references}); the other entries are unchanged.
+
+The card's tests read synthetic rows that ledger.register, run_start, run_end, record_result and
+decide write to a tmp ledger, and a tmp parquet. No test reads the committed ledger or results: a
+tripwire on ledger.rows and pandas.read_parquet fails first, and every test that runs main binds
+its card to the tmp files.
 
 The tests read what is drawn from the returned Figure (its lines, patches, images and texts),
 never its pixels. Numbers on the figures are printed with 2 decimals, f"{v:.2f}" (hours are
@@ -47,6 +80,7 @@ pandas.read_csv that fails before any *2012.csv is read.
 
 import ast
 import functools
+import hashlib
 import inspect
 import json
 import re
@@ -62,6 +96,8 @@ import pytest
 from matplotlib.animation import FFMpegWriter
 from matplotlib.backends.backend_agg import FigureCanvasAgg
 from matplotlib.collections import QuadMesh
+from matplotlib.colors import to_hex, to_rgba
+from matplotlib.container import ErrorbarContainer
 from matplotlib.figure import Figure
 from matplotlib.image import AxesImage
 from matplotlib.lines import Line2D
@@ -70,7 +106,17 @@ from matplotlib.text import Text
 from PIL import Image
 
 import greenleaf_control
-from greenleaf_control import envs, evaluate, manifest, metrics, rule_based, scenarios
+from greenleaf_control import (
+    envs,
+    evaluate,
+    ledger,
+    manifest,
+    metrics,
+    rule_based,
+    scenarios,
+    selection,
+    stats,
+)
 
 # greenleaf_control.media is imported inside each test body, so while it is missing each test
 # FAILS rather than ERRORs at collection.
@@ -90,8 +136,151 @@ PLACE = f"{PAPER['location']} {PAPER['growth_year']}"  # "Amsterdam 2010"
 RB_SUBTITLE = ("upstream's default rule controller", "GreenLight-Gym")  # what main's names
 SHA = "0123456789abcdef0123456789abcdef01234567"  # a fixed commit for the footer tests
 GOLDEN = json.loads((Path(__file__).parent / "golden" / "values.json").read_text())["ours"]
-MEDIA_FILES = ["baselines.png", "media.json", "season_replay.gif", "season_replay.mp4"]
+MEDIA_FILES = [
+    "baselines.png",
+    "media.json",
+    "season_replay.gif",
+    "season_replay.mp4",
+    "tradeoff.png",
+]
 ENTRY_KEYS = {"file", "source", "scenario", "commit", "dirty", "gl_gym", "made_at", "metrics"}
+
+# --- The trade-off still (issue #50) ---
+VALIDATION = scenarios.VALIDATION
+VAL_PLACE = f"{VALIDATION[0]['location']} {VALIDATION[0]['growth_year']}"  # "Amsterdam 2010"
+# The card's footer place and note, as the issue words them.
+FOOTER_PLACE = f"VALIDATION, {VAL_PLACE} days " + ", ".join(
+    str(s["start_day"]) for s in VALIDATION
+)  # "VALIDATION, Amsterdam 2010 days 45, 59, 75"
+CARD_NOTE = "Recorded VALIDATION results; the 2012 test weather is still sealed"
+PAPER_NOTE = "A simulator run, not a registered result"  # footer's default note, today's words
+CI_LINE = "IQM over seeds × seasons, 95% stratified bootstrap CI"
+CARD_FOOTER = "source: synthetic rows in a tmp ledger, commit 0123456"  # what the card tests pass
+PARQUET = "rb_tuned_validation.parquet"
+NEW_NAMES = ("TRADEOFF", "E1_RESULT", "tradeoff_points", "rb_tuned_reference", "tradeoff_card")
+# The issue's table, (result_id, arm, status); E4 has one decision row, residual_w4 dropped in it.
+ISSUE_TRADEOFF = [
+    ("result-06364fa1", "ppo", "adopted"),
+    ("result-d1f0b8e7", "residual_w05", "adopted"),
+    ("result-2a890455", "residual_w1", "adopted"),
+    ("result-2a890455", "residual_w4", "dropped"),
+]
+HOUR_KEYS = [f"viol_hours_{c}" for c in metrics.CONSTRAINTS]
+GUARDS = [*HOUR_KEYS, "paper_return", "yield_kg_m2", "solver_failures"]  # E3, E4 and E6's
+DIAGNOSTICS = {"min_approx_kl": 0.002, "final_entropy": -1.5, "final_explained_variance": 0.8}
+
+# Synthetic ledger numbers, (iqm, ci_low, ci_high): profit [€/m²], hours [h] (multiples of
+# 0.25 h), fruit growth [kg/m²]. Every point sits apart from the others in every panel, prints
+# apart at 2 decimals, and has two or more nonzero hours whose total is printed nowhere.
+E3 = {
+    "ppo": {
+        "profit": (2.4, 2.33, 2.46),
+        "co2": (0.5, 0.25, 1.0),
+        "temp": (153.25, 140.0, 166.5),
+        "rh": (135.0, 120.5, 150.0),
+        "yield": (7.13, 6.9, 7.4),
+    }
+}
+E4 = {
+    # Not on the card: E6's residual_w05 is. Its numbers differ, so reading the wrong row shows.
+    "residual_w05": {
+        "profit": (0.63, 0.48, 0.74),
+        "co2": (2.25, 1.5, 3.0),
+        "temp": (60.0, 52.5, 68.25),
+        "rh": (220.0, 210.0, 231.5),
+        "yield": (9.1, 8.8, 9.4),
+    },
+    "residual_w1": {
+        "profit": (0.4, 0.32, 0.45),
+        "co2": (3.0, 2.25, 4.0),
+        "temp": (70.25, 61.0, 80.5),
+        "rh": (230.5, 221.0, 240.25),
+        "yield": (8.81, 8.6, 9.0),
+    },
+    "residual_w4": {
+        "profit": (-0.37, -0.48, -0.26),
+        "co2": (6.5, 5.0, 8.25),
+        "temp": (110.0, 99.5, 121.75),
+        "rh": (180.25, 170.0, 191.0),
+        "yield": (6.42, 6.2, 6.7),
+    },
+}
+E6 = {
+    "residual_w05": {
+        "profit": (0.77, 0.7, 0.84),
+        "co2": (1.75, 1.0, 2.5),
+        "temp": (48.5, 42.0, 55.75),
+        "rh": (214.0, 205.25, 223.5),
+        "yield": (9.63, 9.4, 9.9),
+    }
+}
+# experiment -> (its arms' numbers, its registered seeds): 5 seeds for E3 and E4, 10 for E6.
+EXPERIMENTS = {
+    "E3": (E3, list(range(5))),
+    "E4": (E4, list(range(5))),
+    "E6": (E6, list(range(100, 110))),
+}
+# The synthetic TRADEOFF, in the issue's order: (experiment, arm, status).
+TRADEOFF_SPEC = (
+    ("E3", "ppo", "adopted"),
+    ("E6", "residual_w05", "adopted"),
+    ("E4", "residual_w1", "adopted"),
+    ("E4", "residual_w4", "dropped"),
+)
+DROPPED = "residual_w4"
+
+# rb_tuned's three VALIDATION seasons (days 45, 59, 75), as evaluate's parquet holds them.
+RB_SEASONS = {
+    "profit_eur_m2": (-3.0, 0.6, 1.2),
+    "viol_hours_co2": (0.0, 1.0, 5.0),
+    "viol_hours_temp": (120.0, 90.0, 75.25),
+    "viol_hours_rh": (300.0, 250.5, 222.75),
+    "yield_kg_m2": (8.0, 9.0, 11.0),
+    "paper_return": (3000.0, 3600.0, 4000.0),
+}
+# rb_tuned tiled to n seeds is n x 3 scores; the IQM drops int(0.25 x 3n) from each end:
+# 7 of 30 for n = 10, leaving 3 x low + 10 x middle + 3 x high over 16; 3 of 15 for n = 5,
+# leaving 2 x low + 5 x middle + 2 x high over 9.
+REF = {
+    10: {
+        "profit_eur_m2": 0.0375,  # (3 x -3.0 + 10 x 0.6 + 3 x 1.2) / 16 = 0.6 / 16 €/m²
+        "viol_hours_co2": 1.5625,  # (3 x 0 + 10 x 1.0 + 3 x 5.0) / 16 = 25 / 16 h
+        "viol_hours_temp": 92.859375,  # (3 x 75.25 + 10 x 90 + 3 x 120) / 16 = 1485.75 / 16 h
+        "viol_hours_rh": 254.578125,  # (3 x 222.75 + 10 x 250.5 + 3 x 300) / 16 = 4073.25 / 16 h
+        "yield_kg_m2": 9.1875,  # (3 x 8 + 10 x 9 + 3 x 11) / 16 = 147 / 16 kg/m²
+    },
+    5: {
+        "profit_eur_m2": -0.6 / 9,  # (2 x -3.0 + 5 x 0.6 + 2 x 1.2) / 9 = -0.0667 €/m²
+        "viol_hours_co2": 15 / 9,  # (2 x 0 + 5 x 1.0 + 2 x 5.0) / 9 = 1.6667 h
+        "viol_hours_temp": 840.5 / 9,  # (2 x 75.25 + 5 x 90 + 2 x 120) / 9 = 93.3889 h
+        "viol_hours_rh": 2298 / 9,  # (2 x 222.75 + 5 x 250.5 + 2 x 300) / 9 = 255.3333 h
+        "yield_kg_m2": 83 / 9,  # (2 x 8 + 5 x 9 + 2 x 11) / 9 = 9.2222 kg/m²
+    },
+}
+# Parquets that disagree with E1's row, which holds the per-season means of the seasons above.
+PARQUET_MISMATCHES = {
+    # One season 0.25 h (one 900 s step) more outside the temp band: the mean is 0.0833 h off.
+    "temp_hours_off_by_one_step": {**RB_SEASONS, "viol_hours_temp": (120.25, 90.0, 75.25)},
+    # Every season's paper_return 1e-6 too high: the mean is off by rel 1e-6 > 1e-9.
+    "paper_return_off_by_rel_1e-6": {
+        **RB_SEASONS,
+        "paper_return": tuple(v * (1 + 1e-6) for v in RB_SEASONS["paper_return"]),
+    },
+}
+# The rows tradeoff_points refuses; _refusal builds each.
+REFUSALS = (
+    "missing",
+    "not_a_result",
+    "undecided",
+    "two_decisions",
+    "not_validation",
+    "arm_absent",
+    "iqm_null",
+    "crashed",
+    "invalid_episodes",
+    "no_rh_guard",
+    "no_yield_guard",
+)
 
 
 @pytest.fixture(autouse=True)
@@ -109,10 +298,43 @@ def no_2012_reads(monkeypatch) -> None:
     monkeypatch.setattr(pd, "read_csv", read_csv)
 
 
+@pytest.fixture(autouse=True)
+def no_committed_reads(monkeypatch) -> None:
+    """Fail loudly if the test reads the committed ledger or results (AGENTS.md: a test touches
+    control/ledger/ and control/results/ only through tmp_path). ledger.rows and
+    pandas.read_parquet are the card's reads; the check runs before the real read, and every tmp
+    file goes through the real one."""
+    real_rows, real_read_parquet = ledger.rows, pd.read_parquet
+    committed = (ledger.LEDGER.parent.resolve(), selection.RESULTS.parent.resolve())
+
+    def check(path) -> None:
+        p = Path(path).resolve()
+        if any(p == d or d in p.parents for d in committed):
+            raise AssertionError(f"a committed ledger or result was read: {p}")
+
+    def rows(kind=None, issue=None, path=ledger.LEDGER):
+        check(path)
+        return real_rows(kind, issue, path)
+
+    def read_parquet(path, *args, **kwargs):
+        check(path)
+        return real_read_parquet(path, *args, **kwargs)
+
+    monkeypatch.setattr(ledger, "rows", rows)
+    monkeypatch.setattr(pd, "read_parquet", read_parquet)
+
+
 @pytest.fixture(scope="module")
 def media_dir(tmp_path_factory) -> Path:
     """A tmp dir the cached figures below are written into (makes no media call, so never ERRORs)."""
     return tmp_path_factory.mktemp("media")
+
+
+@pytest.fixture(scope="module")
+def sources(media_dir) -> dict:
+    """The synthetic ledger and parquet the card reads, built once with the ledger's own API
+    (makes no media call, so never ERRORs)."""
+    return _sources(media_dir / "sources")
 
 
 @functools.cache
@@ -278,6 +500,330 @@ def _imported_modules(path: Path) -> set[str]:
             names.add(base)
             names.update(f"{base}.{alias.name}" for alias in node.names)
     return names
+
+
+# --- The trade-off still's synthetic sources (issue #50) ---------------------------------------
+
+
+def _media_card():
+    """media, asserting the trade-off card's names exist first, so until they do a test FAILS on
+    this assertion rather than an AttributeError or a TypeError."""
+    import greenleaf_control.media as media
+
+    missing = [name for name in NEW_NAMES if not hasattr(media, name)]
+    assert not missing, f"media has no {', '.join(missing)} yet (issue #50)"
+    return media
+
+
+def _ci(t) -> dict:
+    return dict(zip(("iqm", "ci_low", "ci_high"), t, strict=True))
+
+
+def _numbers(arm: dict) -> dict:
+    """A learning arm's per_arm entry as selection writes it: profit the primary, then the guards
+    (crashed and spend_usd are the ledger's to add)."""
+    return {
+        **_ci(arm["profit"]),
+        "guards": {
+            **{f"viol_hours_{c}": _ci(arm[c]) for c in metrics.CONSTRAINTS},
+            "paper_return": _ci((3500.0, 3400.0, 3600.0)),
+            "yield_kg_m2": _ci(arm["yield"]),
+            "solver_failures": _ci((0.0, 0.0, 0.0)),
+        },
+        "invalid_episodes": 0,
+    }
+
+
+def _e1_numbers() -> dict:
+    """rb_tuned's E1 entry as selection writes it: iqm_ci of its 1 run x 3 VALIDATION seasons, a
+    3-score IQM being the plain mean (int(0.25 x 3) = 0 trimmed). paper_return
+    (3000 + 3600 + 4000) / 3 = 3533.33; hours co2 (0 + 1 + 5) / 3 = 2.0 h, temp
+    (120 + 90 + 75.25) / 3 = 95.08 h, rh (300 + 250.5 + 222.75) / 3 = 257.75 h. No fruit growth
+    guard, as E1 has none."""
+
+    def ci(key: str) -> dict:
+        return _ci(stats.iqm_ci(np.array([RB_SEASONS[key]])))
+
+    return {
+        **ci("paper_return"),
+        "guards": {key: ci(key) for key in HOUR_KEYS},
+        "invalid_episodes": 0,
+    }
+
+
+def _experiment(
+    path: Path,
+    *,
+    issue: int,
+    arms: dict,
+    seeds: list[int],
+    method: str = "ppo",
+    on: tuple = ("validation",),
+    primary: str = "profit_eur_m2",
+    guards: list[str] = GUARDS,
+    crashed: bool = False,
+    decided: bool = True,
+) -> dict:
+    """Register an experiment on path, start and end a run per arm x seed (the first seed's
+    crashed when crashed), record arms ({name: per_arm entry}) and, when decided, adopt it.
+    Returns its registered, result and decision row ids."""
+    reg = ledger.register(
+        issue=issue,
+        hypothesis="synthetic rows for the trade-off card's tests",
+        arms=[{"name": name, "method": method, "config": {}} for name in arms],
+        seeds=list(seeds),
+        timesteps=1000,
+        scenarios=list(on),
+        primary=primary,
+        guards=list(guards),
+        rule="synthetic",
+        budget={"cpu_hours": 0.0, "usd": 0.0, "backend": "local"},
+        path=path,
+    )
+    selected = {}
+    for name in arms:
+        for i, seed in enumerate(seeds):
+            run = ledger.run_start(
+                registered=reg["row_id"],
+                arm=name,
+                seed=seed,
+                run_dir=f"runs/{name}-{seed}",
+                path=path,
+            )
+            ledger.run_end(
+                run=run["row_id"],
+                status="crashed" if crashed and i == 0 else "finished",
+                wall_s=1.0,
+                timesteps=1000,
+                solver_failures=0,
+                cost_usd=None,
+                diagnostics=DIAGNOSTICS,
+                path=path,
+            )
+            selected[run["row_id"]] = "final"
+    res = ledger.record_result(registered=reg["row_id"], per_arm=arms, selected=selected, path=path)
+    ids = {"registered": reg["row_id"], "result": res["row_id"]}
+    if decided:
+        dec = ledger.decide(result=res["row_id"], decision="adopted", note="synthetic", path=path)
+        ids["decision"] = dec["row_id"]
+    return ids
+
+
+def _write_parquet(path: Path, seasons: dict) -> None:
+    """rb_tuned's VALIDATION parquet as evaluate's CLI writes it: one row per season, in order."""
+    rows = [
+        {
+            "controller": "rb_tuned",
+            "checkpoint": None,
+            "split": "validation",
+            **s,
+            "season_length": 60,
+            **{key: values[i] for key, values in seasons.items()},
+            "valid": True,
+            "solver_failures": 0,
+            "steps": 60 * N_DAY,
+        }
+        for i, s in enumerate(VALIDATION)
+    ]
+    pd.DataFrame(rows).to_parquet(path)
+
+
+@functools.cache
+def _sources(root: Path) -> dict:
+    """The synthetic ledger and parquet, built once: an E1-like rb_tuned row (1 seed, primary
+    paper_return, hour guards only), E3-like ppo (5 seeds), E4-like residual_w05, residual_w1 and
+    residual_w4 (5 seeds, one decision) and E6-like residual_w05 (10 seeds), each decided; and
+    rb_tuned's parquet of RB_SEASONS. tradeoff is TRADEOFF_SPEC with the rows' ids."""
+    root.mkdir(exist_ok=True)
+    path = root / "ledger.jsonl"
+    path.unlink(missing_ok=True)
+    rows = {
+        "E1": _experiment(
+            path,
+            issue=101,
+            arms={"rb_tuned": _e1_numbers()},
+            seeds=[0],
+            method="rb_tuned",
+            primary="paper_return",
+            guards=HOUR_KEYS,
+        )
+    }
+    for k, (name, (numbers, seeds)) in enumerate(EXPERIMENTS.items()):
+        arms = {arm: _numbers(n) for arm, n in numbers.items()}
+        rows[name] = _experiment(path, issue=102 + k, arms=arms, seeds=seeds)
+    parquet = root / PARQUET
+    _write_parquet(parquet, RB_SEASONS)
+    tradeoff = [(rows[exp]["result"], arm, status) for exp, arm, status in TRADEOFF_SPEC]
+    return {
+        "ledger": path,
+        "parquet": parquet,
+        "rows": rows,
+        "tradeoff": tradeoff,
+        "e1": rows["E1"]["result"],
+    }
+
+
+def _want_points(src: dict) -> list[dict]:
+    """tradeoff_points' answer on the synthetic ledger, in TRADEOFF order, written from the
+    numbers the rows were made with."""
+    want = []
+    for exp, arm, status in TRADEOFF_SPEC:
+        numbers, seeds = EXPERIMENTS[exp]
+        n, ids = numbers[arm], src["rows"][exp]
+        want.append(
+            {
+                "arm": arm,
+                "status": status,
+                "result": ids["result"],
+                "decision": ids["decision"],
+                "registered": ids["registered"],
+                "seeds": seeds,
+                "profit": n["profit"],
+                **{f"viol_hours_{c}": n[c] for c in metrics.CONSTRAINTS},
+                "yield_kg_m2": n["yield"][0],
+            }
+        )
+    return want
+
+
+def _tiled(key: str, n: int) -> float:
+    """stats.iqm_ci of rb_tuned's seasons tiled to n seeds: the IQM the reference draws."""
+    return stats.iqm_ci(np.tile(np.array(RB_SEASONS[key]), (n, 1)))[0]
+
+
+def _json(value):
+    """value as media.json holds it (tuples become lists)."""
+    return json.loads(json.dumps(value))
+
+
+def _card_reads(monkeypatch, media, src: dict, **over) -> None:
+    """main's card reads the synthetic rows, never the committed ones: TRADEOFF and E1_RESULT name
+    them, and tradeoff_points and rb_tuned_reference are bound to the tmp ledger and parquet
+    (their defaults bind the committed files at import). over replaces src's tradeoff, ledger or
+    parquet. Before #50 media has no card, so there is nothing to bind and main reads neither."""
+    src = {**src, **over}
+    monkeypatch.setattr(media, "TRADEOFF", src["tradeoff"], raising=False)
+    monkeypatch.setattr(media, "E1_RESULT", src["e1"], raising=False)
+    binds = {
+        "tradeoff_points": {"path": src["ledger"]},
+        "rb_tuned_reference": {"path": src["ledger"], "parquet": src["parquet"]},
+    }
+    for name, kwargs in binds.items():
+        real = getattr(media, name, None)
+        if real is not None:
+            monkeypatch.setattr(media, name, functools.partial(real, **kwargs))
+
+
+def _refusal(case: str, src: dict, path: Path) -> tuple[list, set[str]]:
+    """src's ledger copied to path with case's flaw added. Returns the TRADEOFF to draw (src's
+    entries, plus the flawed one last) and the row ids the error may name."""
+    shutil.copyfile(src["ledger"], path)
+    e3 = src["rows"]["E3"]
+    entries = list(src["tradeoff"])
+    if case == "missing":
+        return [*entries, ("result-0badc0de", "ppo", "adopted")], {"result-0badc0de"}
+    if case == "not_a_result":
+        return [*entries, (e3["decision"], "ppo", "adopted")], {e3["decision"]}
+    if case == "arm_absent":
+        return [*entries, (e3["result"], "residual_w9", "adopted")], {e3["result"]}
+    if case == "two_decisions":
+        ledger.decide(result=e3["result"], decision="dropped", note="a second call", path=path)
+        return entries, {e3["result"]}
+    numbers, kwargs = _numbers(E3["ppo"]), {}
+    if case == "undecided":
+        kwargs["decided"] = False
+    elif case == "not_validation":
+        kwargs["on"] = ("train_eval",)
+    elif case == "crashed":
+        kwargs["crashed"] = True
+    elif case == "iqm_null":
+        numbers.update(iqm=None, ci_low=None, ci_high=None)
+    elif case == "invalid_episodes":
+        numbers["invalid_episodes"] = 1
+    else:
+        guard = {"no_rh_guard": "viol_hours_rh", "no_yield_guard": "yield_kg_m2"}[case]
+        del numbers["guards"][guard]
+    ids = _experiment(path, issue=200, arms={"ppo": numbers}, seeds=[0, 1], **kwargs)
+    named = {ids["result"], ids["registered"]} if case == "not_validation" else {ids["result"]}
+    return [*entries, (ids["result"], "ppo", "adopted")], named
+
+
+def _edited(src: Path, dst: Path, result_id: str, arm: str, **iqms: float) -> None:
+    """A copy of the ledger at src with result_id's per_arm[arm] iqms replaced: profit= sets the
+    primary's, viol_hours_<c>= that guard's."""
+    rows = [json.loads(line) for line in src.read_text().splitlines()]
+    for row in rows:
+        if row["row_id"] == result_id:
+            numbers = row["per_arm"][arm]
+            for key, v in iqms.items():
+                (numbers if key == "profit" else numbers["guards"][key])["iqm"] = v
+    dst.write_text("".join(json.dumps(r, sort_keys=True) + "\n" for r in rows))
+
+
+def _draw_tradeoff(media, src: dict, out: Path, ledger_path: Path | None = None) -> Figure:
+    """The card of src's rows (or ledger_path's), with TRADEOFF and E1_RESULT pointed at them:
+    tradeoff_points, rb_tuned_reference at 5 and 10 seeds (the points' seed counts), then
+    tradeoff_card with CARD_FOOTER."""
+    path = ledger_path or src["ledger"]
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setattr(media, "TRADEOFF", src["tradeoff"])
+        mp.setattr(media, "E1_RESULT", src["e1"])
+        points = media.tradeoff_points(path)
+        refs = [media.rb_tuned_reference(n, path, src["parquet"]) for n in (5, 10)]
+        return media.tradeoff_card(points, refs, out, footer=CARD_FOOTER)
+
+
+@functools.cache
+def _tradeoff(out_dir: Path) -> tuple[Figure, Path]:
+    """The card of the synthetic sources; cached so it renders once."""
+    media = _media_card()
+    out = out_dir / "tradeoff" / "tradeoff.png"
+    out.parent.mkdir(exist_ok=True)
+    return _draw_tradeoff(media, _sources(out_dir / "sources"), out), out
+
+
+def _errorbars(ax) -> list[ErrorbarContainer]:
+    return [c for c in ax.containers if isinstance(c, ErrorbarContainer)]
+
+
+def _segments(container) -> list:
+    """An errorbar's bar segments, each [[x0, y0], [x1, y1]]."""
+    return [
+        np.asarray(s, dtype=float).tolist()
+        for col in container.lines[2]
+        for s in col.get_segments()
+    ]
+
+
+def _point(line) -> list[list[float]]:
+    return np.asarray(line.get_xydata(), dtype=float).tolist()
+
+
+def _errorbar_at(ax, x: float, y: float) -> list:
+    """ax's errorbars whose marker is the one point (x, y), exactly."""
+    return [c for c in _errorbars(ax) if c.lines[0] is not None and _point(c.lines[0]) == [[x, y]]]
+
+
+def _lines_near(ax, x: float, y: float) -> list[Line2D]:
+    """ax's lines drawing the one point (x, y), to rel 1e-9."""
+    return [
+        line
+        for line in ax.get_lines()
+        if len(_point(line)) == 1 and _point(line)[0] == pytest.approx([x, y], rel=1e-9)
+    ]
+
+
+def _panels(fig: Figure) -> list:
+    """The axes holding errorbars with bars, left to right."""
+    found = [ax for ax in fig.axes if any(_segments(c) for c in _errorbars(ax))]
+    return sorted(found, key=lambda ax: ax.get_position().x0)
+
+
+def _legend_texts(fig: Figure) -> tuple[list, list[str]]:
+    """Every legend on fig (the axes' and the figure's), and each legend entry's text, whitespace
+    joined (an entry may wrap)."""
+    legends = [ax.get_legend() for ax in fig.axes if ax.get_legend() is not None] + fig.legends
+    return legends, [" ".join(t.get_text().split()) for lg in legends for t in lg.get_texts()]
 
 
 # --- play: the season the pictures draw --------------------------------------------------------
@@ -588,17 +1134,335 @@ def test_footer_reads_the_simulator_commit_from_the_install(monkeypatch):
     assert "2d3febb" not in text, text
 
 
+def test_footer_takes_a_place_and_a_note():
+    """footer(source, stamp, *, place, note): the card's footer swaps PAPER for its place and the
+    simulator-run note for its own, keeping the source and both commits. Called with neither, it
+    is today's PAPER footer: footer(s, stamp) == footer(s, stamp, place=PAPER_NAME, note="A
+    simulator run, not a registered result")."""
+    import greenleaf_control.media as media
+
+    params = inspect.signature(media.footer).parameters
+    assert {"place", "note"} <= set(params), f"footer has no place and note keywords: {params}"
+    stamp = {"commit": SHA, "dirty": False, "fingerprints": {}, "weather_hashes": {}}
+    source = "result-0123abcd, decision-4567cdef and rb_tuned_validation.parquet"
+
+    text = " ".join(media.footer(source, stamp, place=FOOTER_PLACE, note=CARD_NOTE).split())
+
+    for part in (source, FOOTER_PLACE, CARD_NOTE, f"commit {SHA[:7]}", "GreenLight-Gym @"):
+        assert part in text, (part, text)
+    assert PAPER_NOTE not in text and "PAPER" not in text, text
+    assert "—" not in text
+    assert media.footer("rb_default", stamp) == media.footer(
+        "rb_default", stamp, place=media.PAPER_NAME, note=PAPER_NOTE
+    )
+
+
+# --- The trade-off still: TRADEOFF, tradeoff_points and rb_tuned_reference (issue #50) ----------
+
+
+def test_tradeoff_names_the_issues_rows_never_numbers():
+    """TRADEOFF holds the issue's four (result_id, arm, status) entries (E7's lag_b100 may join
+    them later) and only ids and statuses: each a result-<8 hex> id, an arm name and adopted or
+    dropped. E1_RESULT is rb_tuned's E1 row, result-525a6e90."""
+    media = _media_card()
+
+    entries = [tuple(e) for e in media.TRADEOFF]
+
+    assert [e for e in ISSUE_TRADEOFF if e not in entries] == [], entries
+    for result, arm, status in entries:
+        assert re.fullmatch(r"result-[0-9a-f]{8}", result), result
+        assert isinstance(arm, str) and arm, arm
+        assert status in ledger.DECISIONS, status
+    assert media.E1_RESULT == "result-525a6e90"
+
+
+def test_tradeoff_points_read_each_entrys_rows(sources):
+    """Done when: numbers are read from the ledger when the card is drawn.
+
+    On the synthetic ledger, tradeoff_points(path) gives one point per TRADEOFF entry, in order,
+    holding the entry's arm and status, its result, decision and registered row ids, the
+    registered row's seeds, and from the result's per_arm[arm]: profit and each viol_hours_<c> as
+    (iqm, ci_low, ci_high) and yield_kg_m2 as the guard's iqm, all exactly. E.g. ppo's profit
+    (2.40, 2.33, 2.46) €/m² over seeds 0-4. Non-vacuous: E4 also holds a residual_w05 (profit
+    0.63), but the card's residual_w05 is E6's (0.77, seeds 100-109); and residual_w4's status
+    comes from TRADEOFF (dropped), not from E4's one decision row (adopted)."""
+    media = _media_card()
+    src = sources
+
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setattr(media, "TRADEOFF", src["tradeoff"])
+        got = media.tradeoff_points(src["ledger"])
+
+    want = _want_points(src)
+    assert len(got) == len(want)
+    for g, w in zip(got, want, strict=True):
+        assert _json({key: g.get(key) for key in w}) == _json(w), w["arm"]
+
+
+@pytest.mark.parametrize("case", REFUSALS)
+def test_tradeoff_points_refuse_a_row_that_cant_be_drawn(case, sources, tmp_path, monkeypatch):
+    """Done when: each refusal in step 2 raises.
+
+    tradeoff_points raises ValueError naming the row when a TRADEOFF entry's row is missing
+    (missing) or isn't a result (not_a_result: a decision id); its result has no decision row
+    (undecided) or two (two_decisions); its registration's scenarios aren't exactly
+    ["validation"] (not_validation: ["train_eval"]; the error may name the registered row); the
+    arm isn't in per_arm (arm_absent); its iqm is null (iqm_null); a run crashed (crashed: 1);
+    invalid_episodes is 1; or a guard the card draws is missing (no_rh_guard, no_yield_guard).
+    The flawed entry comes after the four good ones, so every entry is checked."""
+    media = _media_card()
+    path = tmp_path / "ledger.jsonl"
+    tradeoff, named = _refusal(case, sources, path)
+    monkeypatch.setattr(media, "TRADEOFF", tradeoff)
+
+    with pytest.raises(ValueError) as excinfo:
+        media.tradeoff_points(path)
+
+    assert any(row in str(excinfo.value) for row in named), (named, str(excinfo.value))
+
+
+@pytest.mark.parametrize("n", [5, 10])
+def test_rb_tuned_reference_is_the_tiled_iqm_of_the_parquet_seasons(n, sources, monkeypatch):
+    """Done when: rb_tuned's reference equals stats.iqm_ci of the tiled parquet seasons.
+
+    rb_tuned_reference(n, path, parquet) gives profit_eur_m2, each viol_hours_<c> and
+    yield_kg_m2 as stats.iqm_ci(np.tile(seasons, (n, 1)))[0], exactly, which are the REF values
+    (e.g. n = 10: profit (3 x -3.0 + 10 x 0.6 + 3 x 1.2) / 16 = 0.0375 €/m²), plus n_seeds = n
+    and sha256, the parquet file's. Like-for-like, not the plain mean: (-3.0 + 0.6 + 1.2) / 3 =
+    -0.40 €/m² differs at 2 decimals."""
+    media = _media_card()
+    monkeypatch.setattr(media, "E1_RESULT", sources["e1"])
+
+    ref = media.rb_tuned_reference(n, sources["ledger"], sources["parquet"])
+
+    for key, want in REF[n].items():
+        assert ref[key] == _tiled(key, n), key
+        assert ref[key] == pytest.approx(want, rel=1e-12), key
+    assert ref["n_seeds"] == n
+    assert ref["sha256"] == hashlib.sha256(sources["parquet"].read_bytes()).hexdigest()
+    assert _fmt(ref["profit_eur_m2"]) != _fmt(np.mean(RB_SEASONS["profit_eur_m2"]))
+
+
+@pytest.mark.parametrize("case", list(PARQUET_MISMATCHES))
+def test_rb_tuned_reference_refuses_a_parquet_that_disagrees_with_e1(
+    case, sources, tmp_path, monkeypatch
+):
+    """Done when: a parquet that disagrees with the E1 row raises.
+
+    The parquet's per-season means must equal E1's row: each viol_hours_<c> exactly (one season
+    0.25 h off moves the temp mean by 0.0833 h), paper_return within rel 1e-9 (every season
+    1e-6 high is rel 1e-6 off). Either raises ValueError naming E1's row or the parquet."""
+    media = _media_card()
+    monkeypatch.setattr(media, "E1_RESULT", sources["e1"])
+    parquet = tmp_path / PARQUET
+    _write_parquet(parquet, PARQUET_MISMATCHES[case])
+
+    with pytest.raises(ValueError) as excinfo:
+        media.rb_tuned_reference(10, sources["ledger"], parquet)
+
+    assert sources["e1"] in str(excinfo.value) or PARQUET in str(excinfo.value), excinfo.value
+
+
+def test_rb_tuned_reference_takes_paper_return_within_rel_1e9(sources, tmp_path, monkeypatch):
+    """paper_return is checked to rel 1e-9, not exactly: a parquet whose every paper_return is
+    rel 1e-11 high (float noise, as a different summation order gives) still matches E1, and its
+    reference is the exact parquet's."""
+    media = _media_card()
+    monkeypatch.setattr(media, "E1_RESULT", sources["e1"])
+    parquet = tmp_path / PARQUET
+    noisy = tuple(v * (1 + 1e-11) for v in RB_SEASONS["paper_return"])
+    _write_parquet(parquet, {**RB_SEASONS, "paper_return": noisy})
+
+    ref = media.rb_tuned_reference(10, sources["ledger"], parquet)
+
+    assert ref["profit_eur_m2"] == _tiled("profit_eur_m2", 10)
+
+
+# --- The trade-off still: tradeoff_card (issue #50) ---------------------------------------------
+
+
+def test_card_draws_each_point_at_its_ledger_numbers_with_bars_to_its_cis(media_dir, sources):
+    """Done when: in each panel, each marker sits at (guard iqm, profit iqm) and its bars end at
+    the ledger's ci_low and ci_high.
+
+    Three panels, left to right viol_hours_co2, _temp and _rh (metrics.CONSTRAINTS), each x label
+    saying hours outside the safe range and naming its constraint, sharing one y axis labelled
+    profit [€/m²]. In each, every point is one errorbar whose marker is (its hours iqm, its profit
+    iqm), with one horizontal bar from the hours' ci_low to ci_high at the profit iqm and one
+    vertical bar from the profit's ci_low to ci_high at the hours iqm. E.g. ppo in the temp panel:
+    marker (153.25 h, 2.40 €/m²), bars x 140.00-166.50 and y 2.33-2.46. Four errorbars with bars
+    per panel: rb_tuned has none."""
+    fig, _ = _tradeoff(media_dir)
+
+    panels = _panels(fig)
+    assert len(panels) == 3, f"{len(panels)} panels hold errorbars"
+    words = {"co2": ("CO₂",), "temp": ("temp",), "rh": ("RH", "humidity")}
+    for c, ax in zip(metrics.CONSTRAINTS, panels, strict=True):
+        titles = [ax.get_title(loc) for loc in ("left", "center", "right")]
+        label = " ".join(" ".join([ax.get_xlabel(), *titles]).split())
+        assert "hours outside" in label.lower() and any(w in label for w in words[c]), (c, label)
+        assert ax is panels[0] or panels[0].get_shared_y_axes().joined(panels[0], ax), c
+        assert sum(bool(_segments(e)) for e in _errorbars(ax)) == 4, c
+        for p in _want_points(sources):
+            hours, profit = p[f"viol_hours_{c}"], p["profit"]
+            where = (c, p["arm"])
+            found = _errorbar_at(ax, hours[0], profit[0])
+            assert len(found) == 1, where
+            segments = _segments(found[0])
+            assert len(segments) == 2, where
+            [[(x0, y0), (x1, y1)]] = [s for s in segments if s[0][1] == s[1][1]]
+            assert (sorted([x0, x1]), y0) == (pytest.approx(list(hours[1:])), profit[0]), where
+            [[(x0, y0), (x1, y1)]] = [s for s in segments if s[0][0] == s[1][0]]
+            assert (x0, sorted([y0, y1])) == (hours[0], pytest.approx(list(profit[1:]))), where
+    ylabel = " ".join(panels[0].get_ylabel().split())
+    assert "profit" in ylabel and "€/m²" in ylabel, ylabel
+
+
+def test_card_marks_the_dropped_arm_and_rb_tuned_apart(media_dir, sources):
+    """In every panel: the adopted arms' markers are filled, residual_w05's LEAF; the dropped
+    arm's (residual_w4) is hollow with a MUTED edge. rb_tuned is one hollow marker, of a shape
+    no arm uses, at its largest-n (10-seed) reference (hours and profit to rel 1e-9; profit
+    0.0375 €/m²), with no bars; nothing is drawn at the 5-seed reference."""
+    media = _media_card()
+    fig, _ = _tradeoff(media_dir)
+
+    panels = _panels(fig)
+    assert len(panels) == 3
+    for c, ax in zip(metrics.CONSTRAINTS, panels, strict=True):
+        markers = {}
+        for p in _want_points(sources):
+            found = _errorbar_at(ax, p[f"viol_hours_{c}"][0], p["profit"][0])
+            assert len(found) == 1, (c, p["arm"])
+            markers[p["arm"]] = found[0].lines[0]
+        for arm, m in markers.items():
+            hollow = to_rgba(m.get_markerfacecolor())[3] == 0
+            assert hollow is (arm == DROPPED), (c, arm, m.get_markerfacecolor())
+        assert to_hex(markers[DROPPED].get_markeredgecolor()) == media.MUTED, c
+        assert to_hex(markers["residual_w05"].get_markerfacecolor()) == media.LEAF, c
+
+        rb = _lines_near(ax, _tiled(f"viol_hours_{c}", 10), _tiled("profit_eur_m2", 10))
+        assert len(rb) == 1, (c, "rb_tuned's 10-seed marker")
+        assert to_rgba(rb[0].get_markerfacecolor())[3] == 0, (c, "rb_tuned is hollow")
+        shape = rb[0].get_marker()
+        assert shape not in (None, "", " ", "None", "none"), c
+        assert shape not in {m.get_marker() for m in markers.values()}, (c, shape)
+        assert not [e for e in _errorbars(ax) if e.lines[0] is rb[0] and _segments(e)], c
+        assert not _lines_near(ax, _tiled(f"viol_hours_{c}", 5), _tiled("profit_eur_m2", 5)), c
+
+
+def test_card_reads_the_ledger_when_drawn(sources, tmp_path):
+    """Done when: editing a number in the tmp ledger moves the drawn point.
+
+    With E6's residual_w05 profit iqm edited from 0.77 to 0.81 €/m² and its viol_hours_temp iqm
+    from 48.50 to 51.25 h (each still inside its CI, 0.70-0.84 and 42.00-55.75), the temp panel's
+    residual_w05 marker sits at (51.25, 0.81) and none at (48.50, 0.77)."""
+    media = _media_card()
+    path = tmp_path / "ledger.jsonl"
+    e6 = sources["rows"]["E6"]["result"]
+    _edited(sources["ledger"], path, e6, "residual_w05", profit=0.81, viol_hours_temp=51.25)
+
+    fig = _draw_tradeoff(media, sources, tmp_path / "tradeoff.png", ledger_path=path)
+
+    panels = _panels(fig)
+    assert len(panels) == 3
+    temp = panels[metrics.CONSTRAINTS.index("temp")]
+    assert len(_errorbar_at(temp, 51.25, 0.81)) == 1
+    assert _errorbar_at(temp, 48.5, 0.77) == []
+
+
+def test_card_png_is_linkedins_1200_by_627(media_dir):
+    """Done when: the PNG is exactly 1200 x 627 px (PIL): 12 x 6.27 in at 100 dpi."""
+    _, out = _tradeoff(media_dir)
+
+    assert out.read_bytes()[:8] == b"\x89PNG\r\n\x1a\n"
+    with Image.open(out) as im:
+        assert im.size == (1200, 627)
+
+
+def test_card_legend_names_each_points_result_outside_the_panels(media_dir, sources):
+    """Done when: every legend line names its result id.
+
+    One legend entry per point plus rb_tuned's. Each point's names its arm and result id, "<n>
+    seeds × 3 VALIDATION seasons" (5 for ppo, residual_w1 and residual_w4; 10 for residual_w05),
+    its profit IQM and CI at 2 decimals, and "fruit growth" with its yield_kg_m2; "dropped" is on
+    residual_w4's only. rb_tuned's names it, E1's result id and its 10-seed profit (0.04). No
+    legend overlaps a panel."""
+    fig, _ = _tradeoff(media_dir)
+
+    legends, texts = _legend_texts(fig)
+    points = _want_points(sources)
+    assert len(texts) == len(points) + 1, texts
+    for p in points:
+        mine = [t for t in texts if p["arm"] in t and p["result"] in t]
+        assert len(mine) == 1, (p["arm"], texts)
+        line = mine[0]
+        assert f"{len(p['seeds'])} seeds × 3 VALIDATION seasons" in line, line
+        assert all(_has(line, v) for v in p["profit"]), (p["profit"], line)
+        assert "fruit growth" in line and _has(line, p["yield_kg_m2"]), line
+        assert ("dropped" in line) is (p["status"] == "dropped"), line
+    rb = [t for t in texts if "rb_tuned" in t]
+    assert len(rb) == 1, texts
+    assert sources["e1"] in rb[0] and _has(rb[0], _tiled("profit_eur_m2", 10)), rb[0]
+    assert "dropped" not in rb[0]
+
+    FigureCanvasAgg(fig)
+    fig.canvas.draw()
+    renderer = fig.canvas.get_renderer()
+    for lg in legends:
+        box = lg.get_window_extent(renderer)
+        assert not [ax for ax in _panels(fig) if box.overlaps(ax.get_window_extent(renderer))]
+
+
+def test_card_says_validation_and_how_it_was_scored(media_dir):
+    """Above the panels: a title saying VALIDATION and Amsterdam 2010 (scenarios.VALIDATION's
+    place); the line "IQM over seeds × seasons, 95% stratified bootstrap CI"; and a note giving
+    rb_tuned's profit at the points' other seed count, 5: "5-seed" with -0.07 €/m² (REF[5],
+    -0.0667) on one text."""
+    fig, _ = _tradeoff(media_dir)
+
+    texts = [" ".join(t.get_text().split()) for t in _texts(fig)]
+
+    assert [t for t in texts if "VALIDATION" in t and VAL_PLACE in t], texts
+    assert [t for t in texts if CI_LINE in t], texts
+    ref5 = _tiled("profit_eur_m2", 5)
+    assert [t for t in texts if "5-seed" in t and _has(t, ref5) and "€/m²" in t], texts
+
+
+def test_card_keeps_medias_text_rules(media_dir, sources):
+    """Done when: no em dash, no "yield" and no summed hours appear in any text.
+
+    The footer passed in is one text, as given. No text has an em dash or says "yield" (it is
+    fruit growth, not a harvest), and no line prints a point's three hour IQMs summed: ppo
+    0.5 + 153.25 + 135 = 288.75 h, residual_w05 264.25, residual_w1 303.75, residual_w4 296.75,
+    rb_tuned at 10 seeds 1.5625 + 92.859375 + 254.578125 = 349.00 and at 5 seeds 350.39.
+    Non-vacuous: each has two or more nonzero hours, so its total is none of them."""
+    fig, _ = _tradeoff(media_dir)
+
+    texts = [t.get_text() for t in _texts(fig)]
+    lines = _lines_of(_texts(fig))
+    assert CARD_FOOTER in texts
+    assert not [t for t in texts if "—" in t]
+    assert not [t for t in texts if "yield" in t.lower()]
+    hour_sets = [[p[key][0] for key in HOUR_KEYS] for p in _want_points(sources)]
+    hour_sets += [[_tiled(key, n) for key in HOUR_KEYS] for n in (5, 10)]
+    for hours in hour_sets:
+        total = sum(hours)
+        assert sum(h > 0 for h in hours) >= 2 and total not in hours
+        assert not [ln for ln in lines if _has(ln, total)], f"a total of the hours, {_fmt(total)}"
+
+
 # --- the CLI -----------------------------------------------------------------------------------
 
 
 @pytest.mark.parametrize("case", ["no_out", "no_ffmpeg"])
-def test_main_refuses_before_any_season(case, tmp_path, monkeypatch, capsys):
+def test_main_refuses_before_any_season(case, sources, tmp_path, monkeypatch, capsys):
     """--out is required; and without ffmpeg (FFMpegWriter.isAvailable() false) main refuses with a
     nonzero SystemExit naming ffmpeg. Both come before any season is played, and nothing is
-    written: --out isn't created."""
+    written: --out isn't created. The card, if main reads it first, reads the synthetic rows."""
     import greenleaf_control.media as media
 
     _no_season_played(monkeypatch, media)
+    _card_reads(monkeypatch, media, sources)
     out = tmp_path / "media"
     if case == "no_out":
         argv = []
@@ -621,8 +1485,9 @@ def _whole(text: str, n: int) -> bool:
 
 
 def _drawing_recorded(monkeypatch, media) -> dict:
-    """season_replay and baselines_card replaced by recorders of their arguments that draw and
-    write nothing, so main's own choices (its title, subtitle and footers) are read fast."""
+    """season_replay, baselines_card and tradeoff_card (once it exists) replaced by recorders of
+    their arguments that draw and write nothing, so main's own choices (its title, subtitle and
+    footers) are read fast."""
     calls = {}
 
     def record(name: str):
@@ -634,11 +1499,12 @@ def _drawing_recorded(monkeypatch, media) -> dict:
 
     monkeypatch.setattr(media, "season_replay", record("replay"))
     monkeypatch.setattr(media, "baselines_card", record("card"))
+    monkeypatch.setattr(media, "tradeoff_card", record("tradeoff"), raising=False)
     return calls
 
 
 def test_main_titles_the_replay_as_simulated_with_the_runs_days_place_and_controller(
-    tmp_path, monkeypatch
+    sources, tmp_path, monkeypatch
 ):
     """The replay's title says it is simulated, with the season's day count taken from the run and
     PAPER's location and year (Amsterdam 2010, from scenarios.PAPER); its subtitle names
@@ -647,7 +1513,8 @@ def test_main_titles_the_replay_as_simulated_with_the_runs_days_place_and_contro
 
     Known answer: with play shortened to real 2-day seasons (192 steps), the title says 2 (days),
     never 60, so the count can't be typed in. Drawing is recorded, not done (the real
-    season_replay is tested above), and ffmpeg is reported available, so this runs anywhere.
+    season_replay is tested above), ffmpeg is reported available, and the card reads the
+    synthetic rows, so this runs anywhere.
     """
     import greenleaf_control.media as media
 
@@ -656,6 +1523,7 @@ def test_main_titles_the_replay_as_simulated_with_the_runs_days_place_and_contro
         media, "play", lambda controller, season_length=60: real_play(controller, 2)
     )
     monkeypatch.setattr(FFMpegWriter, "isAvailable", classmethod(lambda cls: True))
+    _card_reads(monkeypatch, media, sources)
     calls = _drawing_recorded(monkeypatch, media)
 
     assert media.main(["--out", str(tmp_path / "media")]) == 0
@@ -671,12 +1539,17 @@ def test_main_titles_the_replay_as_simulated_with_the_runs_days_place_and_contro
 
 
 @pytest.mark.parametrize("invalid", CONTROLLERS)
-def test_main_refuses_an_invalid_season_before_writing(invalid, tmp_path, monkeypatch, capsys):
+def test_main_refuses_an_invalid_season_before_writing(
+    invalid, sources, tmp_path, monkeypatch, capsys
+):
     """A season whose result isn't valid (metrics: a solver failure, or steps != season_steps) is
     never drawn: main exits nonzero naming that controller, and only that one, before anything is
     drawn or written (--out stays absent or empty). play returns the real 1-day seasons, the one
-    under test marked invalid with one solver failure; ffmpeg is reported available."""
+    under test marked invalid with one solver failure; ffmpeg is reported available; the card
+    reads the synthetic rows."""
     import greenleaf_control.media as media
+
+    _card_reads(monkeypatch, media, sources)
 
     def play(controller, season_length=60):
         b = _baseline(controller)
@@ -695,6 +1568,7 @@ def test_main_refuses_an_invalid_season_before_writing(invalid, tmp_path, monkey
     monkeypatch.setattr(media, "play", play)
     monkeypatch.setattr(media, "season_replay", trip("season_replay"))
     monkeypatch.setattr(media, "baselines_card", trip("baselines_card"))
+    monkeypatch.setattr(media, "tradeoff_card", trip("tradeoff_card"), raising=False)
     monkeypatch.setattr(FFMpegWriter, "isAvailable", classmethod(lambda cls: True))
     out = tmp_path / "media"
 
@@ -708,6 +1582,119 @@ def test_main_refuses_an_invalid_season_before_writing(invalid, tmp_path, monkey
     assert invalid in text, text
     assert not [c for c in CONTROLLERS if c != invalid and c in text], text
     assert not out.exists() or not list(out.iterdir())
+
+
+@pytest.mark.parametrize("case", [*REFUSALS, *PARQUET_MISMATCHES])
+def test_main_refuses_a_bad_row_or_parquet_before_any_season(
+    case, sources, tmp_path, monkeypatch, capsys
+):
+    """Done when: each refusal, and a parquet that disagrees with the E1 row, raises before any
+    file exists.
+
+    main builds the card's points and references first, so a row tradeoff_points refuses (each of
+    REFUSALS, as in its test) or a parquet rb_tuned_reference refuses (each of
+    PARQUET_MISMATCHES) stops it before any season is played (every way to play one trips) or
+    anything is written: it exits nonzero or raises ValueError, naming the row (or E1's row or
+    the parquet), and --out isn't created. ffmpeg is reported available."""
+    media = _media_card()
+    _no_season_played(monkeypatch, media)
+    monkeypatch.setattr(FFMpegWriter, "isAvailable", classmethod(lambda cls: True))
+    if case in REFUSALS:
+        path = tmp_path / "ledger.jsonl"
+        tradeoff, named = _refusal(case, sources, path)
+        _card_reads(monkeypatch, media, sources, tradeoff=tradeoff, ledger=path)
+    else:
+        parquet = tmp_path / PARQUET
+        _write_parquet(parquet, PARQUET_MISMATCHES[case])
+        named = {sources["e1"], PARQUET}
+        _card_reads(monkeypatch, media, sources, parquet=parquet)
+    out = tmp_path / "media"
+
+    raised = ""
+    try:
+        code = media.main(["--out", str(out)])
+    except SystemExit as e:
+        code = e.code
+    except ValueError as e:
+        code, raised = 1, str(e)
+    text = f"{code} {raised} {capsys.readouterr().err}"
+
+    assert code not in (0, None), text
+    assert any(row in text for row in named), (named, text)
+    assert not out.exists()
+
+
+def test_main_writes_the_tradeoff_card_and_its_media_json_entry(sources, tmp_path, monkeypatch):
+    """main writes tradeoff.png (1200 x 627 px) and adds its media.json entry; the other entries
+    are unchanged.
+
+    play returns the real 1-day seasons; the replay and the baselines card are recorded (they
+    write nothing); the real tradeoff_card draws, spied on; the card reads the synthetic rows.
+    - The card gets tradeoff_points' points (every number as the rows were written) and one
+      reference per distinct seed count among them (5 and 10), and its footer names every
+      point's result and decision row, E1's result row, rb_tuned_validation.parquet,
+      "VALIDATION, Amsterdam 2010 days 45, 59, 75", "commit <sha7>" and "Recorded VALIDATION
+      results; the 2012 test weather is still sealed", and not the simulator-run note.
+    - --out holds media.json and tradeoff.png only.
+    - media.json's tradeoff.png entry has today's keys plus split "validation" and ledger (every
+      point's result and decision id and E1's result id), scenario scenarios.VALIDATION, this
+      checkout's commit, and metrics {points, references}, what the card drew.
+    - The replay's and the baselines card's entries keep exactly today's keys, scenario PAPER
+      and their seasons' numbers."""
+    media = _media_card()
+    monkeypatch.setattr(media, "play", lambda controller, season_length=60: _baseline(controller))
+    monkeypatch.setattr(FFMpegWriter, "isAvailable", classmethod(lambda cls: True))
+    _card_reads(monkeypatch, media, sources)
+    real_card = media.tradeoff_card
+    calls = _drawing_recorded(monkeypatch, media)
+
+    def card(*args, **kwargs):
+        calls["tradeoff"] = inspect.signature(real_card).bind(*args, **kwargs).arguments
+        return real_card(*args, **kwargs)
+
+    monkeypatch.setattr(media, "tradeoff_card", card)
+    stamp = manifest.code_stamp(smoke=True)
+    out = tmp_path / "media"
+
+    assert media.main(["--out", str(out)]) == 0
+
+    drawn = calls["tradeoff"]
+    want = _want_points(sources)
+    assert _json(
+        [{key: p.get(key) for key in w} for p, w in zip(drawn["points"], want, strict=True)]
+    ) == _json(want)
+    assert sorted(r["n_seeds"] for r in drawn["references"]) == [5, 10]
+    foot = " ".join(drawn["footer"].split())
+    ids = [p[key] for p in want for key in ("result", "decision")] + [sources["e1"]]
+    for part in (*ids, PARQUET, FOOTER_PLACE, f"commit {stamp['commit'][:7]}", CARD_NOTE):
+        assert part in foot, (part, foot)
+    assert PAPER_NOTE not in foot, foot
+
+    assert sorted(p.name for p in out.iterdir()) == ["media.json", "tradeoff.png"]
+    with Image.open(out / "tradeoff.png") as im:
+        assert im.size == (1200, 627)
+
+    by_file = {e["file"]: e for e in json.loads((out / "media.json").read_text())}
+    assert sorted(by_file) == [
+        "baselines.png",
+        "season_replay.gif",
+        "season_replay.mp4",
+        "tradeoff.png",
+    ]
+    e = by_file["tradeoff.png"]
+    assert ENTRY_KEYS | {"split", "ledger"} <= set(e), sorted(e)
+    assert (e["split"], e["scenario"]) == ("validation", VALIDATION)
+    assert e["commit"] == stamp["commit"] and e["dirty"] is stamp["dirty"]
+    assert not [i for i in ids if i not in e["ledger"]], e["ledger"]
+    assert e["metrics"] == _json({"points": drawn["points"], "references": drawn["references"]})
+    rb = _baseline("rb_default")["result"]
+    for name in ("season_replay.gif", "season_replay.mp4", "baselines.png"):
+        assert set(by_file[name]) == ENTRY_KEYS, name
+        assert by_file[name]["scenario"] == PAPER, name
+    assert by_file["season_replay.gif"]["metrics"] == _json(rb)
+    assert by_file["baselines.png"]["metrics"] == _json(
+        {c: _baseline(c)["result"] for c in CONTROLLERS}
+    )
 
 
 def test_cli_runs_as_a_module_and_lists_out(tmp_path):
@@ -735,9 +1722,15 @@ def test_media_never_imports_pyplot(module):
 
 
 def test_signatures():
-    """play(controller, season_length=60), running(states, controls, params, ends),
+    """Done when: test_signatures covers the new functions and footer's keywords.
+
+    play(controller, season_length=60), running(states, controls, params, ends),
     season_replay(frame, counters, out_gif, out_mp4=None, *, title, subtitle=None, footer, fps=15),
-    baselines_card(seasons, out, *, footer), footer(source, stamp) and main(argv=None)."""
+    baselines_card(seasons, out, *, footer), footer(source, stamp, *, place=PAPER_NAME, note="A
+    simulator run, not a registered result"), main(argv=None), and issue #50's
+    tradeoff_points(path=ledger.LEDGER), rb_tuned_reference(n_seeds, path=ledger.LEDGER,
+    parquet=selection.RESULTS / "rb_tuned_validation.parquet") and tradeoff_card(points,
+    references, out, *, footer)."""
     import greenleaf_control.media as media
 
     def shape(fn) -> list[tuple[str, str, object]]:
@@ -764,8 +1757,26 @@ def test_signatures():
         ("out", pos, empty),
         ("footer", kw, empty),
     ]
-    assert shape(media.footer) == [("source", pos, empty), ("stamp", pos, empty)]
+    assert shape(media.footer) == [
+        ("source", pos, empty),
+        ("stamp", pos, empty),
+        ("place", kw, media.PAPER_NAME),
+        ("note", kw, PAPER_NOTE),
+    ]
     assert shape(media.main) == [("argv", pos, None)]
+    _media_card()
+    assert shape(media.tradeoff_points) == [("path", pos, ledger.LEDGER)]
+    assert shape(media.rb_tuned_reference) == [
+        ("n_seeds", pos, empty),
+        ("path", pos, ledger.LEDGER),
+        ("parquet", pos, selection.RESULTS / PARQUET),
+    ]
+    assert shape(media.tradeoff_card) == [
+        ("points", pos, empty),
+        ("references", pos, empty),
+        ("out", pos, empty),
+        ("footer", kw, empty),
+    ]
 
 
 # --- The one command, end to end ---------------------------------------------------------------
@@ -808,27 +1819,34 @@ def _assert_golden(got: dict, want: dict, name: str) -> None:
     shutil.which("ffmpeg") is None or shutil.which("ffprobe") is None,
     reason="needs ffmpeg and ffprobe",
 )
-def test_one_command_writes_every_file_labelled_with_its_source_and_commit(tmp_path, monkeypatch):
-    """Done when: one command writes the GIF, the MP4, the baselines PNG and media.json into --out.
+def test_one_command_writes_every_file_labelled_with_its_source_and_commit(
+    sources, tmp_path, monkeypatch
+):
+    """Done when: one command writes the GIF, the MP4, the baselines PNG, the trade-off PNG and
+    media.json into --out.
 
     main(["--out", out]) at its defaults (60-day PAPER seasons) returns 0 and writes exactly
-    season_replay.gif, season_replay.mp4, baselines.png and media.json:
+    season_replay.gif, season_replay.mp4, baselines.png, tradeoff.png and media.json:
     - the GIF under 8 MB and 8-20 s long (the README's ~10-15 s);
     - the MP4 H.264, 1080 px wide and 8-20 s long by ffprobe (LinkedIn);
     - the PNG under 500 KB;
-    - media.json a list of one entry per picture, each with file, source, scenario (PAPER), commit
+    - tradeoff.png 1200 x 627 px (PIL) and under 1 MB, drawn from the synthetic rows (a test
+      never reads the committed ledger or results);
+    - media.json a list of one entry per picture, each with file, source, scenario, commit
       and dirty (this checkout's code_stamp, taken before writing), gl_gym (the installed gl-gym's
       commit, 7 characters or more), made_at (ISO 8601) and metrics. The replay's entries: source
       rb_default, metrics its season's; the card's: source naming all three baselines, metrics
-      keyed by baseline. Every number equals tests/golden/values.json "ours" (hours exactly, the
-      rest at rel 1e-6).
+      keyed by baseline; both scenario PAPER. Every number equals tests/golden/values.json "ours"
+      (hours exactly, the rest at rel 1e-6). The trade-off's: scenario scenarios.VALIDATION,
+      split "validation".
     - The footers drawn (season_replay's and baselines_card's footer argument, spied on; the real
       functions run) name their sources and "commit <sha7>".
     - The replay's title says "simulated", 60 (days) and Amsterdam 2010 (from scenarios.PAPER);
       its subtitle, drawn on the final figure, names "upstream's default rule controller" and
       "GreenLight-Gym".
     """
-    import greenleaf_control.media as media
+    media = _media_card()
+    _card_reads(monkeypatch, media, sources)
 
     stamp = manifest.code_stamp(smoke=True)
     sha7 = stamp["commit"][:7]
@@ -862,6 +1880,10 @@ def test_one_command_writes_every_file_labelled_with_its_source_and_commit(tmp_p
     assert 8 <= float(probe["format"]["duration"]) <= 20
     assert png.read_bytes()[:8] == b"\x89PNG\r\n\x1a\n"
     assert png.stat().st_size < 500_000
+    tradeoff = out / "tradeoff.png"
+    with Image.open(tradeoff) as im:
+        assert im.size == (1200, 627)
+    assert tradeoff.stat().st_size < 1_000_000
 
     assert "rb_default" in footers["replay"] and f"commit {sha7}" in footers["replay"]
     assert all(c in footers["card"] for c in CONTROLLERS) and f"commit {sha7}" in footers["card"]
@@ -880,11 +1902,11 @@ def test_one_command_writes_every_file_labelled_with_its_source_and_commit(tmp_p
     entries = json.loads((out / "media.json").read_text())
     assert isinstance(entries, list)
     by_file = {e["file"]: e for e in entries}
-    assert sorted(by_file) == ["baselines.png", "season_replay.gif", "season_replay.mp4"]
+    assert sorted(by_file) == [name for name in MEDIA_FILES if name != "media.json"]
     gl_gym = manifest._versions()["gl-gym"]
     for name, e in by_file.items():
         assert ENTRY_KEYS <= set(e), name
-        assert e["scenario"] == PAPER, name
+        assert e["scenario"] == (VALIDATION if name == "tradeoff.png" else PAPER), name
         assert len(e["commit"]) >= 7 and stamp["commit"].startswith(e["commit"]), name
         assert e["dirty"] is stamp["dirty"], name
         assert len(e["gl_gym"]) >= 7 and gl_gym.startswith(e["gl_gym"]), name
@@ -896,3 +1918,4 @@ def test_one_command_writes_every_file_labelled_with_its_source_and_commit(tmp_p
     assert all(c in card_entry["source"] for c in CONTROLLERS)
     for c in CONTROLLERS:
         _assert_golden(card_entry["metrics"][c], GOLDEN[c], c)
+    assert by_file["tradeoff.png"]["split"] == "validation"

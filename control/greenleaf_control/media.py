@@ -3,15 +3,20 @@
     python -m greenleaf_control.media --out docs/media
 
 writes season_replay.gif (README), season_replay.mp4 (LinkedIn: H.264, 1080 px wide),
-baselines.png and media.json (each file's source, scenario, commit and numbers).
+baselines.png, tradeoff.png (LinkedIn: 1200 x 627 px) and media.json (each file's source,
+scenario, commit and numbers).
 
-Every picture is a simulator run on PAPER, graded by metrics on the same run it draws, and its
-footer says so: until the ledger has rows, the media shows the simulator and the baselines, never
-an RL result. Figures are built without pyplot (headless, no global state), as in viz.
+The replay and baselines.png are simulator runs on PAPER, graded by metrics on the same run they
+draw, and their footers say so. tradeoff.png draws recorded VALIDATION results only: each point is
+a ledger result row with its decision row (TRADEOFF names the rows, never numbers), read when the
+card is drawn, beside rb_tuned's seasons from evaluate's parquet, checked against E1's row first.
+No RL number is drawn without its ledger row. Figures are built without pyplot (headless, no
+global state), as in viz.
 """
 
 import argparse
 import functools
+import hashlib
 import json
 import math
 from datetime import UTC, datetime
@@ -24,7 +29,7 @@ from matplotlib.colors import LinearSegmentedColormap
 from matplotlib.figure import Figure
 from matplotlib.ticker import FuncFormatter, MultipleLocator
 
-from greenleaf_control import envs, evaluate, manifest, metrics, scenarios
+from greenleaf_control import envs, evaluate, ledger, manifest, metrics, scenarios, selection, stats
 
 N_DAY = 96  # steps a day: 86,400 s / 900 s
 CARD = ("rb_default", "zero_controls", "random")  # the card's columns, left to right
@@ -42,12 +47,31 @@ PAPER_NAME = f"PAPER ({PLACE})"
 N_FRAMES = 180  # the replay's counter rows; with a 2 s hold at 15 fps, about 14 s
 GIF_DPI, MP4_DPI = 100, 150  # 720 x 900 and 1080 x 1350 px on the replay's 7.2 x 9 in figure
 
+# The trade-off still (issue #50): (result_id, arm, status), row ids and statuses, never numbers.
+# Every number is read from the ledger when the card is drawn. E4 has one decision row: its note
+# adopts residual_w1 and drops residual_w4.
+TRADEOFF = [
+    ("result-06364fa1", "ppo", "adopted"),  # E3
+    ("result-d1f0b8e7", "residual_w05", "adopted"),  # E6, seeds 100 to 109
+    ("result-2a890455", "residual_w1", "adopted"),  # E4
+    ("result-2a890455", "residual_w4", "dropped"),  # E4
+]
+E1_RESULT = "result-525a6e90"  # rb_tuned on VALIDATION; its profit is only in RB_PARQUET
+RB_PARQUET = "rb_tuned_validation.parquet"  # evaluate's CLI writes it, one row per season
+HOUR_KEYS = [f"viol_hours_{c}" for c in metrics.CONSTRAINTS]
+VAL_PLACE = f"{scenarios.VALIDATION[0]['location']} {scenarios.VALIDATION[0]['growth_year']}"
+VAL_NAME = f"VALIDATION, {VAL_PLACE} days " + ", ".join(
+    str(s["start_day"]) for s in scenarios.VALIDATION
+)  # "VALIDATION, Amsterdam 2010 days 45, 59, 75"
+
 # The glasshouse palette.
 LEAF, BAND, TOMATO, AMBER = "#2f6b4f", "#d5e7da", "#c23f29", "#a5601c"
 INK, MUTED = "#15231c", "#55655c"
 ACTUATOR_CMAP = LinearSegmentedColormap.from_list("actuator", ["#f6f1ea", AMBER]).with_extremes(
     bad="white"
 )
+MARKERS = ("s", "o", "^", "v", "P", "X")  # each point's shape in TRADEOFF order; rb_tuned is "D"
+ADOPTED = (AMBER, INK, TOMATO)  # the adopted arms' colours in TRADEOFF order; residual_w05 is LEAF
 
 
 def play(controller: str, season_length: int = 60) -> dict:
@@ -297,26 +321,247 @@ def baselines_card(seasons, out, *, footer) -> Figure:
     return fig
 
 
-def footer(source: str, stamp: dict) -> str:
-    """A picture's provenance: its source, the scenario, the simulator's and this repo's commits."""
+def tradeoff_points(path: Path = ledger.LEDGER) -> list[dict]:
+    """One point per TRADEOFF entry, in order, read from the ledger at path: the arm and status,
+    its result, decision and registered row ids, the registered seeds, and from per_arm[arm] the
+    profit and each viol_hours_<c> as (iqm, ci_low, ci_high) and yield_kg_m2's iqm. ValueError,
+    naming the row, for an entry the card can't draw."""
+    found = ledger.rows(path=path)
+    by_id = {r["row_id"]: r for r in found}
+    points = []
+    for result_id, arm, status in TRADEOFF:
+        result = by_id.get(result_id)
+        if result is None or result["kind"] != "result":
+            raise ValueError(f"{result_id} names no result row in {path}")
+        decisions = [
+            r["row_id"] for r in found if r["kind"] == "decision" and r["result"] == result_id
+        ]
+        if len(decisions) != 1:
+            raise ValueError(
+                f"{result_id} has {len(decisions)} decision rows, not one: an undecided result is"
+                " never drawn"
+            )
+        registered = by_id[result["registered"]]
+        if registered["scenarios"] != ["validation"]:
+            raise ValueError(
+                f"{result_id}'s registration {registered['row_id']} is on"
+                f" {registered['scenarios']}, not ['validation']"
+            )
+        numbers = result["per_arm"].get(arm)
+        if numbers is None or numbers["iqm"] is None:
+            raise ValueError(f"{result_id} has no {arm} numbers to draw")
+        if numbers["crashed"] or numbers["invalid_episodes"]:
+            raise ValueError(
+                f"{result_id}'s {arm} has {numbers['crashed']} crashed runs and"
+                f" {numbers['invalid_episodes']} invalid episodes"
+            )
+        missing = [k for k in (*HOUR_KEYS, "yield_kg_m2") if k not in numbers["guards"]]
+        if missing:
+            raise ValueError(f"{result_id}'s {arm} has no {', '.join(missing)} guard")
+        ci = {
+            k: tuple(numbers["guards"][k][s] for s in ("iqm", "ci_low", "ci_high"))
+            for k in HOUR_KEYS
+        }
+        points.append(
+            {
+                "arm": arm,
+                "status": status,
+                "result": result_id,
+                "decision": decisions[0],
+                "registered": registered["row_id"],
+                "seeds": registered["seeds"],
+                "profit": (numbers["iqm"], numbers["ci_low"], numbers["ci_high"]),
+                **ci,
+                "yield_kg_m2": numbers["guards"]["yield_kg_m2"]["iqm"],
+            }
+        )
+    return points
+
+
+def rb_tuned_reference(
+    n_seeds: int, path: Path = ledger.LEDGER, parquet: Path = selection.RESULTS / RB_PARQUET
+) -> dict:
+    """rb_tuned drawn like an n_seeds-seed arm: its parquet's VALIDATION seasons, first checked
+    against E1_RESULT's row (each viol_hours_<c>'s season mean equal to its guard's iqm exactly,
+    paper_return's to the iqm within rel 1e-9; ValueError otherwise), then profit_eur_m2, each
+    viol_hours_<c> and yield_kg_m2 as stats.iqm_ci(np.tile(seasons, (n_seeds, 1)))[0], with
+    n_seeds and the parquet's sha256."""
+    e1 = [r for r in ledger.rows("result", path=path) if r["row_id"] == E1_RESULT]
+    if len(e1) != 1:
+        raise ValueError(f"{E1_RESULT} names no result row in {path}")
+    numbers = e1[0]["per_arm"]["rb_tuned"]
+    seasons = pd.read_parquet(parquet)
+    want = {"paper_return": numbers["iqm"], **{k: numbers["guards"][k]["iqm"] for k in HOUR_KEYS}}
+    for key, v in want.items():
+        got = float(np.mean(seasons[key].to_numpy(dtype=np.float64)))
+        same = math.isclose(got, v, rel_tol=1e-9) if key == "paper_return" else got == v
+        if not same:
+            raise ValueError(
+                f"{parquet.name}'s mean {key} {got!r} isn't {E1_RESULT}'s {v!r}: the parquet"
+                " and E1's row disagree"
+            )
+    keys = ["profit_eur_m2", *HOUR_KEYS, "yield_kg_m2"]
+    tiled = {
+        k: stats.iqm_ci(np.tile(seasons[k].to_numpy(dtype=np.float64), (n_seeds, 1)))[0]
+        for k in keys
+    }
+    sha = hashlib.sha256(parquet.read_bytes()).hexdigest()
+    return {**tiled, "n_seeds": n_seeds, "sha256": sha}
+
+
+def tradeoff_card(points, references, out, *, footer) -> Figure:
+    """Each point's profit against its hours outside each safe range on VALIDATION: three panels
+    in metrics.CONSTRAINTS order sharing the profit axis, each point an errorbar at (hours iqm,
+    profit iqm) with bars to both ledger CIs (residual_w05 LEAF, the dropped arm hollow and MUTED),
+    and rb_tuned a hollow diamond without bars (it is deterministic) at the largest-n reference,
+    the others in a note. A legend right of the panels names each point's result row. Saved to
+    out at exactly 1200 x 627 px (LinkedIn's landscape size)."""
+    top = max(references, key=lambda r: r["n_seeds"])
+    seasons = len(scenarios.VALIDATION)
+    fig = Figure(figsize=(12, 6.27), facecolor="white")
+    axes = fig.subplots(
+        1,
+        3,
+        sharey=True,
+        gridspec_kw={"left": 0.07, "right": 0.68, "top": 0.75, "bottom": 0.2, "wspace": 0.2},
+    )
+    fig.text(
+        0.03,
+        0.965,
+        f"Profit against hours outside each safe range, VALIDATION ({VAL_PLACE})",
+        fontsize=17,
+        weight="bold",
+        color=INK,
+        va="top",
+    )
+    fig.text(
+        0.03,
+        0.9,
+        "IQM over seeds × seasons, 95% stratified bootstrap CI",
+        fontsize=11.5,
+        color=INK,
+        va="top",
+    )
+    others = "".join(
+        f"; its profit as a {r['n_seeds']}-seed arm: {r['profit_eur_m2']:.2f} €/m²"
+        for r in sorted(references, key=lambda r: r["n_seeds"])
+        if r is not top
+    )
+    fig.text(
+        0.03,
+        0.86,
+        f"rb_tuned is deterministic: its {seasons} seasons are tiled to {top['n_seeds']} seeds and"
+        f" scored like an arm{others}",
+        fontsize=11.5,
+        color=MUTED,
+        va="top",
+    )
+    fig.text(0.03, 0.015, footer, fontsize=8, color=MUTED, va="bottom", linespacing=1.4)
+
+    colours = iter(ADOPTED)
+    styles = []  # (shape, face, edge) per point
+    for i, p in enumerate(points):
+        if p["status"] == "dropped":
+            face, edge = "none", MUTED
+        else:
+            face = edge = LEAF if p["arm"] == "residual_w05" else next(colours)
+        styles.append((MARKERS[i], face, edge))
+    for ax, c in zip(axes, metrics.CONSTRAINTS, strict=True):
+        key = f"viol_hours_{c}"
+        ax.axhline(0.0, color=MUTED, lw=0.8, ls=":")
+        handles = []
+        for p, (shape, face, edge) in zip(points, styles, strict=True):
+            x, x_low, x_high = p[key]
+            y, y_low, y_high = p["profit"]
+            handles.append(
+                ax.errorbar(
+                    x,
+                    y,
+                    xerr=[[x - x_low], [x_high - x]],
+                    yerr=[[y - y_low], [y_high - y]],
+                    linestyle="none",
+                    marker=shape,
+                    ms=8,
+                    mfc=face,
+                    mec=edge,
+                    mew=1.5,
+                    ecolor=edge,
+                    elinewidth=1.2,
+                    capsize=3,
+                    zorder=3,
+                )
+            )
+        (rb,) = ax.plot(
+            [top[key]],
+            [top["profit_eur_m2"]],
+            linestyle="none",
+            marker="D",
+            ms=9,
+            mfc="none",
+            mec=INK,
+            mew=1.6,
+            zorder=4,
+        )
+        ax.set_title(HOURS[c], loc="left", fontsize=12, weight="bold", color=INK)
+        ax.set_xlabel("hours outside the safe range", fontsize=11, color=INK)
+        _style(ax)
+    axes[0].set_ylabel("profit [€/m²]", fontsize=12, color=INK)
+
+    labels = [
+        f"{p['arm']} ({p['status']}), {p['result']}\n{len(p['seeds'])} seeds × {seasons}"
+        f" VALIDATION seasons\nprofit {p['profit'][0]:.2f} [{p['profit'][1]:.2f},"
+        f" {p['profit'][2]:.2f}] €/m²\nfruit growth {p['yield_kg_m2']:.2f} kg/m²"
+        for p in points
+    ]
+    labels.append(
+        f"rb_tuned (tuned rules), {E1_RESULT}\n{seasons} seasons scored as {top['n_seeds']}"
+        f" seeds, no bars\nprofit {top['profit_eur_m2']:.2f} €/m²\nfruit growth"
+        f" {top['yield_kg_m2']:.2f} kg/m²"
+    )
+    fig.legend(
+        [*handles, rb],
+        labels,
+        loc="upper left",
+        bbox_to_anchor=(0.695, 0.8),
+        frameon=False,
+        fontsize=10,
+        labelcolor=INK,
+        labelspacing=0.7,
+    )
+    fig.savefig(out, dpi=100)
+    return fig
+
+
+def footer(
+    source: str,
+    stamp: dict,
+    *,
+    place: str = PAPER_NAME,
+    note: str = "A simulator run, not a registered result",
+) -> str:
+    """A picture's provenance: its source, the place, the simulator's and this repo's commits, and
+    the note."""
     gl7 = manifest._versions()["gl-gym"][:7]
     dirty = " (dirty)" if stamp["dirty"] else ""
     return (
-        f"source: {source}, {PAPER_NAME}\nsimulator GreenLight-Gym @{gl7}, commit"
-        f" {stamp['commit'][:7]}{dirty}. A simulator run, not a registered result"
+        f"source: {source}, {place}\nsimulator GreenLight-Gym @{gl7}, commit"
+        f" {stamp['commit'][:7]}{dirty}. {note}"
     )
 
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         prog="python -m greenleaf_control.media",
-        description="Regenerate the README and LinkedIn visuals from the simulator.",
+        description="Regenerate the README and LinkedIn visuals from the simulator and the ledger.",
     )
     parser.add_argument("--out", type=Path, required=True, help="the dir to write the media into")
     args = parser.parse_args(argv)
     if not FFMpegWriter.isAvailable():
         parser.error("ffmpeg isn't on PATH, and the MP4 needs it (brew install ffmpeg)")
     stamp = manifest.code_stamp(smoke=True)
+    # The card's rows first: a refused row stops main before any season is played or file written.
+    points = tradeoff_points()
+    references = [rb_tuned_reference(n) for n in sorted({len(p["seeds"]) for p in points})]
 
     seasons = {c: play(c) for c in CARD}
     invalid = {c: s["result"] for c, s in seasons.items() if not s["result"]["valid"]}
@@ -345,6 +590,15 @@ def main(argv: list[str] | None = None) -> int:
     )
     card_source = " vs ".join(CARD)
     baselines_card(seasons, args.out / "baselines.png", footer=footer(card_source, stamp))
+    rows = [*dict.fromkeys(p[k] for p in points for k in ("result", "decision")), E1_RESULT]
+    tradeoff_source = ", ".join([*rows, RB_PARQUET])
+    tradeoff_footer = footer(
+        f"{', '.join(rows)},\n{RB_PARQUET}",  # two lines: one is wider than the card
+        stamp,
+        place=VAL_NAME,
+        note="Recorded VALIDATION results; the 2012 test weather is still sealed",
+    )
+    tradeoff_card(points, references, args.out / "tradeoff.png", footer=tradeoff_footer)
 
     made_at = datetime.now(UTC).isoformat()
     gl_gym = manifest._versions()["gl-gym"]
@@ -365,6 +619,12 @@ def main(argv: list[str] | None = None) -> int:
         entry("season_replay.gif", "rb_default", rb["result"]),
         entry("season_replay.mp4", "rb_default", rb["result"]),
         entry("baselines.png", card_source, {c: seasons[c]["result"] for c in CARD}),
+        {
+            **entry("tradeoff.png", tradeoff_source, {"points": points, "references": references}),
+            "scenario": scenarios.VALIDATION,
+            "split": "validation",
+            "ledger": rows,
+        },
     ]
     (args.out / "media.json").write_text(json.dumps(entries, indent=2) + "\n")
     return 0
