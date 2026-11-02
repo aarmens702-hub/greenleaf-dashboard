@@ -28,7 +28,8 @@ The conventions pinned here.
   (decision-eab26197). Its totals aren't pinned to 1e-9 here: seed 100's run dir and its
   selected.json aren't in git, so the orchestrator's export check pins them.
 - The ledger and the results/validation files are committed, and only read here, never written.
-- meta.dirty isn't checked: site/ is untracked when the CLI runs, so it is honestly true.
+- meta.dirty isn't pinned: the committed data is exported into a scratch dir from a clean commit
+  (dirty false) and then copied in, but a test can't tell how a file was made.
 - Issue #52 (D3b-2a, the Instrument restyle): one Google Fonts stylesheet becomes the page's only
   remote load (Aarmen's design comment on #49), and index.html and app.js carry the Instrument
   layout's hooks (nav.side, numbered section.sec blocks, drawGrid).
