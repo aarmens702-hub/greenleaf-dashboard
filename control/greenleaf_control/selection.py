@@ -4,8 +4,8 @@ select_checkpoint scores each of a run's checkpoints, ckpt_<steps>.zip in numeri
 then ckpt_final.zip, with evaluate.run_policy (deterministic, frozen stats) on scenarios.VALIDATION
 in 60-day seasons, and picks one:
 - residual_lag: the highest mean profit_eur_m2 among checkpoints whose mean per-step cost_<c>,
-  pooled over the seasons, is <= budget x 1.10 on every constraint; if none qualifies, the lowest
-  total cost (the plain sum over constraints of those means).
+  pooled over the seasons, is <= budget x 1.10 on every constraint with a nonzero budget; if none
+  qualifies, the lowest total cost (the plain sum over constraints of those means).
 - every other arm: the highest mean paper_return (metrics', not paper_reward_sum).
 A tie goes to the earliest checkpoint; an invalid season is scored, never dropped (PROTOCOL §4); a
 non-finite score raises. run_dir/selected.json is written once.
@@ -65,7 +65,8 @@ def _mean(values, what: str) -> float:
 
 def _score(run_dir: Path, checkpoint: str, budgets: list[float] | None) -> dict:
     """One checkpoint's VALIDATION seasons and means; with budgets (residual_lag), its pooled mean
-    per-step cost on each constraint and whether all are within budget x TOLERANCE."""
+    per-step cost on each constraint and whether each with a nonzero budget is within budget x
+    TOLERANCE."""
     lag = budgets is not None
     results, frames = [], []
     for s in scenarios.VALIDATION:
@@ -93,7 +94,9 @@ def _score(run_dir: Path, checkpoint: str, budgets: list[float] | None) -> dict:
         }
         scored["mean_cost"] = mean_cost
         scored["qualifies"] = all(
-            mean_cost[c] <= b * TOLERANCE for c, b in zip(metrics.CONSTRAINTS, budgets, strict=True)
+            mean_cost[c] <= b * TOLERANCE
+            for c, b in zip(metrics.CONSTRAINTS, budgets, strict=True)
+            if b > 0
         )
     return scored
 

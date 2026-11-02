@@ -34,7 +34,7 @@ REGISTRATION = {
     "budget": {"cpu_hours": 1.0, "usd": 0.0, "backend": "local"},
 }
 DIAGNOSTICS = {"min_approx_kl": 0.002, "final_entropy": -1.5, "final_explained_variance": 0.8}
-PER_SPLIT = {"heldout": {"iqm": 1.0, "ci_low": 0.5, "ci_high": 1.5}}
+SPLITS = ("amsterdam_2012", "london_2012", "abbotsford_2012")  # scenarios.TEST's keys
 SECOND_FINAL = "final-result-0badc0de"
 
 
@@ -128,21 +128,51 @@ def _result(path: Path, registered: dict, run: dict) -> dict:
     return ledger.record_result(
         registered=registered["row_id"],
         per_arm=per_arm,
-        selected={run["row_id"]: "ckpt_final.zip"},
+        selected={run["row_id"]: "final"},
         path=path,
     )
 
 
-def _final(path: Path) -> tuple[dict, dict]:
-    """Register the final evaluation and spend the seal once; return (final-registered, final-result)."""
+def _per_split(scored: dict) -> dict:
+    """A final-result's per_split: each test split holds arm a, scored at scored ({run row_id:
+    checkpoint}), and the two baselines, scored at none."""
+
+    def entry(arm: str, at: dict) -> dict:
+        return {
+            "iqm": 31.5,
+            "ci_low": 30.0,
+            "ci_high": 33.0,
+            "guards": {"viol_hours_temp": {"iqm": 3.0, "ci_low": 2.0, "ci_high": 4.0}},
+            "invalid_episodes": 0,
+            "prob_improvement": None if arm == "rb_tuned" else 0.75,  # P(arm > rb_tuned)
+            "scored": dict(at),
+        }
+
+    arms = {"a": scored, "rb_default": {}, "rb_tuned": {}}
+    return {split: {arm: entry(arm, at) for arm, at in arms.items()} for split in SPLITS}
+
+
+def _final_register(path: Path) -> tuple[dict, dict]:
+    """Register the final evaluation at the last result's selected checkpoints; return
+    (final-registered, those checkpoints)."""
+    checkpoints = ledger.rows(kind="result", path=path)[-1]["selected"]
     freg = ledger.final_register(
         issue=9,
-        checkpoints={"run-0123abcd": "ckpt_final.zip"},
+        checkpoints=checkpoints,
         baselines=["rb_default", "rb_tuned"],
         approved_by="Aarmen",
         path=path,
     )
-    fres = ledger.final_result(final_registered=freg["row_id"], per_split=PER_SPLIT, path=path)
+    return freg, checkpoints
+
+
+def _final(path: Path) -> tuple[dict, dict]:
+    """Register the final evaluation at the last result's selected checkpoints and spend the seal
+    once; return (final-registered, final-result)."""
+    freg, checkpoints = _final_register(path)
+    fres = ledger.final_result(
+        final_registered=freg["row_id"], per_split=_per_split(checkpoints), path=path
+    )
     return freg, fres
 
 
@@ -251,6 +281,40 @@ def test_a_result_with_mismatched_fingerprints_exits_1_naming_it(tmp_path, monke
     assert res["row_id"] in lines[0]
 
 
+def test_a_final_result_with_mismatched_fingerprints_exits_1_naming_it_and_the_key(
+    tmp_path, monkeypatch
+):
+    """A final-result whose fingerprints differ from its final-registered row's is named by its
+    row_id and the differing key.
+
+    After a clean experiment, the final is registered at the result's selected checkpoint and
+    committed; docs/PROTOCOL.md is then edited and committed, so the final-result recorded next
+    hashes another protocol than its registration did. ledger.py writes it (it doesn't compare
+    fingerprints); check_locks must catch it. Every commit appends, the result's fingerprints equal
+    its registration's, and the seal is spent once, so this is the one violation: one line naming
+    the final-result and docs/PROTOCOL.md.
+    """
+    repo = _make_repo(tmp_path, monkeypatch)
+    path = repo / LEDGER
+    _clean_history(repo, path)
+    freg, checkpoints = _final_register(path)
+    _commit(repo, "final-register")
+    (repo / "docs" / "PROTOCOL.md").write_text("protocol v2: the primary metric changed\n")
+    _commit(repo, "edit the protocol")
+    fres = ledger.final_result(
+        final_registered=freg["row_id"], per_split=_per_split(checkpoints), path=path
+    )
+    _commit(repo, "final-result")
+    assert fres["fingerprints"]["docs/PROTOCOL.md"] != freg["fingerprints"]["docs/PROTOCOL.md"]
+
+    out = _check_locks(repo)
+
+    lines = _violations(out)
+    assert len(lines) == 1, out.stdout
+    assert fres["row_id"] in lines[0]
+    assert "docs/PROTOCOL.md" in lines[0]
+
+
 def test_two_final_results_exit_1_naming_the_second(tmp_path, monkeypatch):
     """The seal is spent once: a second final-result row is named by its row_id.
 
@@ -260,6 +324,7 @@ def test_two_final_results_exit_1_naming_the_second(tmp_path, monkeypatch):
     """
     repo = _make_repo(tmp_path, monkeypatch)
     path = repo / LEDGER
+    _clean_history(repo, path)
     _, fres = _final(path)
     _commit(repo, "final-register and final-result")
     with path.open("a") as f:

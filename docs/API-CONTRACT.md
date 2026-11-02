@@ -39,15 +39,17 @@ Paths are relative to `control/`. Scenario dicts are `{"location": str, "growth_
   -> gym.Env`
   - Always uses `ConstraintCostReward` and `weather_data_dir=WEATHER_DIR`.
   - A fixed `scenario` uses the fixed sampler; `sampler_kwargs` uses the random one.
-  - Refuses a TEST scenario unless `allow_test=True` is passed. That flag exists only for `evaluate --final` and the
-    reset-only weather test.
+  - Refuses a TEST scenario unless `allow_test=True` is passed. Only `evaluate --final` sets it True (plus the
+    reset-only weather test). `make_env`, `run_baseline`, `train.build_vec_env`, `evaluate.run_rb` and `run_policy`
+    pass it through, default False.
   - A season that would read a TEST year's file (its own year, or the next year's via upstream's year-end expansion)
     is refused unless `allow_test`, at construction (every scenario the sampler can draw) and at `reset`.
   - Ends the season after exactly N steps (decision B) and returns a flat `Box` observation (`FlattenObservation`,
     then `SeasonProgress` if asked).
   - Every step's info carries `x_prev` and `x`: float64 copies of the raw state before and after the step.
 - `make_env(method: str, *, seed: int, scenario: dict | None = None, season_length: int = 60, penalty_weight: float = 1.0,
-  rb_params: dict | None = None, residual_scale: float = 0.15) -> gym.Env`
+  rb_params: dict | None = None, residual_scale: float = 0.15, allow_test: bool = False) -> gym.Env`
+  - `allow_test` passes through to `make_raw_env`; only `evaluate --final` sets it.
   - Returns a flat `Box` observation.
   - `ppo_paper`: PAPER, normalized rate actions, upstream observations.
   - `ppo`: TRAIN sampler, normalized rate actions, plus season progress.
@@ -61,8 +63,9 @@ Paths are relative to `control/`. Scenario dicts are `{"location": str, "growth_
 - `class SeasonProgress(gym.ObservationWrapper)`: appends `timestep / N` in [0, 1].
 - `class SolverFailureFlag(gym.Wrapper)`: sets `info["solver_failure"] = bool(truncated)` (nothing truncates for time;
   a season ends terminated after exactly N steps).
-- `run_baseline(name: str, scenario: dict, season_length: int = 60) -> list[dict]`: a full episode's per-step info
-  dicts for a BASELINES entry (`random` is seeded by the scenario's start day).
+- `run_baseline(name: str, scenario: dict, season_length: int = 60, *, allow_test: bool = False) -> list[dict]`: a full
+  episode's per-step info dicts for a BASELINES entry (`random` is seeded by the scenario's start day). `allow_test`
+  passes through to `make_raw_env`; only `evaluate --final` sets it.
 
 ## `greenleaf_control.metrics` (scorer file; never imports `rewards`)
 - `episode_metrics(states: np.ndarray, controls: np.ndarray, params: np.ndarray, *, dt: float = 900.0,
@@ -79,11 +82,15 @@ Paths are relative to `control/`. Scenario dicts are `{"location": str, "growth_
   - `update(mean_cost: float) -> float`. `lam` starts at 0.0.
   - The error is relative to the budget: `e = (cost - budget) / max(budget, 1e-8)`.
   - The integral is clamped to [0, lambda_max] (anti-windup); the derivative acts only on increases; λ is clamped to [0, lambda_max].
+- `class FixedMultiplier`, constructed as `__init__(self, value: float = 1.0)`, for a constraint whose budget is 0.
+  - `update(mean_cost: float) -> float` returns `value` whatever the cost. `lam` is `value` from construction.
 - `class VecLagrangianReward(VecEnvWrapper)`
   - `lambdas: np.ndarray` (3,)
   - Each reward becomes `(r - Σλᵢcᵢ) / (1 + Σλᵢ)`.
   - `pop_mean_costs() -> np.ndarray` (3,), the mean per step since the last pop.
 - `class LagrangianCallback(BaseCallback)`, constructed as `__init__(wrapper, pids, log_path: Path)`.
+  - `pids` holds a `PIDLagrangian` or a `FixedMultiplier` per constraint.
+  - At training start it sets `wrapper.lambdas` from the multipliers' `lam`.
   - At each rollout end it updates the PIDs, sets `wrapper.lambdas`, and logs `lag/lambda_<c>` and `lag/cost_<c>`.
 - Stack order: `SubprocVecEnv → VecMonitor → VecLagrangianReward → VecNormalize`.
 
@@ -120,18 +127,27 @@ Paths are relative to `control/`. Scenario dicts are `{"location": str, "growth_
   | `run-end` | `run`, `status`, `wall_s`, `timesteps`, `solver_failures`, `cost_usd`, `diagnostics` ({min_approx_kl, final_entropy, final_explained_variance}) |
   | `result` | `registered`, `per_arm` ({iqm, ci_low, ci_high (null when no run was scored), guards ({guard: {iqm, ci_low, ci_high}}), crashed, invalid_episodes, spend_usd (the arm's run-ends' cost_usd, null as 0)}), `selected` ({run row_id → `"<steps>"` \| `"final"`}, learning runs only) |
   | `decision` | `result`, `decision` (adopted or dropped), `note` |
-  | `final-registered` | `checkpoints`, `baselines`, `approved_by`, `approved_at` |
-  | `final-result` | `final-registered`, `per_split` |
+  | `final-registered` | `checkpoints` ({run row_id → `"<steps>"` \| `"final"`}; each pair is exactly a value of some `result` row's `selected`; a learning arm is named by its run rows' `arm` and comes from one registration; a learning arm's name is not one of the row's `baselines`), `baselines` (a list drawn from `FINAL_BASELINES`, no duplicates, with `rb_default` and `rb_tuned`), `approved_by`, `approved_at` |
+  | `final-result` | `final-registered`, `per_split` ({split: {arm: {iqm, ci_low, ci_high, guards ({g: {iqm, ci_low, ci_high}}, g in F1a-3's `FINAL_GUARDS`), invalid_episodes, prob_improvement, scored}}}). split is exactly `TEST_SPLITS`; arm is exactly `final_arms` plus `baselines`; iqm and ci_* are on the primary `profit_eur_m2`; prob_improvement is P(arm > rb_tuned) on the primary, null for rb_tuned; scored is {run row_id → checkpoint} as registered, `{}` for a baseline |
 
 - **CLI** (`python -m greenleaf_control.ledger`):
   - `register ... [--dry]`
   - `result --registered <row> --numbers <file>`: `<file>` is `{per_arm, selected}` as `selection` writes it; the ledger adds `crashed` and `spend_usd` from the run-ends and refuses them in the file
   - `decide --result <row> --adopted|--dropped --note "..."`
   - `show [--issue N] [--spend]`
-  - `final-register ... --approved-by Aarmen`
+  - `final-register --issue N --checkpoints JSON --baselines B... --approved-by Aarmen`
+  - `final-result --final-registered <row> --numbers <file>`: `<file>` is exactly `{per_split}` as F1a-3's `evaluate --final` will write it; prints the row id
+- **Names:** `TEST_SPLITS` and `FINAL_BASELINES` (written out; tests pin them to `tuple(scenarios.TEST)` and
+  `envs.BASELINES`), `FINAL_ARM_KEYS`, and `final_arms(final_registered: dict, rows: list[dict]) -> dict[str, dict[str, str]]`
+  (arm → {run row_id → checkpoint}).
 - **Appends only.** `register` refuses a third registration on one issue without `--owner-ok`, and any `primary`
   or `guards` entry not in `ledger.RESULT_KEYS` (checked on every append). `result` refuses
-  unless every registered arm × seed has a `run-end` row.
+  unless every registered arm × seed has a `run-end` row. `final-register` refuses a missing `approved_by`, a spent
+  seal, empty `checkpoints`, a pair no result's `selected` holds, one arm from two registrations, bad `baselines`, and
+  a learning arm named like one of its baselines. `final-result` refuses a second final-result first, then a `per_split` whose
+  splits, arms or entry keys aren't the above, a `prob_improvement` that isn't null exactly for `rb_tuned`, and a
+  `scored` that differs from the registration (guard names are checked in F1a-3 via `FINAL_GUARDS`, not here).
+  `check_locks` holds a result's and a final-result's fingerprints to their parent's.
 
 ## `greenleaf_control.train`
 - `python -m greenleaf_control.train --method M --seed S [--penalty-weight W] [--budget-frac B] [--timesteps N]
@@ -158,55 +174,116 @@ Paths are relative to `control/`. Scenario dicts are `{"location": str, "growth_
     season at the run's season length, played by the end-of-training model with frozen copies of its VecNormalize
     stats. Its `paper_return` is Σ `info["paper_reward"]` summed in step order with `+=` (evaluate's
     `paper_reward_sum`, a reload check), not `metrics`' `paper_return`; selection uses the metrics one.
-- `build_vec_env(config: dict, n_envs: int, *, scenario: dict | None = None, season_length: int | None = None)
-  -> VecNormalize`: `SubprocVecEnv` (`DummyVecEnv` for one env) → `VecMonitor` → `VecLagrangianReward` (residual_lag
-  only) → `VecNormalize`, env i = `make_env(method, seed=seed + i, ...)` from the manifest's config; `scenario` and
-  `season_length` override the config's (for evaluation).
+- `build_vec_env(config: dict, n_envs: int, *, scenario: dict | None = None, season_length: int | None = None,
+  allow_test: bool = False) -> VecNormalize`: `SubprocVecEnv` (`DummyVecEnv` for one env) → `VecMonitor` →
+  `VecLagrangianReward` (residual_lag only) → `VecNormalize`, env i = `make_env(method, seed=seed + i, ...)` from the
+  manifest's config; `scenario` and `season_length` override the config's (for evaluation). `allow_test` passes
+  through to `make_env`; only `evaluate --final` sets it.
 - `build_model(config: dict, venv) -> PPO`: `configs/ppo.yml`'s PPO on cpu, seeded, with only `log_std_init` changed
   (-1.0 for the residual arms).
 
 ## `greenleaf_control.evaluate`
-- `run_rb(params: dict, scenario: dict, season_length: int = 60, record_steps: bool = False) -> tuple[dict, pd.DataFrame | None]`
+- `run_rb(params: dict, scenario: dict, season_length: int = 60, record_steps: bool = False,
+  return_trace: bool = False, *, allow_test: bool = False) -> tuple[dict, pd.DataFrame | None]`
 - `run_policy(run_dir: Path, checkpoint: str, scenario: dict, season_length: int = 60, record_steps: bool = False,
-  return_trace: bool = False) -> tuple[dict, pd.DataFrame | None]`, or with `return_trace=True`
-  `(result, frame, (states, controls, params))`: the same season's raw trace that metrics graded (no second season).
+  return_trace: bool = False, *, allow_test: bool = False) -> tuple[dict, pd.DataFrame | None]`
   - Rebuilds the training stack with `train.build_vec_env(manifest["config"], 1, scenario=..., season_length=...)`
     (`DummyVecEnv` → `VecMonitor` → `VecLagrangianReward` for residual_lag), loads
     `VecNormalize.load(run_dir/"vecnorm_<checkpoint>.pkl", <that stack>)`, sets `training = False` and
     `norm_reward = False` before reset, then `PPO.load(run_dir/"ckpt_<checkpoint>.zip", device="cpu")` and
     deterministic predict until the season ends.
+- **`return_trace`** (both, default False): with True, `(result, frame, (states, controls, params))`: the same
+  season's raw trace that metrics graded (no second season).
+- **`allow_test`** (both): passes through, `run_rb` to `make_raw_env` and `run_policy` to `train.build_vec_env`;
+  default False, and only `evaluate --final` sets it.
 - **Result dict** (both): `metrics.episode_metrics(...)` graded with the env's own `p` and `season_steps = N`, plus
   `paper_reward_sum` = Σ `info["paper_reward"]` in step order with `+=` (a reproduction check, not a graded metric).
-- **CLI:** `--controller {zero_controls|random|rb_default|rb_tuned|<run_dir>}`
-  `--split {train_eval|validation|paper|<the three test splits>} --out <parquet>`.
-  - The three test splits are refused as sealed (PROTOCOL §8) without `--final <final-registered row>`; `--final`
-    itself is refused until F1 (Stage 3) implements it.
+- **`main(argv=None, *, ledger_path=ledger.LEDGER)`**; `ledger_path` is the ledger `--final` reads.
+- **CLI, scoring:** `--controller {zero_controls|random|rb_default|rb_tuned|<run_dir>}`
+  `--split {train_eval|validation|paper|<the three test splits>} --out <parquet>`, all three required (argparse's
+  message) when there is no `--final`.
+  - The three test splits are refused as sealed (PROTOCOL §8) without `--final`.
   - `--out` must not exist (created exclusively). One row per scenario in split order, 60-day seasons. Identity
     columns `controller, checkpoint` (None for a baseline, `final` for a run dir), `split, location, growth_year,
     start_day, season_length`, then the result keys.
   - `<run_dir>` is a directory holding `manifest.json`, scored at its `final` checkpoint. `zero_controls` and
     `random` go through `envs.run_baseline`, `rb_*` through `run_rb`.
+- **CLI, the final:** `--final <final-registered row>`, with no `--controller`, `--split` or `--out` (refused,
+  naming the flag).
+  - **Refuses, in this order**, before any env is built, any weather is read or any file is written: (1) any
+    `final-result` in the ledger (the seal is spent); (2) a row that isn't a `final-registered` row, or isn't the
+    newest one (names the newer); (3) `manifest.fingerprints()` unequal to the row's (names the keys); (4) a
+    non-empty `FINAL_RESULTS`; (5) for any run in `ledger.final_arms(row)`: a run dir without `manifest.json`,
+    `ckpt_<c>.zip`, `vecnorm_<c>.pkl` or `selected.json`, or a `selected.json` whose `checkpoint` isn't `<c>`
+    (names the run's row id, arm, seed and dir); (6) a dirty tree (`manifest.code_stamp(smoke=False)` raises).
+  - **Scores**, for each TEST split in `ledger.TEST_SPLITS` order and each scenario in split order, 60-day seasons:
+    each learning arm (by name), its runs by ascending seed, with `run_policy(run_dir, c, s, 60, allow_test=True)`;
+    then each of the row's `baselines` in its order, as the scoring CLI scores it, with `allow_test=True`.
+    Traced seasons, each arm's lowest registered seed and every baseline, are scored with `record_steps=True,
+    return_trace=True` (`zero_controls` and `random`: the frame and trace from `run_baseline`'s infos); each
+    season is played once.
+  - **Writes `FINAL_RESULTS/<row>/` once** (`mkdir(exist_ok=False)`, each file opened exclusively): `stamp.json`
+    (the code stamp) before the first season; `seasons.parquet`, one row per split × scenario × arm × run, identity
+    columns `arm, run, seed, checkpoint` (null for a baseline), `split, location, growth_year, start_day,
+    season_length`, then the result keys; then `per_split.json`, `{"per_split": ...}` in the ledger's `final-result`
+    shape with sorted keys, indent 2 and no NaN. Per split and arm, `stats.iqm_ci` (defaults: 2,000 reps, seed 0) on
+    the runs × scenarios array (a baseline is one run) gives `iqm, ci_low, ci_high` on `FINAL_PRIMARY` and `guards`
+    on each of `FINAL_GUARDS`; `invalid_episodes` counts seasons with `valid == False`; `prob_improvement` is
+    `stats.prob_improvement(arm, rb_tuned)` on the primary, null for `rb_tuned`; `scored` is `final_arms`' (`{}` for
+    a baseline).
+  - **Then `replays/`** (after `per_split.json`, before the `next:` line): one
+    `<prefix>_<location>_<growth_year>_<start_day>.json` per traced season, `<prefix>` the arm's name or the
+    baseline's, each `export_replay.export(...)` of its scored season (so `totals` is its `seasons.parquet` row),
+    written exclusively, compact, no NaN, under 250 KB. `meta.controller` is `<prefix>`; the stamp is
+    `{commit, dirty}` of the one `code_stamp(smoke=False)` plus `gl_gym`; `meta.run` is export's
+    {id, registered, result, arm, seed, checkpoint, commit} for the traced run (`result` the result row selecting
+    its checkpoint), `None` for a baseline; `meta.note` is `"registered final <row>: <arm> seed <k> at checkpoint
+    <c>"` or `"registered final <row>: <baseline>"`. The stamp and each `meta.run` are built before
+    `FINAL_RESULTS/<row>/` is made.
+  - **A short traced season** (its frame isn't `season_length × 96` steps, e.g. a solver failure ended it) gets no
+    replay; every full-length one is still written. After the replays, `--final` raises one `RuntimeError` naming
+    each short season (`<prefix> <split> day <start_day>: <n> of <N> steps`), saying `seasons.parquet` and
+    `per_split.json` are complete, and giving the `final-result --final-registered <row> --numbers
+    <per_split.json>` command in place of the `next:` line.
+  - **Prints** one line per split × arm (primary and each guard as `iqm [lo, hi]`, `P(improvement)`, `n_runs`,
+    `invalid_episodes`, and `n<5: no claim` for a learning arm under 5 runs), then last
+    `next: python -m greenleaf_control.ledger final-result --final-registered <row> --numbers <per_split.json>`.
+  - **Writes no ledger row.** Every `allow_test=True` in evaluate is inside `_final`, this path.
+- **Names:** `FINAL_RESULTS` (`control/results/final/`), `FINAL_PRIMARY = "profit_eur_m2"`, `FINAL_GUARDS =
+  ("viol_hours_co2", "viol_hours_temp", "viol_hours_rh", "paper_return", "yield_kg_m2", "solver_failures")`, each a
+  `ledger.RESULT_KEYS` entry.
 - **Per-step frame** (`record_steps`): `t, co2, temp, rh, u_*` (6), `u_rb_*` (residual only), `profit`, `cost_*`.
   - `t` is 0..T-1; co2 [ppm], temp [°C] and rh [%] from the state after the step; `u_*` (the applied absolute
     controls) and `u_rb_*` in upstream order: boil, co2, thscr, vent, lamp, blscr; `profit` and `cost_*` are the
     step's info values (reward-side diagnostics, not metrics).
 
 ## `greenleaf_control.export_replay` (D2, for the demo site)
-- `export(frame, result, states, controls, params, *, controller, scenario, stamp) -> dict`:
+- `export(frame, result, states, controls, params, *, controller, scenario, stamp, split, run) -> dict`:
   - `{meta, hourly, totals}`.
-  - `meta` = {controller, scenario, commit, dirty, gl_gym, note ("a simulator run, not a registered result"), bounds,
-    units}.
+  - `meta` = {controller, scenario, split, run, commit, dirty, gl_gym, note, bounds, units}:
+    - `split` is the split's name; `run` is `None` for a baseline, and for a run dir {id, registered, result, arm,
+      seed, checkpoint, commit}: its ledger run row, registration and result row, and `commit` the run's own training
+      commit, from its `manifest.json`;
+    - `commit`, `dirty` and `gl_gym` are the export code's stamp;
+    - `note` = `f"a simulator replay of a {split} season, not the final result"`.
   - `hourly` holds H = season_length × 24 points of:
     - t_hour;
     - co2/temp/rh at the end of each hour (frame row 4h+3, 3 significant digits);
     - the six u_* as the hour's mean (3 decimals);
     - profit and viol_co2/temp/rh as metrics on the prefix to that hour (4 decimals).
   - `totals` = the result exactly.
-- CLI `--controller {zero_controls|random|rb_default|rb_tuned|<run_dir>} --split ... --out <dir> [--final ROW]`:
-  - writes `<controller>_<location>_<year>_<startday>.json` per scenario (compact, no NaN), each under 250 KB;
-  - the test splits are refused without `--final`, and `--final` until F1, before any env;
-  - an existing file is refused;
-  - a run dir plays its `final` checkpoint through `evaluate.run_policy(..., return_trace=True)`.
+- CLI `--controller {zero_controls|random|rb_default|rb_tuned|<run_dir>} --split ... --out <dir> [--final ROW]`,
+  `main(argv=None, *, ledger_path=ledger.LEDGER)` as `selection.main`:
+  - writes `<controller>_<location>_<year>_<startday>.json` per scenario (compact, no NaN), each under 250 KB. A
+    baseline's `<controller>` is its name, a run dir's `<arm>_seed<seed>` (e.g. `residual_w05_seed100`);
+  - a run dir is a registered run, looked up in `ledger_path`, which is only read (a baseline never reads it):
+    - the `run` row whose `run_dir` resolves to the dir; none is refused as "not a registered run", naming the dir;
+    - its registration's `result` rows: exactly one, whose `selected` names the run; otherwise refused, naming the
+      run id and the count;
+  - a run dir plays at that row's `selected[run id]` checkpoint (not `selected.json`'s) through
+    `evaluate.run_policy(..., return_trace=True)`;
+  - refusals, in order and all before any env: `--final` (until F1), a test split without `--final`, a non-baseline
+    with no `manifest.json`, the run lookup, an existing file.
 
 ## `greenleaf_control.selection`, `stats`, `tune_rb`, `run_grid`, `modal_app`
 - `select_checkpoint(run_dir: Path) -> str`: the PROTOCOL §5 rule on VALIDATION; writes `run_dir/selected.json` once.
@@ -216,8 +293,9 @@ Paths are relative to `control/`. Scenario dicts are `{"location": str, "growth_
   - **Scoring:** each candidate is scored with `evaluate.run_policy(run_dir, name, s, 60, record_steps=<residual_lag>)`
     for s in `scenarios.VALIDATION`, in order. Seasons are always 60 days, whatever the manifest's season length.
   - **residual_lag:**
-    - A candidate qualifies when, for every constraint c, the mean of its frames' `cost_<c>`, pooled over the three
-      seasons, is ≤ `config["budgets"][c] × 1.10`.
+    - A candidate qualifies when, for every constraint c with a nonzero budget, the mean of its frames' `cost_<c>`,
+      pooled over the three seasons, is ≤ `config["budgets"][c] × 1.10`. With every budget 0, every candidate
+      qualifies.
     - The qualifying candidate with the highest mean `profit_eur_m2` wins.
     - If none qualifies, the lowest total cost wins: the plain sum over c of those means.
   - **Other arms:** the highest mean `paper_return` (metrics', not `paper_reward_sum`).
@@ -354,3 +432,131 @@ Paths are relative to `control/`. Scenario dicts are `{"location": str, "growth_
       `finally`, and returns `/runs/<run_rel>/manifest.json`, read by its own path (the commit reloads the volume, so
       other containers' manifests are visible).
   - volume `greenleaf-runs` (`create_if_missing=True`) mounted at `/runs`.
+
+## `greenleaf_control.report` (A1a, A1c; plays no season, writes no ledger row)
+- `ANALYSIS` = `control/results/analysis`; `BASELINE` = `"rb_tuned"`; `METRICS` = `(profit_eur_m2, viol_hours_total,
+  viol_hours_co2, viol_hours_temp, viol_hours_rh, yield_kg_m2, paper_return)`; `SCORED_ONCE` = `"2012 test weather,
+  scored once"`.
+- **Splits:** validation, and the three TEST splits (A1c) once the ledger holds the `final-result` row. Until then a
+  test split is refused (a ValueError naming it and the seal, PROTOCOL §8) before any parquet is read (only the ledger
+  is read). `train_eval` and `paper` are always refused (a ValueError naming the split from `load_scores`, an argparse
+  error from the CLI).
+- `load_scores(split, *, ledger_path=ledger.LEDGER) -> pd.DataFrame`: one row per label × run × scenario.
+  - **Columns:** `label, arm, issue, registered, result, decision, protocol, run, seed, crashed, split, location,
+    growth_year, start_day`, every `ledger.RESULT_KEYS` key, `valid`, `viol_hours_total` (co2 + temp + rh). `issue`,
+    `seed` and `crashed` are nullable Int64.
+  - **Order** (selection's; the bootstrap depends on it): baselines in `envs.BASELINES` order, then each `registered`
+    row with scenarios `["validation"]` and a `result` row in ledger order, arms in registration order, runs by seed,
+    scenarios in `scenarios.SPLITS` order.
+  - **Baselines:** every `*.parquet` in `selection.RESULTS`, rows with split `validation` (others ignored), labelled by
+    name; ids, `run`, `seed` and `crashed` null. Refused: a controller not in `envs.BASELINES` (a run dir included), a
+    (controller, scenario) in two parquets, a baseline without every scenario of the split.
+  - **Arms:** runs from `selection._registration` (every run that didn't crash, by seed); each run's seasons are
+    `selection._read`'s `candidates[checkpoint]["per_scenario"]`. Refused: a run with no `selected.json` ("run
+    selection first"), a stale one, an arm whose runs all crashed, two result rows on a registration, two decision rows
+    on a result. A registration with no result row prints `skipped <row>: no result row yet`, and none of its files
+    are read.
+  - **Ids:** `label` = `<arm> #<issue>/<first 4 hex of the registered id>`; `decision` = `"<adopted|dropped> <decision
+    row id>"` or null; `protocol` = the first 8 hex of the registration's `fingerprints["docs/PROTOCOL.md"]`; `crashed`
+    = `ledger._arm_tally`'s count for the arm (null for a baseline).
+  - **E1:** an arm of method `rb_tuned` is no row of its own; its arm name, `registered`, `result`, `decision` and
+    `protocol` go on the `rb_tuned` baseline rows. Refused: a second such arm, one with no run that didn't crash, one
+    with no `rb_tuned` parquet.
+  - **A TEST split** reads only `evaluate.FINAL_RESULTS/<the final-registered row the final-result names>/
+    seasons.parquet`, that split's rows; no selected.json and no evaluate parquet. The same columns: `label` = `arm` =
+    the learning arm's or baseline's name; a learning arm's `issue, registered, result, decision, protocol` as above
+    (from the registration its runs name), `run` and `seed` from its run rows; `crashed` null; a baseline's ids null.
+    Order: the final's baselines in `envs.BASELINES` order, then its arms (`ledger.final_arms`) by registration in
+    ledger order and arm in registration order, runs by seed, scenarios in `scenarios.SPLITS` order. Refused (a
+    ValueError naming it): no seasons.parquet; a registered run or baseline without each of the split's scenarios
+    exactly once.
+- `summarize(scores) -> pd.DataFrame`: one row per label (a `label` column), in the scores' first-appearance order.
+  Each statistic is on the label's runs (by seed) × scenarios (split order) array, whatever the input's row order.
+  - `label, decision, protocol, n_runs, crashed, invalid_episodes` (the count of `valid` False; PROTOCOL §4).
+  - `<m>_{iqm,lo,hi}` = `stats.iqm_ci` for each m in `METRICS`; `viol_hours_sum_iqm` = the sum of the three
+    per-constraint IQMs (no CI). The table carries both "total" violation hours.
+  - **rb_tuned like-for-like:** `rb_tuned_profit_iqm` = `stats.iqm_ci(np.tile(<rb_tuned's 1 × S profits>, (n_runs,
+    1)))[0]`; `rb_tuned_viol_sum_iqm` = the same per constraint, summed.
+  - **Paired gains over rb_tuned's same scenario:** `profit_gain_{iqm,lo,hi}` = `iqm_ci(arm − rb_tuned)` on profit;
+    `viol_saved_{iqm,lo,hi}` = `iqm_ci(rb_tuned − arm)` on `viol_hours_total`.
+  - `p_improve_profit` = `stats.prob_improvement(arm, rb_tuned)`; `p_improve_viol` = the same on negated
+    `viol_hours_total`. Against a 1-run baseline it's the share of same-season wins (ties half), with no CI.
+  - `flag`: `deterministic, 1 run` for zero_controls, rb_default and rb_tuned (PROTOCOL §6); `n<5: no claim` under 5
+    runs, random included; otherwise `""`.
+  - No `rb_tuned` rows raises ValueError.
+- `check_ledger(scores, *, ledger_path) -> int`: for every `result` row of a registration in the scores, each arm's
+  primary and every guard (`iqm, ci_low, ci_high`) must equal `stats.iqm_ci` on the scores within 1e-12, else
+  ValueError naming the result row, arm and key. Returns the number of (arm, key) pairs checked.
+  - **A TEST split's scores** are checked against the `final-result` row instead: every arm in its
+    `per_split[split]`, `evaluate.FINAL_PRIMARY` and each of its guards, within 1e-12 of `stats.iqm_ci` on that
+    arm's scores, else ValueError naming the final-result row, split, arm and key (an arm with no score rows too).
+- `figures(scores, summary, out_dir) -> None` (A1b): three PNGs drawn by `viz`, derived from the scores and the
+  summary, each with the footer `source: python -m greenleaf_control.report --split <split>; derived from
+  summary.csv / scores.parquet`. On a TEST split the footer adds `SCORED_ONCE` on a second line, and each figure
+  gets `viz`'s `title=` = `<viz's default title> · <split>, 2012 test weather, scored once`. Validation passes no
+  `title=`, so `viz` draws its default (`viz.PER_SCENARIO_TITLE`, `PROFILES_TITLE`, `TRADEOFF_TITLE`).
+  - **Status** of a label: its decision's word (`adopted` or `dropped`), unless a decision note calls its arm otherwise:
+    `report.NOTE_CALLS[(decision row id, arm)]` (E4's `decision-b159ac9a` drops `residual_w4`) overrides the row's
+    word. None for a baseline (rb_tuned's E1 fold included) or an undecided arm.
+  - `per_scenario.png`: `viz.per_scenario`, panels `profit [€/m²]` and `total violation hours [h]`, every label's raw
+    runs × scenarios array, scenarios labelled `<location> day <start_day>`;
+  - `profiles.png`: `viz.profiles`, every label but rb_tuned, panels `profit gain over rb_tuned's same season [€/m²]`
+    (arm − rb_tuned) and `violation hours saved vs rb_tuned's same season [h]` (rb_tuned − arm); `highlight` = the
+    labels whose status is `adopted`;
+  - `tradeoff.png`: `viz.tradeoff`, one point per summary row at (`viol_saved_*`, `profit_gain_*`) with its status and
+    `n` = `n_runs` (a learning label under 5 runs reads `(n=<k>, no claim)`), so rb_tuned is the origin; x label
+    `violation hours saved vs rb_tuned [h]`, y label `profit gain over rb_tuned [€/m²]`.
+- `main(argv=None, *, ledger_path=ledger.LEDGER) -> int`; CLI `python -m greenleaf_control.report --split
+  {validation,amsterdam_2012,london_2012,abbotsford_2012} [--out DIR]`, `--out` defaulting to `ANALYSIS`.
+  - Loads, checks and summarizes before a dir is made or a file is written; a refusal writes nothing.
+  - Writes `<out>/<split>/scores.parquet` (load_scores' frame), `summary.csv` (summarize's, full precision) and
+    `summary.md`, then `figures`' `per_scenario.png`, `profiles.png` and `tradeoff.png`, replacing any previous
+    version. `summary.md`: line 1 names the command and `summary.csv` (on a TEST split also
+    `control/results/final/<final-registered row>/seasons.parquet`, the final-result row and `SCORED_ONCE`), a
+    legend, then a pipe table with one row per label (3 decimals, hours 2). Neither text file carries a timestamp or
+    the out path.
+  - Prints `matches the ledger: <k> (arm, key) pairs`, then one line per label.
+
+## `greenleaf_control.site_build` (S1, for the demo site; plays no season, writes no ledger row)
+- Here `site/` and `control/...` paths are relative to the repo root (`root`), not to `control/`.
+- **Reads only recorded files:** imports stdlib, `ledger` and `manifest` only (no env, `evaluate`, `report`,
+  `export_replay` or `rewards`, so no `gl_gym`); opens no weather file; writes nothing outside `out`.
+- `CONTROLLERS`: the page's controllers, id → display name, in order: `rb_tuned` "Tuned rules", `rb_default`
+  "Default rules", `residual_w05` "Residual agent, fixed penalty", `lag_b100` "Residual agent, constrained", `ppo` "PPO, no
+  rules", `ppo_paper` "PPO, paper setup", `zero_controls` "Do nothing". `random` is left out everywhere.
+- `build(out: Path, *, root=manifest.REPO_ROOT, ledger_path=ledger.LEDGER, force=False) -> dict`:
+  - returns `{"final_result": <final-result row id>, "replays": <int, copied into out/data/final>, "files": <int,
+    files written>, "bytes": <int, their total size>}`.
+  - **The final** is the ledger's one `final-result` row; its replays are `root/control/results/final/<the
+    final-registered row it names>/replays`, never typed.
+  - **Copies, byte for byte:** every plain file directly in `root/site` and `root/site/data/*.json`, to the same
+    relative path under `out`; and each page controller's `<id>_<Location>_2012_<day>.json` from the final's replays to
+    `out/data/final/` under its own name (7 × 3 cities × 8 start days = 168 today).
+  - **`out/data/index.json`:** `{"final_result", "splits"}`; splits `amsterdam_2012`, `london_2012`, `abbotsford_2012`,
+    `validation` in that order, each `{"id", "location", "year", "label", "dir", "start_days", "controllers"}`:
+    - `dir` is `data/final` for a 2012 split, `data` for validation; a replay is
+      `out/<dir>/<file_prefix>_<location>_<year>_<day>.json`;
+    - `start_days` are the days whose files are present, ascending; refused unless every controller has the same set;
+    - a controller is `{"id", "name", "file_prefix", "seed"}`, in `CONTROLLERS` order on a 2012 split (`file_prefix` =
+      id); validation lists `rb_tuned` and `residual_w05` (`file_prefix` `residual_w05_seed100`), what `site/data`
+      holds; `seed` = its replays' `meta.run.seed`, null when `meta.run` is null; refused if they disagree.
+  - **`out/data/results.json`:** `{<split id>: {"final_result" (2012 splits only), "note", "rows"}}`, in index.json's
+    split order:
+    - `note`: `"2012 test weather, scored once in the final (<row id>). Simulated, not a real greenhouse."`;
+      validation `"Validation seasons: checkpoints were selected on these. Simulated."`;
+    - `rows`: `root/control/results/analysis/<split>/summary.csv`'s labels in its order, `random` dropped; each
+      `{"controller", "n_runs", "invalid_episodes", "decision", <m>_{iqm,lo,hi} for m in profit_eur_m2, profit_gain,
+      viol_hours_total, viol_hours_co2, viol_hours_temp, viol_hours_rh, yield_kg_m2, "viol_hours_sum_iqm",
+      "rb_tuned_profit_iqm", "rb_tuned_viol_sum_iqm"}`: floats are `float(<the csv text>)`, the counts `int`, a blank
+      decision null; never recomputed or rounded;
+    - `controller`: the label on a 2012 split; on validation the page controller id of the final's baselines (by
+      name) and of each arm it scored (`ledger.final_arms`, by report's `<arm> #<issue>/<4 hex>` label of its
+      registration), null for every other label.
+  - Neither JSON holds NaN or Infinity (`allow_nan=False`).
+  - **Refusals** (`SystemExit` with a message), all before anything is made or written: the ledger has no
+    `final-result` row (the message names it); `out`, resolved and casefolded, is in or equal to `root/site`,
+    `root/control/results`, `root/control/runs` or `root/control/ledger`; `out` is `root` or an ancestor of it
+    (`force` included); `out` is non-empty without `force`. `force` overwrites same-named files and never deletes.
+- `main(argv=None, *, ledger_path=ledger.LEDGER) -> int`; CLI `python -m greenleaf_control.site_build --out DIR
+  [--force]` (`--out` required). Prints one line per file group (the site files, `<n> replays`, `index.json`,
+  `results.json`) and `<files> files, <bytes> bytes`; returns 0.

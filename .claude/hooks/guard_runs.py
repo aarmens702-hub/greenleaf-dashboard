@@ -14,8 +14,11 @@ The four modes get the same rules; the mode only names the agent in the message.
 - Bash that runs greenleaf_control.train or tune_rb without --smoke, run_grid without --dry,
   evaluate on amsterdam_2012, london_2012 or abbotsford_2012 or with --final (or a prefix of it),
   or a ledger subcommand other than show;
-- Read, Grep and Glob of control/results/final/ and any weather/<site>/2012.csv, gl_gym's copy in
-  site-packages included.
+- Read, Grep and Glob of any weather/<site>/2012.csv, gl_gym's copy in site-packages included,
+  always; and of a checkout's control/results/final/ until the ledger beside it, that checkout's
+  control/ledger/ledger.jsonl, holds a final-result row (the seal is spent). The ledger is opened
+  at the real path, not the case-folded one. No ledger, one it can't read, or a line in it that
+  isn't a JSON object keeps it sealed.
 
 Paths are joined to the call's cwd (a Bash `cd DIR` moves it for the commands after it), followed
 through links (os.path.realpath), case-folded and matched anywhere in the result, so the main
@@ -48,7 +51,10 @@ WRITE_TOOLS = ("Edit", "Write", "MultiEdit", "NotebookEdit")
 WRITE_PROTECTED = re.compile(
     r"(^|/)control/(ledger|results|runs)(/|$)|(^|/)control/configs/rule_based_tuned\.yml$"
 )
-SEALED = re.compile(r"(^|/)control/results/final(/|$)|(^|/)weather/[^/]+/2012\.csv$")
+SEALED_WEATHER = re.compile(r"(^|/)weather/[^/]+/2012\.csv$")
+# Also searched in the real path, in its own case, to find the checkout whose ledger opens it.
+RESULTS_FINAL = re.compile(r"(^|/)control/results/final(/|$)", re.IGNORECASE)
+LEDGER = "control/ledger/ledger.jsonl"
 
 OPERATORS = "();<>|&\n"
 WRITERS = ("rm", "cp", "mv", "tee", "truncate")
@@ -62,8 +68,8 @@ CLI_ONLY = (
     "are written by the CLIs only; reading them is fine"
 )
 SEALED_UNTIL_FINAL = (
-    "control/results/final/ and the 2012 test weather stay sealed until the final issue; other "
-    "results and other weather years are fine"
+    "control/results/final/ opens once this checkout's ledger has a final-result row; the 2012 "
+    "test weather stays sealed"
 )
 EXPERIMENT_ONLY = "real runs are experiments the orchestrator runs through /experiment"
 
@@ -76,6 +82,34 @@ def block(reason):
 def norm(path, cwd):
     """path joined to cwd, ~ expanded, links followed, case-folded for matching."""
     return os.path.realpath(os.path.join(cwd, os.path.expanduser(path))).casefold()
+
+
+def seal_spent(checkout):
+    """Whether checkout's ledger holds a final-result row. Every line must be a JSON object: no
+    ledger, one it can't read, or any other line keeps the seal (fail closed)."""
+    try:
+        with open(os.path.join(checkout, LEDGER), encoding="utf-8") as ledger:
+            rows = [json.loads(line) for line in ledger.read().splitlines()]
+    except (OSError, ValueError):  # missing, a folder, not UTF-8 or not JSON: still sealed
+        return False
+    if not all(isinstance(row, dict) for row in rows):
+        return False
+    return any(row.get("kind") == "final-result" for row in rows)
+
+
+def sealed(path, cwd):
+    """Whether a Read, Grep or Glob of path is blocked: any 2012 weather, or a checkout's
+    control/results/final/ until seal_spent says that checkout's seal is spent."""
+    real = os.path.realpath(os.path.join(cwd, os.path.expanduser(path)))
+    if SEALED_WEATHER.search(real.casefold()):
+        return True
+    if not RESULTS_FINAL.search(real.casefold()):
+        return False
+    # The checkout is the real path before control/, in its own case, so its ledger opens on a
+    # case-sensitive filesystem too. A match only case-folding finds (a ligature like "ﬁ", which
+    # the Mac reads as "fi") names no checkout, so it stays sealed.
+    found = RESULTS_FINAL.search(real)
+    return not (found and seal_spent(real[: found.end(1)]))
 
 
 def segments(command):
@@ -196,13 +230,13 @@ def tool_reason(tool, args, cwd):
                 return f"{tool} of {path} — {CLI_ONLY}"
     elif tool == "Read":
         path = args.get("file_path")
-        if path and SEALED.search(norm(path, cwd)):
+        if path and sealed(path, cwd):
             return f"Read of {path} — {SEALED_UNTIL_FINAL}"
     elif tool in ("Grep", "Glob"):
         base = args.get("path") or ""
         extra = (args.get("glob") if tool == "Grep" else args.get("pattern")) or ""
-        searched = [norm(base, cwd)] + ([norm(os.path.join(base, extra), cwd)] if extra else [])
-        if any(SEALED.search(p) for p in searched):
+        searched = [base] + ([os.path.join(base, extra)] if extra else [])
+        if any(sealed(p, cwd) for p in searched):
             return f"{tool} of {os.path.join(base or cwd, extra)} — {SEALED_UNTIL_FINAL}"
     elif tool == "Bash":
         return bash_reason(args.get("command") or "", cwd)

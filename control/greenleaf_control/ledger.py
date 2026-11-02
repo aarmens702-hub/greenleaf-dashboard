@@ -79,6 +79,19 @@ RESULT_KEYS = (
     "steps",
     "paper_reward_sum",
 )
+# The final's test splits and the baselines it may score, written out like RESULT_KEYS; tests pin
+# them to tuple(scenarios.TEST) and envs.BASELINES.
+TEST_SPLITS = ("amsterdam_2012", "london_2012", "abbotsford_2012")
+FINAL_BASELINES = ("zero_controls", "random", "rb_default", "rb_tuned")
+FINAL_ARM_KEYS = {
+    "iqm",
+    "ci_low",
+    "ci_high",
+    "guards",
+    "invalid_episodes",
+    "prob_improvement",
+    "scored",
+}
 
 # One short detail per kind for show, naming the parent row first.
 SUMMARY = {
@@ -133,6 +146,24 @@ def _run_ends(existing: list[dict], registered: str) -> list[tuple[dict, dict]]:
         r["row_id"]: r for r in existing if r["kind"] == "run" and r["registered"] == registered
     }
     return [(runs[r["run"]], r) for r in existing if r["kind"] == "run-end" and r["run"] in runs]
+
+
+def final_arms(final_registered: dict, rows: list[dict]) -> dict[str, dict[str, str]]:
+    """A final's learning arms, {arm: {run row_id: checkpoint}}, each named by its run rows' arm.
+
+    An arm whose runs come from two registrations raises ValueError. F1a-3 scores with it.
+    """
+    arms, source = {}, {}
+    for run_id, checkpoint in final_registered["checkpoints"].items():
+        run = _find(rows, run_id, "run")
+        arm, registered = run["arm"], run["registered"]
+        if source.setdefault(arm, registered) != registered:
+            raise ValueError(
+                f"arm {arm!r} comes from two registrations, {source[arm]} and {registered};"
+                " a final's arm comes from one"
+            )
+        arms.setdefault(arm, {})[run_id] = checkpoint
+    return arms
 
 
 def _arm_tally(ends: list[tuple[dict, dict]], arm: str) -> dict:
@@ -221,8 +252,56 @@ def _check(row: dict, path: Path) -> str:
         approved_by = row["approved_by"]
         if not isinstance(approved_by, str) or not approved_by.strip():
             raise ValueError("final-registered needs approved_by: the owner who approved the seal")
-    elif kind == "final-result" and any(r["kind"] == "final-result" for r in existing):
-        raise ValueError("a final-result already exists: the seal is spent")
+        if any(r["kind"] == "final-result" for r in existing):
+            raise ValueError("a final-result already exists: the seal is spent")
+        checkpoints = row["checkpoints"]
+        if not isinstance(checkpoints, dict) or not checkpoints:
+            raise ValueError(
+                f"checkpoints must be a non-empty {{run row_id: checkpoint}}, got {checkpoints!r}"
+            )
+        results = [r for r in existing if r["kind"] == "result"]
+        for pair in checkpoints.items():
+            if not any(pair in r["selected"].items() for r in results):
+                raise ValueError(
+                    f"checkpoints pair {pair[0]}: {pair[1]!r} is in no result's selected;"
+                    " a final registers validation-selected checkpoints (registered vs selected)"
+                )
+        arms = final_arms(row, existing)
+        baselines = row["baselines"]
+        unknown = [b for b in baselines if b not in FINAL_BASELINES]
+        twice = [b for b in FINAL_BASELINES if baselines.count(b) > 1]
+        missing = [b for b in ("rb_default", "rb_tuned") if b not in baselines]
+        if unknown or twice or missing:
+            raise ValueError(
+                f"baselines {baselines} must come from {FINAL_BASELINES}, once each, with"
+                f" rb_default and rb_tuned: unknown {unknown}, twice {twice}, missing {missing}"
+            )
+        clash = sorted(set(arms) & set(baselines))
+        if clash:
+            raise ValueError(
+                f"learning arm(s) {clash} share a baseline's name; per_split can't tell them apart"
+            )
+    elif kind == "final-result":
+        if any(r["kind"] == "final-result" for r in existing):
+            raise ValueError("a final-result already exists: the seal is spent")
+        _need_keys("per_split", row["per_split"], set(TEST_SPLITS))
+        registered = final_arms(parent, existing)
+        names = set(registered) | set(parent["baselines"])
+        for split, arms in row["per_split"].items():
+            _need_keys(f"per_split[{split!r}]", arms, names)
+            for arm, numbers in arms.items():
+                where = f"per_split[{split!r}][{arm!r}]"
+                _need_keys(where, numbers, FINAL_ARM_KEYS)
+                if (numbers["prob_improvement"] is None) != (arm == "rb_tuned"):
+                    raise ValueError(
+                        f"{where} prob_improvement is {numbers['prob_improvement']!r}; it is"
+                        " P(arm > rb_tuned), null for rb_tuned and a number for every other arm"
+                    )
+                if numbers["scored"] != registered.get(arm, {}):
+                    raise ValueError(
+                        f"{where} scored {numbers['scored']}, not its registered"
+                        f" {registered.get(arm, {})} ({{}} for a baseline; registered vs scored)"
+                    )
     # allow_nan=False: a NaN or inf raises ValueError here, before the file is opened.
     return json.dumps(row, sort_keys=True, allow_nan=False)
 
@@ -411,6 +490,10 @@ def main(argv: list[str] | None = None, path: Path = LEDGER) -> int:
     p.add_argument("--baselines", nargs="+", required=True)
     p.add_argument("--approved-by")  # not required, so the ledger's own refusal fires
 
+    p = sub.add_parser("final-result", help="record the final evaluation's numbers")
+    p.add_argument("--final-registered", required=True)
+    p.add_argument("--numbers", type=Path, required=True, help="JSON file: {per_split}")
+
     # Each flag's dest is the API's parameter name, so the CLI passes through the same checks.
     args = vars(parser.parse_args(argv))
     command = args.pop("command")
@@ -425,8 +508,13 @@ def main(argv: list[str] | None = None, path: Path = LEDGER) -> int:
         print(decide(**args, path=path)["row_id"])
     elif command == "show":
         show(**args, path=path)
-    else:
+    elif command == "final-register":
         print(final_register(**args, path=path)["row_id"])
+    else:
+        numbers = json.loads(args["numbers"].read_text())
+        _need_keys("the numbers file", numbers, {"per_split"})
+        row = final_result(final_registered=args["final_registered"], **numbers, path=path)
+        print(row["row_id"])
     return 0
 
 

@@ -8,14 +8,28 @@ JSON object, a tool_name that isn't a string, a tool_input that isn't an
 object, a path, command, glob or type that isn't a string (an absent one is
 fine), or a crash all block. Standard library only. Ported from crivo.
 
+Names, paths and commands are casefolded before they are matched, on every
+platform, since the Mac's filesystem ignores case: .ENV opens .env there. A
+path is judged by its own name and by its target's, once resolved (~
+expanded, against CLAUDE_PROJECT_DIR or the cwd, through symlinks), so a link
+to a .env blocks too. The hook only lstats paths, never opens them.
+
 A Grep picks its files by glob and type as well as path, so a glob or a
 ripgrep type that could select a secret file blocks too. Its {a,b} groups are
 expanded first, then it is split on spaces and commas; a !-glob only excludes.
 Each glob's last path part is matched against the secret file names, since
 ripgrep's -g reaches hidden and gitignored files in any folder. Broad filters
 such as *, <dir>/*, .*, *env* or *.toml (and type toml or all) select a
-secret file too, so they block: an accepted false positive. A glob with more
-than MAX_SPELLINGS {a,b} spellings blocks rather than outrun the timeout.
+secret file too, so they block: an accepted false positive. The glob is
+casefolded as well, though ripgrep matches globs case-sensitively, so a glob
+like .ENV blocks while it may select nothing: the same accepted false
+positive. A glob with more than MAX_SPELLINGS {a,b} spellings blocks rather
+than outrun the timeout.
+
+A Grep whose path is the home folder or a folder above it ("/" included)
+blocks unless a type or a glob that selects something (not only !-globs)
+narrows it: if Grep passes --hidden, ripgrep would read ~/.modal.toml, since
+home has no .gitignore. A Grep with no path is left alone.
 """
 
 import fnmatch
@@ -42,10 +56,15 @@ def block(reason):
 
 
 def is_secret_file(path) -> bool:
-    name = os.path.basename(str(path or ""))
+    name = os.path.basename(str(path or "")).casefold()
     if name == ".modal.toml":
         return True
     return bool(re.fullmatch(r"\.env(\..+)?", name)) and name != ".env.example"
+
+
+def norm(path, cwd):
+    """path joined to cwd, ~ expanded, links followed, case-folded for matching."""
+    return os.path.realpath(os.path.join(cwd, os.path.expanduser(path))).casefold()
 
 
 # A .env path inside a shell command: ".env", "app/.env", ".env.local", but
@@ -72,15 +91,23 @@ def expand_braces(glob):
     return done
 
 
+def patterns(glob):
+    """The patterns of a Grep glob (ripgrep syntax) that select files: its {a,b} groups expanded,
+    then split on spaces and commas, leaving out the !-globs, which only exclude."""
+    return [
+        pattern
+        for text in expand_braces(glob or "")
+        for pattern in re.split(r"[\s,]+", text)
+        if pattern and not pattern.startswith("!")
+    ]
+
+
 def selects_secret(glob) -> bool:
     """True if a Grep glob (ripgrep syntax) could select a secret file."""
-    for text in expand_braces(glob or ""):
-        for pattern in re.split(r"[\s,]+", text):
-            if not pattern or pattern.startswith("!"):
-                continue
-            last = pattern.replace("[^", "[!").replace("\\", "").rsplit("/", 1)[-1]
-            if is_secret_file(last) or any(fnmatch.fnmatchcase(n, last) for n in SECRET_NAMES):
-                return True
+    for pattern in patterns(glob):
+        last = pattern.replace("[^", "[!").replace("\\", "").rsplit("/", 1)[-1].casefold()
+        if is_secret_file(last) or any(fnmatch.fnmatchcase(n, last) for n in SECRET_NAMES):
+            return True
     return False
 
 
@@ -102,17 +129,31 @@ def main():
             "strings"
         )
 
+    root = os.environ.get("CLAUDE_PROJECT_DIR") or os.getcwd()
     if tool == "Bash":
-        command = args.get("command") or ""
+        command = (args.get("command") or "").casefold()
         blocked = bool(SECRET_IN_COMMAND.search(command) or MODAL_TOKEN_IN_COMMAND.search(command))
     else:
-        blocked = any(is_secret_file(args.get(k)) for k in ("file_path", "path", "notebook_path"))
-        if tool == "Grep":
-            blocked = (
-                blocked
-                or selects_secret(args.get("glob"))
-                or selects_secret(TYPE_GLOBS.get(args.get("type")))
-            )
+        paths = [args[k] for k in ("file_path", "path", "notebook_path") if args.get(k)]
+        blocked = any(is_secret_file(p) or is_secret_file(norm(p, root)) for p in paths)
+        if tool == "Grep" and not blocked:
+            glob, kind, where = args.get("glob"), args.get("type"), args.get("path")
+            try:
+                blocked = selects_secret(glob) or selects_secret(TYPE_GLOBS.get(kind))
+                narrowed = bool(kind or patterns(glob))
+            except ValueError:
+                return (
+                    f"protect_secrets: a Grep glob with over {MAX_SPELLINGS} {{a,b}} spellings is "
+                    "too many to check in time, so it blocks; narrow the glob"
+                )
+            if where and not blocked and not narrowed:
+                where, home = norm(where, root), norm("~", root)
+                if os.path.commonpath([where, home]) == where:
+                    return (
+                        "protect_secrets: a Grep of the home folder, or a folder above it, that no "
+                        "type or glob narrows could read ~/.modal.toml; add a glob or a type, or "
+                        "search a folder inside home"
+                    )
 
     if blocked:
         return (

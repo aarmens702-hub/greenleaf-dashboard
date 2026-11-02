@@ -7,10 +7,10 @@
       "growth_year": 2010,
       "start_day": 59
     },
-    "commit": "15603d88ecc20d29616331c26ebba8b48174cd56",
+    "commit": "67706466d782c6e15aaee5a210188ea913615daa",
     "dirty": false,
     "gl_gym": "2d3febb1ea002b24b452e32293e990beb78d3ce1",
-    "made_at": "2026-10-29T06:57:53.080722+00:00",
+    "made_at": "2026-11-02T10:25:57.828016+00:00",
     "metrics": {
       "profit_eur_m2": -4.697726335099438,
       "viol_hours_co2": 0.0,
@@ -37,10 +37,10 @@
       "growth_year": 2010,
       "start_day": 59
     },
-    "commit": "15603d88ecc20d29616331c26ebba8b48174cd56",
+    "commit": "67706466d782c6e15aaee5a210188ea913615daa",
     "dirty": false,
     "gl_gym": "2d3febb1ea002b24b452e32293e990beb78d3ce1",
-    "made_at": "2026-10-29T06:57:53.080722+00:00",
+    "made_at": "2026-11-02T10:25:57.828016+00:00",
     "metrics": {
       "profit_eur_m2": -4.697726335099438,
       "viol_hours_co2": 0.0,
@@ -67,10 +67,10 @@
       "growth_year": 2010,
       "start_day": 59
     },
-    "commit": "15603d88ecc20d29616331c26ebba8b48174cd56",
+    "commit": "67706466d782c6e15aaee5a210188ea913615daa",
     "dirty": false,
     "gl_gym": "2d3febb1ea002b24b452e32293e990beb78d3ce1",
-    "made_at": "2026-10-29T06:57:53.080722+00:00",
+    "made_at": "2026-11-02T10:25:57.828016+00:00",
     "metrics": {
       "rb_default": {
         "profit_eur_m2": -4.697726335099438,
@@ -123,6 +123,444 @@
         "steps": 5760,
         "valid": true
       }
+    }
+  },
+  {
+    "file": "tradeoff.png",
+    "source": "result-06364fa1, decision-b1319a3a, result-d1f0b8e7, decision-eab26197, result-2a890455, decision-b159ac9a, result-1dd39e3a, decision-960905e6, result-525a6e90, rb_tuned_validation.parquet",
+    "scenario": [
+      {
+        "location": "Amsterdam",
+        "growth_year": 2010,
+        "start_day": 45
+      },
+      {
+        "location": "Amsterdam",
+        "growth_year": 2010,
+        "start_day": 59
+      },
+      {
+        "location": "Amsterdam",
+        "growth_year": 2010,
+        "start_day": 75
+      }
+    ],
+    "commit": "67706466d782c6e15aaee5a210188ea913615daa",
+    "dirty": false,
+    "gl_gym": "2d3febb1ea002b24b452e32293e990beb78d3ce1",
+    "made_at": "2026-11-02T10:25:57.828016+00:00",
+    "metrics": {
+      "points": [
+        {
+          "arm": "ppo",
+          "status": "adopted",
+          "result": "result-06364fa1",
+          "decision": "decision-b1319a3a",
+          "registered": "registered-02216f96",
+          "seeds": [
+            0,
+            1,
+            2,
+            3,
+            4
+          ],
+          "profit": [
+            2.394641817202951,
+            2.3269797092178726,
+            2.4575475226202697
+          ],
+          "viol_hours_co2": [
+            1.6944444444444444,
+            0.4722222222222222,
+            3.806249999999996
+          ],
+          "viol_hours_temp": [
+            153.08333333333334,
+            144.13819444444445,
+            159.16666666666666
+          ],
+          "viol_hours_rh": [
+            134.97222222222223,
+            123.77777777777777,
+            145.86111111111111
+          ],
+          "yield_kg_m2": 6.690331501330731
+        },
+        {
+          "arm": "residual_w05",
+          "status": "adopted",
+          "result": "result-d1f0b8e7",
+          "decision": "decision-eab26197",
+          "registered": "registered-f2fd71e9",
+          "seeds": [
+            100,
+            101,
+            102,
+            103,
+            104,
+            105,
+            106,
+            107,
+            108,
+            109
+          ],
+          "profit": [
+            0.7650311088228312,
+            0.7019244124349282,
+            0.8355448178690217
+          ],
+          "viol_hours_co2": [
+            0.0,
+            0.0,
+            0.375
+          ],
+          "viol_hours_temp": [
+            48.5,
+            45.75,
+            51.485156249999996
+          ],
+          "viol_hours_rh": [
+            214.0625,
+            208.655859375,
+            219.97031249999998
+          ],
+          "yield_kg_m2": 9.625465163374086
+        },
+        {
+          "arm": "residual_w1",
+          "status": "adopted",
+          "result": "result-2a890455",
+          "decision": "decision-b159ac9a",
+          "registered": "registered-4d202c00",
+          "seeds": [
+            0,
+            1,
+            2,
+            3,
+            4
+          ],
+          "profit": [
+            0.39647554378184857,
+            0.32085042447355405,
+            0.449018415867189
+          ],
+          "viol_hours_co2": [
+            0.0,
+            0.0,
+            0.7222222222222222
+          ],
+          "viol_hours_temp": [
+            19.38888888888889,
+            17.416666666666668,
+            21.444444444444443
+          ],
+          "viol_hours_rh": [
+            109.83333333333333,
+            101.58125,
+            118.0
+          ],
+          "yield_kg_m2": 9.571789950686496
+        },
+        {
+          "arm": "lag_b100",
+          "status": "adopted",
+          "result": "result-1dd39e3a",
+          "decision": "decision-960905e6",
+          "registered": "registered-6d9282cd",
+          "seeds": [
+            200,
+            201,
+            202,
+            203,
+            204,
+            205,
+            206,
+            207,
+            208,
+            209
+          ],
+          "profit": [
+            0.9370118384351798,
+            0.8563764612905406,
+            1.002876089347152
+          ],
+          "viol_hours_co2": [
+            0.0,
+            0.0,
+            0.078125
+          ],
+          "viol_hours_temp": [
+            75.6875,
+            74.077734375,
+            77.0625
+          ],
+          "viol_hours_rh": [
+            286.59375,
+            281.9984375,
+            292.937890625
+          ],
+          "yield_kg_m2": 9.60872437976849
+        },
+        {
+          "arm": "residual_w4",
+          "status": "dropped",
+          "result": "result-2a890455",
+          "decision": "decision-b159ac9a",
+          "registered": "registered-4d202c00",
+          "seeds": [
+            0,
+            1,
+            2,
+            3,
+            4
+          ],
+          "profit": [
+            -0.3674633732327256,
+            -0.4821027312715611,
+            -0.26460101884957765
+          ],
+          "viol_hours_co2": [
+            1.4166666666666667,
+            0.027777777777777776,
+            3.4166666666666665
+          ],
+          "viol_hours_temp": [
+            10.222222222222221,
+            8.027083333333334,
+            12.972916666666663
+          ],
+          "viol_hours_rh": [
+            30.77777777777778,
+            27.610416666666666,
+            34.22222222222222
+          ],
+          "yield_kg_m2": 9.584856057077907
+        }
+      ],
+      "references": [
+        {
+          "profit_eur_m2": 0.09187748547628655,
+          "viol_hours_co2": 0.0,
+          "viol_hours_temp": 94.55555555555556,
+          "viol_hours_rh": 258.8888888888889,
+          "yield_kg_m2": 9.199472346328243,
+          "n_seeds": 5,
+          "sha256": "dab54447d26f2b3f144fe0928ae1bc7079215b85dc4266cbd799fbd0b5b5a36a"
+        },
+        {
+          "profit_eur_m2": 0.2821564504116497,
+          "viol_hours_co2": 0.0,
+          "viol_hours_temp": 95.09375,
+          "viol_hours_rh": 257.65625,
+          "yield_kg_m2": 9.241873583355515,
+          "n_seeds": 10,
+          "sha256": "dab54447d26f2b3f144fe0928ae1bc7079215b85dc4266cbd799fbd0b5b5a36a"
+        }
+      ]
+    },
+    "split": "validation",
+    "ledger": [
+      "result-06364fa1",
+      "decision-b1319a3a",
+      "result-d1f0b8e7",
+      "decision-eab26197",
+      "result-2a890455",
+      "decision-b159ac9a",
+      "result-1dd39e3a",
+      "decision-960905e6",
+      "result-525a6e90"
+    ]
+  },
+  {
+    "file": "hero.png",
+    "source": "rb_tuned vs run-66b245e3 (residual_w05 seed 107, checkpoint 1750000, trained at 3ac74be), result-d1f0b8e7, decision-eab26197, result-525a6e90, rb_tuned_validation.parquet",
+    "scenario": {
+      "location": "Amsterdam",
+      "growth_year": 2010,
+      "start_day": 59
+    },
+    "commit": "67706466d782c6e15aaee5a210188ea913615daa",
+    "dirty": false,
+    "gl_gym": "2d3febb1ea002b24b452e32293e990beb78d3ce1",
+    "made_at": "2026-11-02T10:25:57.828016+00:00",
+    "metrics": {
+      "rb_tuned": {
+        "profit_eur_m2": 1.309662861062611,
+        "viol_hours_co2": 0.0,
+        "pct_in_bounds_co2": 100.0,
+        "viol_hours_temp": 98.0,
+        "pct_in_bounds_temp": 93.19444444444444,
+        "viol_hours_rh": 251.0,
+        "pct_in_bounds_rh": 82.56944444444446,
+        "yield_kg_m2": 9.470840263302783,
+        "heat_cost": 9.165141795210177,
+        "elec_cost": 2.8535999999999997,
+        "co2_cost": 1.8249397650116654,
+        "paper_return": 3643.3635961653595,
+        "solver_failures": 0,
+        "steps": 5760,
+        "valid": true,
+        "paper_reward_sum": 3643.3635866978525
+      },
+      "residual_w05": {
+        "profit_eur_m2": 1.833872647840674,
+        "viol_hours_co2": 0.25,
+        "pct_in_bounds_co2": 99.98263888888889,
+        "viol_hours_temp": 47.25,
+        "pct_in_bounds_temp": 96.71875,
+        "viol_hours_rh": 175.0,
+        "pct_in_bounds_rh": 87.84722222222221,
+        "yield_kg_m2": 9.932558676896495,
+        "heat_cost": 9.167918953134599,
+        "elec_cost": 2.6725828011912407,
+        "co2_cost": 2.2177194808678777,
+        "paper_return": 3724.026492443493,
+        "solver_failures": 0,
+        "steps": 5760,
+        "valid": true,
+        "paper_reward_sum": 3724.0264902724107
+      }
+    },
+    "split": "validation",
+    "ledger": [
+      "run-66b245e3",
+      "result-d1f0b8e7",
+      "decision-eab26197",
+      "result-525a6e90"
+    ],
+    "run": {
+      "seed": 107,
+      "checkpoint": "1750000",
+      "run_dir": "/Users/aarmensidhu/Desktop/greenleaf-dashboard/.worktrees/36/control/runs/registered-f2fd71e9/residual_w05/seed107",
+      "manifest_commit": "3ac74beed9f5fd8038c0eade193258aff65d55f9"
+    }
+  },
+  {
+    "file": "duel_replay.gif",
+    "source": "rb_tuned vs run-66b245e3 (residual_w05 seed 107, checkpoint 1750000, trained at 3ac74be), result-d1f0b8e7, decision-eab26197, result-525a6e90, rb_tuned_validation.parquet",
+    "scenario": {
+      "location": "Amsterdam",
+      "growth_year": 2010,
+      "start_day": 59
+    },
+    "commit": "67706466d782c6e15aaee5a210188ea913615daa",
+    "dirty": false,
+    "gl_gym": "2d3febb1ea002b24b452e32293e990beb78d3ce1",
+    "made_at": "2026-11-02T10:25:57.828016+00:00",
+    "metrics": {
+      "rb_tuned": {
+        "profit_eur_m2": 1.309662861062611,
+        "viol_hours_co2": 0.0,
+        "pct_in_bounds_co2": 100.0,
+        "viol_hours_temp": 98.0,
+        "pct_in_bounds_temp": 93.19444444444444,
+        "viol_hours_rh": 251.0,
+        "pct_in_bounds_rh": 82.56944444444446,
+        "yield_kg_m2": 9.470840263302783,
+        "heat_cost": 9.165141795210177,
+        "elec_cost": 2.8535999999999997,
+        "co2_cost": 1.8249397650116654,
+        "paper_return": 3643.3635961653595,
+        "solver_failures": 0,
+        "steps": 5760,
+        "valid": true,
+        "paper_reward_sum": 3643.3635866978525
+      },
+      "residual_w05": {
+        "profit_eur_m2": 1.833872647840674,
+        "viol_hours_co2": 0.25,
+        "pct_in_bounds_co2": 99.98263888888889,
+        "viol_hours_temp": 47.25,
+        "pct_in_bounds_temp": 96.71875,
+        "viol_hours_rh": 175.0,
+        "pct_in_bounds_rh": 87.84722222222221,
+        "yield_kg_m2": 9.932558676896495,
+        "heat_cost": 9.167918953134599,
+        "elec_cost": 2.6725828011912407,
+        "co2_cost": 2.2177194808678777,
+        "paper_return": 3724.026492443493,
+        "solver_failures": 0,
+        "steps": 5760,
+        "valid": true,
+        "paper_reward_sum": 3724.0264902724107
+      }
+    },
+    "split": "validation",
+    "ledger": [
+      "run-66b245e3",
+      "result-d1f0b8e7",
+      "decision-eab26197",
+      "result-525a6e90"
+    ],
+    "run": {
+      "seed": 107,
+      "checkpoint": "1750000",
+      "run_dir": "/Users/aarmensidhu/Desktop/greenleaf-dashboard/.worktrees/36/control/runs/registered-f2fd71e9/residual_w05/seed107",
+      "manifest_commit": "3ac74beed9f5fd8038c0eade193258aff65d55f9"
+    }
+  },
+  {
+    "file": "duel_replay.mp4",
+    "source": "rb_tuned vs run-66b245e3 (residual_w05 seed 107, checkpoint 1750000, trained at 3ac74be), result-d1f0b8e7, decision-eab26197, result-525a6e90, rb_tuned_validation.parquet",
+    "scenario": {
+      "location": "Amsterdam",
+      "growth_year": 2010,
+      "start_day": 59
+    },
+    "commit": "67706466d782c6e15aaee5a210188ea913615daa",
+    "dirty": false,
+    "gl_gym": "2d3febb1ea002b24b452e32293e990beb78d3ce1",
+    "made_at": "2026-11-02T10:25:57.828016+00:00",
+    "metrics": {
+      "rb_tuned": {
+        "profit_eur_m2": 1.309662861062611,
+        "viol_hours_co2": 0.0,
+        "pct_in_bounds_co2": 100.0,
+        "viol_hours_temp": 98.0,
+        "pct_in_bounds_temp": 93.19444444444444,
+        "viol_hours_rh": 251.0,
+        "pct_in_bounds_rh": 82.56944444444446,
+        "yield_kg_m2": 9.470840263302783,
+        "heat_cost": 9.165141795210177,
+        "elec_cost": 2.8535999999999997,
+        "co2_cost": 1.8249397650116654,
+        "paper_return": 3643.3635961653595,
+        "solver_failures": 0,
+        "steps": 5760,
+        "valid": true,
+        "paper_reward_sum": 3643.3635866978525
+      },
+      "residual_w05": {
+        "profit_eur_m2": 1.833872647840674,
+        "viol_hours_co2": 0.25,
+        "pct_in_bounds_co2": 99.98263888888889,
+        "viol_hours_temp": 47.25,
+        "pct_in_bounds_temp": 96.71875,
+        "viol_hours_rh": 175.0,
+        "pct_in_bounds_rh": 87.84722222222221,
+        "yield_kg_m2": 9.932558676896495,
+        "heat_cost": 9.167918953134599,
+        "elec_cost": 2.6725828011912407,
+        "co2_cost": 2.2177194808678777,
+        "paper_return": 3724.026492443493,
+        "solver_failures": 0,
+        "steps": 5760,
+        "valid": true,
+        "paper_reward_sum": 3724.0264902724107
+      }
+    },
+    "split": "validation",
+    "ledger": [
+      "run-66b245e3",
+      "result-d1f0b8e7",
+      "decision-eab26197",
+      "result-525a6e90"
+    ],
+    "run": {
+      "seed": 107,
+      "checkpoint": "1750000",
+      "run_dir": "/Users/aarmensidhu/Desktop/greenleaf-dashboard/.worktrees/36/control/runs/registered-f2fd71e9/residual_w05/seed107",
+      "manifest_commit": "3ac74beed9f5fd8038c0eade193258aff65d55f9"
     }
   }
 ]

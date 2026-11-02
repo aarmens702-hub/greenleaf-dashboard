@@ -35,6 +35,7 @@ You get: the issue text (Type, Goal, Done when, Measurement, Out of scope), the 
    - **Diagnostics:** read each arm's logged approx-KL, clip fraction, entropy and explained variance. A negative KL, an entropy collapse to zero in the first 5% of training, or explained variance near zero throughout is a FIX: say which run.
    - **Reward hacking:** open one seed's season of controls per arm (the run's eval trajectory). Actuators pinned at a bound all season, heating off through cold nights, or vents fully open while humidity climbs: name it.
    - **The ledger only grows:** a diff that edits or drops a line of `control/ledger/ledger.jsonl` is a FIX. Run `uv run python scripts/check_locks.py`; it must exit 0.
+   - On a `final`: read `control/results/final/` (open once the worktree's ledger has its `final-result` row), check `per_split` against those files, and never evaluate on a test split.
 4. Only flag things that matter. Style that ruff would catch isn't a finding.
 
 Return exactly one of:

@@ -10,6 +10,8 @@ updates to reach 0 at zero cost (20 at lambda_max 1.5; 1,990 at the defaults, fa
 ~244 updates in a run). Prompt recovery within a run needs a smaller lambda_max or a larger ki,
 which are per-run settings.
 
+FixedMultiplier holds a zero-budget constraint's lambda at 1, where a PID's would pin at its cap.
+
 VecLagrangianReward sits between VecMonitor and VecNormalize and folds the multipliers into the
 reward; LagrangianCallback updates them at each rollout end and logs them.
 """
@@ -54,6 +56,17 @@ class PIDLagrangian:
         return self.lam
 
 
+class FixedMultiplier:
+    """A constant multiplier for a zero-budget constraint; update() ignores the cost."""
+
+    def __init__(self, value: float = 1.0) -> None:
+        self.value = value
+        self.lam = float(value)
+
+    def update(self, mean_cost: float) -> float:
+        return self.lam
+
+
 class VecLagrangianReward(VecEnvWrapper):
     """Each reward becomes (r - sum(lambda_i * c_i)) / (1 + sum(lambda_i)); costs are accumulated."""
 
@@ -88,7 +101,10 @@ class LagrangianCallback(BaseCallback):
     """At each rollout end: update the PIDs, set wrapper.lambdas, log lag/* and a lambdas.csv row."""
 
     def __init__(
-        self, wrapper: VecLagrangianReward, pids: list[PIDLagrangian], log_path: Path
+        self,
+        wrapper: VecLagrangianReward,
+        pids: list[PIDLagrangian | FixedMultiplier],
+        log_path: Path,
     ) -> None:
         if len(pids) != len(CONSTRAINTS):
             raise ValueError(
@@ -99,6 +115,10 @@ class LagrangianCallback(BaseCallback):
         self.pids = list(pids)
         self.log_path = Path(log_path)
         self._wrote = False
+
+    def _on_training_start(self) -> None:
+        """A FixedMultiplier prices from the first rollout; a PID's lam starts at 0."""
+        self.wrapper.lambdas = np.array([pid.lam for pid in self.pids])
 
     def _on_step(self) -> bool:
         return True

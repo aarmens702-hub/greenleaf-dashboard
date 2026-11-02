@@ -11,7 +11,8 @@ co-pilot (ResidualRBWrapper) for the residual arms and always puts SolverFailure
   that normalizes observations or actions.
 - A season that would read TEST (2012) weather is refused unless make_raw_env gets allow_test=True
   (PROTOCOL §8): its own year, or the next year's file, which upstream appends when the season
-  plus its 0.5-day lookahead runs past the end of the year.
+  plus its 0.5-day lookahead runs past the end of the year. make_env and run_baseline pass
+  allow_test through; only evaluate --final sets it.
 - Every step's info carries x_prev and x, the raw state before and after the step (for metrics).
 
 metrics.py grades runs from raw states and controls and must never import this module (it
@@ -238,6 +239,7 @@ def make_env(
     penalty_weight: float = 1.0,
     rb_params: dict | None = None,
     residual_scale: float = 0.15,
+    allow_test: bool = False,
 ) -> gym.Env:
     """The env a METHODS entry trains and is evaluated on, reset once with seed (and its action
     space seeded). A given scenario overrides the method's default weather (PAPER or TRAIN)."""
@@ -257,6 +259,7 @@ def make_env(
         # residual_lag's costs are priced by the Lagrangian, not the reward.
         penalty_weight=0.0 if method == "residual_lag" else penalty_weight,
         season_progress=method != "ppo_paper",
+        allow_test=allow_test,
     )
     if residual:
         params = rule_based.load_rb_params("tuned") if rb_params is None else rb_params
@@ -267,7 +270,9 @@ def make_env(
     return env
 
 
-def run_baseline(name: str, scenario: dict, season_length: int = 60) -> list[dict]:
+def run_baseline(
+    name: str, scenario: dict, season_length: int = 60, *, allow_test: bool = False
+) -> list[dict]:
     """A full episode's per-step info dicts for a BASELINES entry on a fixed scenario.
 
     random draws from one generator per episode, seeded by the scenario's start day.
@@ -275,7 +280,12 @@ def run_baseline(name: str, scenario: dict, season_length: int = 60) -> list[dic
     if name not in BASELINES:
         raise ValueError(f"unknown baseline {name!r}; expected one of {BASELINES}")
     env = SolverFailureFlag(
-        make_raw_env(scenario=scenario, season_length=season_length, normalize_actions=False)
+        make_raw_env(
+            scenario=scenario,
+            season_length=season_length,
+            normalize_actions=False,
+            allow_test=allow_test,
+        )
     )
     rng = np.random.default_rng(scenario["start_day"])
     if name in ("rb_default", "rb_tuned"):

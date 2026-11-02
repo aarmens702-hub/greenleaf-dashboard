@@ -37,7 +37,12 @@ from stable_baselines3.common.callbacks import BaseCallback
 from stable_baselines3.common.vec_env import DummyVecEnv, SubprocVecEnv, VecMonitor, VecNormalize
 
 from greenleaf_control import envs, ledger, manifest, rule_based, scenarios
-from greenleaf_control.lagrangian import LagrangianCallback, PIDLagrangian, VecLagrangianReward
+from greenleaf_control.lagrangian import (
+    FixedMultiplier,
+    LagrangianCallback,
+    PIDLagrangian,
+    VecLagrangianReward,
+)
 from greenleaf_control.rewards import constraint_costs
 
 RUNS = Path(__file__).resolve().parents[1] / "runs"
@@ -76,11 +81,17 @@ def _from_yml(key: str, value):
 
 
 def build_vec_env(
-    config: dict, n_envs: int, *, scenario: dict | None = None, season_length: int | None = None
+    config: dict,
+    n_envs: int,
+    *,
+    scenario: dict | None = None,
+    season_length: int | None = None,
+    allow_test: bool = False,
 ) -> VecNormalize:
     """The run's env stack, env i = make_env(method, seed=seed + i), VecNormalize training.
 
     scenario and season_length override the config's weather and season (for evaluation).
+    allow_test passes through to make_env; only evaluate --final sets it.
     """
     # The residual arms' recorded scale; the other arms don't use one, so make_env's default stands.
     scale = config.get("residual_scale")
@@ -94,6 +105,7 @@ def build_vec_env(
             penalty_weight=config["penalty_weight"],
             rb_params=config.get("rb_params"),
             **({} if scale is None else {"residual_scale": scale}),
+            allow_test=allow_test,
         )
         for i in range(n_envs)
     ]
@@ -222,7 +234,8 @@ def _train(config: dict, run_dir: Path, callback: _RunCallback) -> None:
         model = build_model(config, venv)
         callbacks = [callback]
         if config["method"] == "residual_lag":
-            pids = [PIDLagrangian(budget) for budget in config["budgets"]]
+            # A zero budget gets a fixed multiplier of 1, where a PID's lambda would pin at its cap.
+            pids = [PIDLagrangian(b) if b > 0 else FixedMultiplier(1.0) for b in config["budgets"]]
             # The VecLagrangianReward itself, which build_vec_env puts right under VecNormalize.
             callbacks.append(LagrangianCallback(venv.venv, pids, run_dir / "lambdas.csv"))
         model.learn(config["timesteps"], callback=callbacks)

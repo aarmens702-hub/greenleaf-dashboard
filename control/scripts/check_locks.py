@@ -2,7 +2,8 @@
 
 It proves that every commit only appended to control/ledger/ledger.jsonl, that every result
 names an earlier registration with the same fingerprints, that every run has a run-end, and that
-the seal was spent at most once, after its final-registered row. /ship and /promote run it.
+the seal was spent at most once, by a final-result naming an earlier final-registered row with
+the same fingerprints. /ship and /promote run it.
 It walks the whole history, so it needs a full clone and refuses a shallow one.
 
 Standalone on purpose: it reads the ledger through git and never imports greenleaf_control, so
@@ -61,8 +62,18 @@ def check_history(top: Path) -> tuple[list[str], int]:
     return violations, len(commits)
 
 
+def _fingerprints_differ(row: dict, parent: dict) -> str:
+    """The violation for a row whose fingerprints differ from its parent's, naming each key."""
+    mine, theirs, absent = row["fingerprints"], parent["fingerprints"], object()
+    keys = sorted(
+        k for k in mine.keys() | theirs.keys() if mine.get(k, absent) != theirs.get(k, absent)
+    )
+    return f"{row['row_id']}: fingerprints differ from {parent['row_id']}'s at {','.join(keys)}"
+
+
 def check_head(top: Path) -> tuple[list[str], int]:
-    """The rows at HEAD link up: results to earlier registrations, runs to run-ends, one seal.
+    """The rows at HEAD link up: results and the final-result to earlier registrations with their
+    fingerprints, runs to run-ends, one seal.
 
     Returns the violations and the number of rows at HEAD.
     """
@@ -91,26 +102,21 @@ def check_head(top: Path) -> tuple[list[str], int]:
                     "which is not an earlier registered row"
                 )
             elif row["fingerprints"] != reg["fingerprints"]:
-                mine, theirs, absent = row["fingerprints"], reg["fingerprints"], object()
-                keys = sorted(
-                    k
-                    for k in mine.keys() | theirs.keys()
-                    if mine.get(k, absent) != theirs.get(k, absent)
-                )
-                violations.append(
-                    f"{row_id}: fingerprints differ from {reg['row_id']}'s at {','.join(keys)}"
-                )
+                violations.append(_fingerprints_differ(row, reg))
         elif kind == "run" and row_id not in ended:
             violations.append(f"{row_id}: no run-end; close it with run_end(status='crashed')")
         elif kind == "final-result":
             finals += 1
+            freg = earlier.get(("final-registered", row["final-registered"]))
             if finals > 1:
                 violations.append(f"{row_id}: a second final-result; the seal is spent")
-            elif ("final-registered", row["final-registered"]) not in earlier:
+            elif freg is None:
                 violations.append(
                     f"{row_id}: names final-registered {row['final-registered']}, "
                     "which is not an earlier final-registered row"
                 )
+            elif row["fingerprints"] != freg["fingerprints"]:
+                violations.append(_fingerprints_differ(row, freg))
         earlier[(kind, row_id)] = row
     return violations, len(rows)
 

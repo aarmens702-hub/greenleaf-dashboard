@@ -25,17 +25,21 @@ load a policy.
 The 2012 weather is sealed (PROTOCOL §8). Every test that could build an env runs under a tripwire
 on pandas.read_csv that fails before any *2012.csv is read; the CLI refusals also run with every
 env builder (and evaluate's run_rb, run_policy) replaced by one that fails, so a refusal must come
-before any env or file. Nothing here may write the real ledger or control/runs/; the last test
-checks both are as they were when this module was collected.
+before any env or file. The allow_test tests (issue #41) score TEST scenarios on a synthetic
+weather dir in tmp_path whose 2012.csv files are byte copies of the real Amsterdam/2010.csv, under
+a tripwire that fails on any 2012.csv outside tmp_path. Nothing here may write the real ledger or
+control/runs/; the last test checks both are as they were when this module was collected.
 """
 
 import inspect
 import json
 import pickle
+import re
 import shutil
 import subprocess
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 
 import gymnasium as gym
 import numpy as np
@@ -46,7 +50,7 @@ from gl_gym.environments.utils import co2dens2ppm, vaporPres2rh
 from stable_baselines3 import PPO
 from stable_baselines3.common.vec_env import DummyVecEnv, VecEnvWrapper, VecMonitor, VecNormalize
 
-from greenleaf_control import envs, metrics, rule_based, scenarios, train
+from greenleaf_control import envs, ledger, metrics, rule_based, scenarios, train
 
 # greenleaf_control.evaluate is imported inside each test body, so while it is missing each test
 # FAILS rather than ERRORs at collection.
@@ -127,6 +131,54 @@ def no_2012_reads(monkeypatch) -> None:
         return real_read_csv(filepath_or_buffer, *args, **kwargs)
 
     monkeypatch.setattr(pd, "read_csv", read_csv)
+
+
+@pytest.fixture
+def synthetic_2012(tmp_path, monkeypatch) -> SimpleNamespace:
+    """A synthetic weather dir, tmp_path/"synthetic", where Amsterdam, London and Abbotsford each
+    have a 2012.csv that is a byte copy of the real Amsterdam/2010.csv, under a pandas.read_csv
+    tripwire that fails on any *2012.csv outside tmp_path (the real data dir, gl_gym's own copy).
+
+    scenarios.WEATHER_DIR is not patched here: a test points it at .dir itself, after building
+    anything it compares against on the real dir (residual_run, module-scoped, is built before
+    this fixture, on the real dir). .reads lists every 2012.csv read (resolved, so /var and
+    /private/var compare equal on the Mac); .trips every one the tripwire refused, in case
+    upstream swallows the AssertionError.
+    """
+    synthetic = tmp_path / "synthetic"
+    for site in ("Amsterdam", "London", "Abbotsford"):
+        (synthetic / site).mkdir(parents=True)
+        shutil.copyfile(
+            scenarios.WEATHER_DIR / "Amsterdam" / "2010.csv", synthetic / site / "2012.csv"
+        )
+    root = tmp_path.resolve()
+    real_read_csv = pd.read_csv
+    out = SimpleNamespace(dir=synthetic, reads=[], trips=[])
+
+    def read_csv(filepath_or_buffer, *args, **kwargs):
+        path = Path(str(filepath_or_buffer)).resolve()
+        if path.name.endswith("2012.csv"):
+            if not path.is_relative_to(root):
+                out.trips.append(path)
+                raise AssertionError(f"the sealed 2012 test weather was read: {path}")
+            out.reads.append(path)
+        return real_read_csv(filepath_or_buffer, *args, **kwargs)
+
+    monkeypatch.setattr(pd, "read_csv", read_csv)
+    return out
+
+
+def _assert_read_only_synthetic_2012(synthetic: SimpleNamespace, location: str) -> None:
+    """The tripwire never fired, and the only 2012.csv read was location's synthetic copy (so the
+    test did open TEST-year weather, and from tmp_path)."""
+    assert synthetic.trips == [], f"a real 2012.csv was read: {synthetic.trips}"
+    assert set(synthetic.reads) == {(synthetic.dir / location / "2012.csv").resolve()}
+
+
+def _takes_allow_test(fn) -> bool:
+    """fn has a keyword-only allow_test defaulting to False (issue #41)."""
+    p = inspect.signature(fn).parameters.get("allow_test")
+    return p is not None and p.kind is inspect.Parameter.KEYWORD_ONLY and p.default is False
 
 
 def _no_env_built(monkeypatch, evaluate) -> None:
@@ -434,6 +486,40 @@ def test_run_policy_return_trace_adds_the_graded_raw_trace_and_changes_nothing_e
     assert metrics.episode_metrics(states, controls, params, season_steps=N_DAY) == graded
 
 
+@pytest.mark.usefixtures("no_2012_reads")
+def test_run_rb_return_trace_adds_the_graded_raw_trace_and_changes_nothing_else():
+    """#44: run_rb(..., return_trace=True) returns a third item, the graded season's raw trace
+    (states, controls, params), as run_policy's does (#24), so evaluate --final can write a
+    baseline's replay from the season it scores, with no second season.
+
+    On rb default over a 1-day PAPER season (96 steps):
+    - run_rb takes return_trace (checked first, so a missing one fails here, not in a TypeError);
+    - the result == the plain call's, and the frame equals the plain call's exactly (the RB and the
+      raw env are deterministic, so it is the same season);
+    - states is (97, nx), the first step's x_prev then each step's x, and controls (96, 6) are the
+      frame's applied u_* exactly;
+    - the trace is the one graded: metrics.episode_metrics(states, controls, params,
+      season_steps=96) == the result without paper_reward_sum, exactly.
+    """
+    import greenleaf_control.evaluate as evaluate
+
+    assert "return_trace" in inspect.signature(evaluate.run_rb).parameters, (
+        "run_rb takes no return_trace: run_rb(..., record_steps=False, return_trace=False, *, ...)"
+    )
+    want, want_frame = evaluate.run_rb(RB_DEFAULT, PAPER, 1, record_steps=True)
+    result, frame, (states, controls, params) = evaluate.run_rb(
+        RB_DEFAULT, PAPER, 1, record_steps=True, return_trace=True
+    )
+
+    assert result == want
+    pd.testing.assert_frame_equal(frame, want_frame)
+    assert states.shape[0] == N_DAY + 1
+    assert controls.shape == (N_DAY, 6)
+    np.testing.assert_array_equal(controls, frame[U_COLS].to_numpy(dtype=np.float64))
+    graded = {k: v for k, v in result.items() if k != "paper_reward_sum"}
+    assert metrics.episode_metrics(states, controls, params, season_steps=N_DAY) == graded
+
+
 FRAME_CASES = [
     pytest.param("rb", RB_DEFAULT, id="rb-default"),
     pytest.param("rb", {**RB_DEFAULT, "co2_day": 2500}, id="rb-co2-day-2500"),
@@ -492,24 +578,30 @@ def test_cli_refuses_a_test_split_without_final(split, tmp_path, monkeypatch, ca
     assert list(tmp_path.iterdir()) == []
 
 
-@pytest.mark.parametrize("split", ["paper", "amsterdam_2012"])
+@pytest.mark.parametrize(
+    "missing",
+    [("--controller",), ("--split",), ("--out",), ("--controller", "--split", "--out")],
+    ids=["controller", "split", "out", "all-three"],
+)
 @pytest.mark.usefixtures("no_2012_reads")
-def test_cli_refuses_final_as_f1s_not_implemented(split, tmp_path, monkeypatch, capsys):
-    """Any --final is refused: the final evaluation is F1's (Stage 3), not implemented here. On a
-    non-test split and on a test split alike, with a well-formed final-registered row id, it is
-    refused naming F1 and "not implemented", before any env, weather read or file."""
+def test_cli_without_final_still_requires_controller_split_and_out(
+    missing, tmp_path, monkeypatch, capsys
+):
+    """Issue #43: --controller, --split and --out stop being argparse-required (--final takes none
+    of them), but without --final main still requires all three, with argparse's message: exit 2,
+    stderr's last line ending "error: the following arguments are required: <the missing flags,
+    comma-joined in that order>", before any env or file. A guard: it passes before the change."""
     import greenleaf_control.evaluate as evaluate
 
+    given = {"--controller": "rb_default", "--split": "paper", "--out": str(tmp_path / "x.parquet")}
+    argv = [word for flag, value in given.items() if flag not in missing for word in (flag, value)]
     _no_env_built(monkeypatch, evaluate)
-    argv = _argv(
-        "rb_default", split, tmp_path / "x.parquet", "--final", "final-registered-deadbeef"
-    )
 
-    with pytest.raises((SystemExit, NotImplementedError)) as excinfo:
+    with pytest.raises(SystemExit) as excinfo:
         evaluate.main(argv)
-    text = _refusal(excinfo, capsys)
-    assert "F1" in text, text
-    assert "not implemented" in text.lower(), text
+    assert excinfo.value.code == 2
+    last = capsys.readouterr().err.strip().splitlines()[-1]
+    assert last.endswith(f"error: the following arguments are required: {', '.join(missing)}")
     assert list(tmp_path.iterdir()) == []
 
 
@@ -675,11 +767,134 @@ def test_build_vec_env_builds_the_residual_arm_at_the_recorded_scale(scale, expe
         venv.close()
 
 
+# --- allow_test, the final's only door to the 2012 weather (issue #41) --------------------------
+
+# The modules that must never pass allow_test=True. evaluate passes it inside its --final path
+# only (issue #43); test_final.py checks every one lies inside evaluate._final.
+NO_ALLOW_TEST = ("train", "selection", "tune_rb", "run_grid", "export_replay", "media")
+ALLOW_TEST_TRUE = re.compile(r"allow_test\s*=\s*True")
+
+
+def _gym_chain(env) -> list[type]:
+    """A gym env's wrapper classes from the outside in, walking .env down to the raw env."""
+    chain = []
+    while isinstance(env, gym.Wrapper):
+        chain.append(type(env))
+        env = env.env
+    return chain
+
+
+@pytest.mark.parametrize("split", TEST_SPLITS)
+def test_run_rb_and_run_policy_with_allow_test_score_a_synthetic_test_day(
+    split, residual_run, synthetic_2012, monkeypatch
+):
+    """Issue #41: on the synthetic weather dir, run_rb(default params, <the split's first TEST
+    scenario>, 1, allow_test=True) and run_policy(residual smoke run, "final", that scenario, 1,
+    allow_test=True) each score one whole day: steps 96, valid True. The only 2012 file either
+    reads is the site's synthetic copy."""
+    import greenleaf_control.evaluate as evaluate
+
+    assert _takes_allow_test(evaluate.run_rb), "run_rb takes no keyword-only allow_test=False"
+    assert _takes_allow_test(evaluate.run_policy), "run_policy takes no keyword-only allow_test"
+    s = scenarios.TEST[split][0]
+    monkeypatch.setattr(scenarios, "WEATHER_DIR", synthetic_2012.dir)
+
+    rb, _ = evaluate.run_rb(RB_DEFAULT, s, 1, allow_test=True)
+    policy, _ = evaluate.run_policy(residual_run, "final", s, 1, allow_test=True)
+
+    assert (rb["steps"], rb["valid"]) == (N_DAY, True)
+    assert (policy["steps"], policy["valid"]) == (N_DAY, True)
+    _assert_read_only_synthetic_2012(synthetic_2012, s["location"])
+
+
+def test_run_rb_on_a_synthetic_2012_copy_of_2010_is_the_2010_day(synthetic_2012, monkeypatch):
+    """Issue #41's known answer: allow_test changes only which file opens.
+
+    The synthetic Amsterdam/2012.csv is a byte copy of the real Amsterdam/2010.csv, and upstream
+    (gl_gym @2d3febb) uses a scenario's year only to name the file it reads,
+    <location>/<year>.csv; day of year comes from start_day, and nothing else reads the year. So
+    run_rb(default params, Amsterdam 2012 day 45, 1, allow_test=True) on the synthetic dir ==
+    run_rb(default params, Amsterdam 2010 day 45 (VALIDATION[0]), 1) on the real dir, key for key
+    (no metric is NaN on that day). Non-vacuous: the 2010 day is a valid 96-step season, and the
+    2012 run read the synthetic copy.
+    """
+    import greenleaf_control.evaluate as evaluate
+
+    assert _takes_allow_test(evaluate.run_rb), "run_rb takes no keyword-only allow_test=False"
+    want, _ = evaluate.run_rb(RB_DEFAULT, scenarios.VALIDATION[0], 1)  # the real dir
+    monkeypatch.setattr(scenarios, "WEATHER_DIR", synthetic_2012.dir)
+    s = {"location": "Amsterdam", "growth_year": 2012, "start_day": 45}
+
+    got, _ = evaluate.run_rb(RB_DEFAULT, s, 1, allow_test=True)
+
+    assert scenarios.VALIDATION[0] == {**s, "growth_year": 2010}
+    assert (want["steps"], want["valid"]) == (N_DAY, True)
+    assert got == want
+    _assert_read_only_synthetic_2012(synthetic_2012, "Amsterdam")
+
+
+@pytest.mark.parametrize("method", envs.METHODS)
+def test_build_vec_env_with_allow_test_is_the_default_stack_on_a_synthetic_test_day(
+    method, residual_run, synthetic_2012, monkeypatch
+):
+    """Issue #41 (chain): the residual smoke run's manifest config, with method set to each METHODS
+    entry, builds the same stack on a TEST day with allow_test=True as by default.
+
+    build_vec_env(cfg, 1, scenario=VALIDATION[0], season_length=1) on the real dir, then
+    build_vec_env(cfg, 1, scenario=Amsterdam 2012 day 45, season_length=1, allow_test=True) on the
+    synthetic dir: the same VecEnv classes in order; on envs[0] the same gym wrapper classes in
+    order, except _RefuseTestReset, which only the default has (make_raw_env skips it with
+    allow_test); the same observation and action spaces. The allow_test env is on that TEST
+    scenario for a 96-step season, and its only 2012 read is the synthetic Amsterdam copy.
+    """
+    assert _takes_allow_test(train.build_vec_env), "build_vec_env takes no keyword-only allow_test"
+    config = {
+        **json.loads((residual_run / "manifest.json").read_text())["config"],
+        "method": method,
+    }
+    default = train.build_vec_env(config, 1, scenario=scenarios.VALIDATION[0], season_length=1)
+    monkeypatch.setattr(scenarios, "WEATHER_DIR", synthetic_2012.dir)
+    s = scenarios.TEST["amsterdam_2012"][0]
+    test = train.build_vec_env(config, 1, scenario=s, season_length=1, allow_test=True)
+    try:
+        assert [type(v) for v in _chain(test)] == [type(v) for v in _chain(default)]
+        default_env, test_env = _chain(default)[-1].envs[0], _chain(test)[-1].envs[0]
+        default_wrappers = _gym_chain(default_env)
+        assert envs._RefuseTestReset in default_wrappers
+        assert _gym_chain(test_env) == [
+            t for t in default_wrappers if t is not envs._RefuseTestReset
+        ]
+        assert test.observation_space == default.observation_space
+        assert test.action_space == default.action_space
+        assert vars(test_env.unwrapped.weather_scenario_sampler) == s
+        assert test_env.unwrapped.N == N_DAY
+    finally:
+        default.close()
+        test.close()
+    _assert_read_only_synthetic_2012(synthetic_2012, "Amsterdam")
+
+
+def test_no_module_but_the_final_passes_allow_test_true():
+    """Issue #41: the sources of train, selection, tune_rb, run_grid, export_replay and media
+    contain no match for allow_test\\s*=\\s*True, so no caller of the pass-through but evaluate's
+    --final path (issue #43; test_final.py holds evaluate's to _final) opens TEST weather. A guard:
+    it passes before the change too. Non-vacuous: the regex does match a spaced allow_test = True."""
+    assert ALLOW_TEST_TRUE.search("make_raw_env(allow_test = True)")
+    package = Path(envs.__file__).parent
+    found = {
+        name: ALLOW_TEST_TRUE.findall((package / f"{name}.py").read_text())
+        for name in NO_ALLOW_TEST
+    }
+    assert {name: hits for name, hits in found.items() if hits} == {}
+
+
 def test_signatures_match_the_contract_and_no_test_wrote_the_real_ledger_or_runs():
-    """run_rb(params, scenario, season_length=60, record_steps=False), run_policy(run_dir,
-    checkpoint, scenario, season_length=60, record_steps=False, return_trace=False) and
-    main(argv=None). return_trace (#24) is a backward-compatible extension: off by default, so
-    every earlier call is unchanged.
+    """run_rb(params, scenario, season_length=60, record_steps=False, return_trace=False, *,
+    allow_test=False), run_policy(run_dir, checkpoint, scenario, season_length=60,
+    record_steps=False, return_trace=False, *, allow_test=False) and main(argv=None, *,
+    ledger_path=ledger.LEDGER). return_trace (run_policy's #24, run_rb's #44), allow_test (#41)
+    and ledger_path (#43, the ledger --final reads) are backward-compatible extensions: defaulted,
+    so every earlier call is unchanged.
 
     This test runs last in the module and checks the real ledger's size and mtime, and the
     listing of control/runs/, are as they were when the module was collected.
@@ -687,7 +902,14 @@ def test_signatures_match_the_contract_and_no_test_wrote_the_real_ledger_or_runs
     import greenleaf_control.evaluate as evaluate
 
     rb = inspect.signature(evaluate.run_rb).parameters
-    assert list(rb) == ["params", "scenario", "season_length", "record_steps"]
+    assert list(rb) == [
+        "params",
+        "scenario",
+        "season_length",
+        "record_steps",
+        "return_trace",
+        "allow_test",
+    ]
     policy = inspect.signature(evaluate.run_policy).parameters
     assert list(policy) == [
         "run_dir",
@@ -696,12 +918,18 @@ def test_signatures_match_the_contract_and_no_test_wrote_the_real_ledger_or_runs
         "season_length",
         "record_steps",
         "return_trace",
+        "allow_test",
     ]
     for params in (rb, policy):
         assert (params["season_length"].default, params["record_steps"].default) == (60, False)
-    assert policy["return_trace"].default is False
+        assert params["allow_test"].kind is inspect.Parameter.KEYWORD_ONLY
+        assert params["allow_test"].default is False
+    for params in (rb, policy):
+        assert params["return_trace"].default is False
     main = inspect.signature(evaluate.main).parameters
-    assert list(main) == ["argv"]
+    assert list(main) == ["argv", "ledger_path"]
     assert main["argv"].default is None
+    assert main["ledger_path"].kind is inspect.Parameter.KEYWORD_ONLY
+    assert main["ledger_path"].default == ledger.LEDGER
     assert _stat(REAL_LEDGER) == REAL_LEDGER_BEFORE
     assert _listing(REAL_RUNS) == REAL_RUNS_BEFORE

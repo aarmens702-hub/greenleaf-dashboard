@@ -2,9 +2,22 @@
 
 **Read this first when you pick the project up on any machine.** It's the shared memory: where things stand, what's next, what we learned, and how Aarmen likes to work. Update it at the end of each session.
 
-*Last updated: 2026-10-30, Mac session (E3 adopted, E4 w05 and w1 adopted, E5 dropped; E6 #36 next).*
+*Last updated: 2026-11-02 early morning, Mac session (the final is done and recorded, the seal is spent; the report, the test-split tables and the README are on `dev`; `/promote` next).*
 
 ## Where things are
+- **The headline, 2026-11-02 (read this first).** The one-time final ran on the 2012 test weather and is recorded: final-registered-4d0a4ba9 (`8ceace3`) → **final-result-aee23915** (`fe3a993`). The seal is spent: `evaluate --final` and the ledger refuse any second final, and check_locks flags one.
+  - Graded by #45's registered rule (a) profit CI above rb_tuned like-for-like, (b) Σ violation-hour IQMs at or below rb_tuned's, (c) 0 invalid and 0 solver failures:
+    - `residual_w05` (E6, 10 seeds) passes on all three splits: gain over rb_tuned's same seasons 0.30 [0.25, 0.35], 0.40 [0.35, 0.44], 0.54 [0.47, 0.61] €/m², Σ 292.6 / 343.1 / 444.3 h vs 365.2 / 456.9 / 559.8.
+    - `lag_b100` (E7, 10 seeds) fails (b) on amsterdam_2012 (399.9 h > 365.2 h) and passes London and Abbotsford. **The PRD's headline, registered on the constrained arm passing all three splits, does not hold.**
+    - `ppo` and `ppo_paper` pass every split and beat both co-pilots on profit and Σ hours, with about 30% less fruit growth (lamps and CO₂ dosing off in the seed-0 replays). `zero_controls` has the highest profit on every split at about 3,000 h. Both co-pilots broke CO₂ in some seasons (29 and 18 of 240) where rb_tuned never did.
+  - Every number, with its source and grade: `docs/REPORT.md` §5 (#54), from `control/results/analysis/<split>/summary.csv` (#53). The README leads with them (#55).
+  - Provenance tags on GitHub: `final-registered-4d0a4ba9` (6a92c8f, the code the final was stamped with) and `registered-6d9282cd` (66380e5, E7's registration), both rewritten by rebases and kept reachable by the tags.
+- **Shipped 2026-10-31 to 2026-11-02** (all on `dev`, the final included):
+  - E5b (#35) dropped (result-589e7810, decision-3a99310a, `cbd3c93`); E7 (#39, lag_b100 × 10 fresh seeds) adopted by its registered rule (result-1dd39e3a, decision-960905e6, `d609b25`).
+  - The final's plumbing: #29 hook gaps (`428bf8a`), #40 guard_runs opens results/final once the seal is spent (`414225e`), #41 `allow_test` threaded to evaluate (`b3e433f`), #42 the final's ledger rows and check_locks (`2a110e3`), #43 `evaluate --final` (`f2e5f80`), #44 the final's replays (`da2f24a`), #48 export_replay at the selected checkpoint (`0c5d8b3`).
+  - Analysis: #46 `report.py` and the validation tables (`d442e75`), #47 report figures (`638e166`), #53 the three test splits' tables and figures (`d3b05f4`), #54 `docs/REPORT.md` (`1e245ed`), #55 the README (`09c3290`).
+  - Media and site: #50 the LinkedIn still (`187abd4`), #51 climate stripes and the duel replay (`c1e182b`), #52 the site's Instrument design (`021c1f3`), #49 the site's co-pilot side (`e2fb16e`), #56 media footers name the final-result row (`2fe22b0`).
+  - Run dirs: E7's live in `.worktrees/39/control/runs/registered-6d9282cd/` (the ledger's run_dirs), so that worktree is kept like 22, 31, 33, 34, 35 and 36.
 - **The repo** is `github.com/aarmens702-hub/greenleaf-dashboard`: public, default branch `master`, MIT at the root and AGPL-3.0-or-later in `control/`. It holds the hackathon dashboard that placed 2nd (RBC × BCCAI × SFU, May 2026). GreenLeaf 2.0 lives in `control/`.
 - **Stage 0 (the harness in code) is done**, all on `dev` with CI green:
   - #1 `control/` uv project, licenses, CI (`86b1b52`);
@@ -31,13 +44,13 @@
   - Ledger: registered-b89a61b1 → run-85d29481 → run-end-dfcc777b → result-525a6e90 (`34a4717`) → **decision-b2221004**.
   - rb_tuned mean paper_return on VALIDATION is 3551.84 vs rb_default's 2950.87; it wins all 3 seasons, with 0 invalid and 1,067 vs 2,229.5 violation hours. All four parts of the registered rule hold.
   - Adopted with its caveats on the record (#22 and the decision note): temperature violation hours +9%, up to 27 h a season above 34 °C vs about 0 for rb_default; fruit growth 15 to 28% lower; 5 of 12 setpoints at a range edge; 3 seasons of one year, no interval.
-  - **The run dir** (manifest.json, trials.csv) lives in `.worktrees/22/control/runs/registered-b89a61b1/`, where the ledger's run_dir points, so that worktree is kept on purpose. A backup copy is in the main checkout's `control/runs/registered-b89a61b1/` (git-ignored).
+  - **The run dir** (manifest.json, trials.csv) lives in `.worktrees/22/control/runs/registered-b89a61b1/`, where the ledger's run_dir points, so that worktree is kept on purpose.
 - **E2 (#31) is adopted** (Aarmen, 2026-10-29): ppo_paper is the reproduction arm for the 2012 final. The GreenLight-Gym paper's claim reproduces on the 2010 seasons.
   - Ledger: registered-2d021f24 (`88123af`) → 5 runs, 5 finished, 0 crashed → result-b58681ad (`6756def`) → **decision-471d1e0e**.
   - Ran locally on the Mac, $0: 14 to 16 min per 2M-step run (about 2,000 steps/s), selection about 8 min for 45 checkpoints.
   - ppo_paper IQM over 5 seeds × 3 VALIDATION seasons: profit 2.299 [2.146, 2.468] €/m² vs rb_default's mean -7.414; total violation hours 251.4 vs 743.2; fruit growth 6.80 vs 11.34. PAPER: 5 of 5 seeds beat rb_default on profit and violation hours.
   - Caveats on the record (#31, the decision note): the profit comes from switching the lamps off (electricity 0.009 vs 14.9 €/m²); fruit growth -42%; temperature violations up, all cold-side; CO₂ overshoot in seeds 2 and 4; days 45 and 75 share 46 and 44 of 60 days of weather with the training season, so generalization is the final's question. Aarmen ruled that seed 0's one training-time solver failure doesn't count under rule (c).
-  - **The run dirs** live in `.worktrees/31/control/runs/registered-2d021f24/` (the ledger's run_dir), so that worktree is kept; a backup is in the main checkout's `control/runs/`.
+  - **The run dirs** live in `.worktrees/31/control/runs/registered-2d021f24/` (the ledger's run_dir), so that worktree is kept.
 - **E3 to E5 ran overnight 2026-10-29/30 on the Mac** ($0, 35 runs, 0 crashed, 0 invalid, 0 scoring solver failures; 15 to 24 min a run). Rules for E3 to E5 were written by Claude on Aarmen's delegation; adopt or drop was his, the next morning.
   - **A flaw in those rules:** rule (a) compared an arm's profit IQM with rb_tuned's plain 3-season mean. On 15 values the IQM drops the 3 lowest and 3 highest, and day 45 sits about 6 €/m² below the other seasons, so the IQM lands well above the plain mean. rb_tuned scored the same way has IQM 0.092 (5 seeds) or 0.282 (10 seeds), not -0.517. Each result commit reports the like-for-like numbers; E6 (#36) uses them as its bars.
 - **E3 (#33) is adopted** (Aarmen, 2026-10-30): `ppo` on TRAIN beats rb_tuned.
@@ -52,18 +65,26 @@
 - **E5 (#35) is dropped** (Aarmen, 2026-10-30), to be re-run as E5b.
   - Ledger: registered-976c1a64 (`d4c3021`) → 15 runs → result-d41feb94 (`b71150f`) → **decision-c26a2bc9** (`234201e`).
   - All three arms passed the registered rule (profit IQM b100 0.258, b50 0.175, b25 -0.218; violation hours 277.31 / 174.00 / 96.19 under budgets 391.24 / 195.62 / 97.81), but open decisions 4 and 5 below happened: with the zero CO₂ budget, λ_co2 pinned at its cap (100) in 14 of 15 runs and learning degraded after it (profit fell after 250k, explained variance dipped at the cap). Selection picked the 250k checkpoint in 10 of 15 runs. E4's fixed-penalty w1 beat lag_b50 on both profit and violations.
-- **The run dirs** for E3, E4 and E5 live in `.worktrees/33`, `/34` and `/35` (the ledger's run_dirs), so those worktrees are kept; backups are in the main checkout's `control/runs/`.
+- **#38 shipped as PROTOCOL v2** (`f0082e2`, scorer file, Aarmen chose "CO2 keeps a fixed penalty"): in `residual_lag` a zero-budget constraint keeps `FixedMultiplier(1.0)` instead of a PID, and §5 checks budgets only where they are nonzero. PROTOCOL.md's hash changed, so rows recorded under v1 (E1 to E6) aren't fingerprint-comparable with v2 rows; the `residual` arms score identically under both.
+- **E6 (#36) is adopted** (Aarmen, 2026-10-30): `residual_w05` confirmed on 10 fresh seeds (100 to 109). Its E6 checkpoints are the final's candidates for this arm.
+  - Ledger: registered-f2fd71e9 (`3ac74be`) → 10 runs, 0 crashed → result-d1f0b8e7 (`f7c5a71`) → **decision-eab26197** (`e5a2470`).
+  - Profit IQM 0.765 [0.702, 0.836] vs rb_tuned's like-for-like 0.282; violation hours 262.56 (CO₂ 0, temperature 48.5, RH 214.06) vs 352.75; same-season profit wins 30/30; 0 invalid, 0 scoring solver failures; yield IQM 9.63.
+- **E5b (#35, second registration) is paused, 12 of 15 cells launched** (registered-157dcfdd, `380ccba`, PROTOCOL v2). Paused at Aarmen's request at about 5:15 pm on 2026-10-30.
+  - lag_b100: seeds 1 to 4 finished; **seed 0 crashed** (run-end-7496eedd): the disk filled at 1,728,512 steps (see What we've learned). Its diagnostics were read from its TensorBoard log the way the callback computes them; solver failures unknown. Rule (c) and PROTOCOL §6 block lag_b100 whatever its numbers.
+  - lag_b50: seeds 0 to 4 finished. lag_b25: seed 0 finished, seed 1 left running to finish on its own (pid 31962, under `caffeinate -w`), seeds 2 to 4 not launched.
+  - λ_co2 is exactly 1.0 on every row of every run's `lambdas.csv`, so the fix works; no run had a negative approx-KL or early entropy collapse.
+  - The run rows sit uncommitted in worktree 35's ledger until the result commit.
+- **The run dirs** for E3 to E6 and E5b live in `.worktrees/33`, `/34`, `/35` and `/36` (the ledger's run_dirs), so those worktrees are kept. The main checkout's backup copies were deleted on 2026-10-30 (they filled the disk); the worktree copies are the record. Worktrees 22, 31, 33, 34 and 36 had their `.venv` removed for space; `uv sync` in their `control/` rebuilds it.
 - **Also shipped 2026-10-29:** #25 ledger refuses non-metric primary/guards (`3f9e932`); #26 CI and hooks fail closed (`5c2fe87`); #27 guard gaps: Grep glob/type, path traversal, stop_tests fails closed (`65fb79d`); #28 D3a demo site preview `site/` with captures in `docs/media/site/` (`fa304f3`); #32 PROTOCOL §9, E2 runs 5 seeds (`b31b8d6`, scorer file).
 - **Filed 2026-10-29:** #29, more guard gaps (case-insensitive paths, symlinks in protect_secrets, stop_tests without .venv, the Stop hook's timeout); #30, the Modal plumbing run (open, only needed before any Modal run).
 - **Filed 2026-10-28:** #19, recording Modal runs (shipped). Aarmen chose the Mac over Modal for E2 (no payment method); Modal stays optional.
 
 ## To do, in order
-1. **Now: E6 (#36)**, registered-f2fd71e9 (`3ac74be`): `residual_w05` with seeds 100 to 109 on the Mac (about 3 h, started 2026-10-30 about 10 am), against rb_tuned's like-for-like bars (profit IQM 0.282, 352.75 violation hours). Run dirs in `.worktrees/36`.
-2. **Then E5b**, a second registration on #35 with a fix for the pinned λ_co2 (open decisions 4 and 5: a CO₂ budget floor, or a smaller `lambda_max` / larger `ki`), for Aarmen's OK. About 4.5 h. If an arm passes, its pick gets its own 10-seed confirmation.
-3. **Then the final** (once, Aarmen's yes): open decision 3 first. Then the analysis (Stage 3).
-   - Free work: #29 (guard gaps); D3b (the AI side of the replay, now that E3 and E4 exist).
-4. **TUNE_SPACE (#17b):** settled; E1 ran with it and was adopted.
-5. **Stage 4:** deploy and polish (D1–D7 in the plan). Ask GreenLeaf (D6) is built in parallel. Visual roadmap: https://claude.ai/artifact/19obed2CuttzDAPZzbFDuw
+1. **`/promote` dev → master** (Aarmen's yes for the merge): full ladder, check_locks, every README and docs number traced to the ledger, then the PR.
+2. **The LinkedIn post** (Aarmen posts it): the draft is in the session scratchpad and in the morning summary; every number is from final-result-aee23915 and the test-split summary.csv files.
+3. **Deploy the site** (`site/`, validation seasons only; Aarmen's call on where).
+4. **Follow-ups** (each its own issue): the two in-scale label overlaps in the validation trade-off (#53's review); the GreenLight-Gym paper citation in REPORT.md [1]; a fruit-growth guard if any later claim compares against plain PPO; the simulator's first-day dependence on season length (#51's review).
+5. **Disk:** `uv cache clean`, and delete decided worktrees' `.venv`s (`uv sync` rebuilds them).
 
 **Run the harness from a Claude Code session started inside this repo** (`cd ~/Desktop/greenleaf-dashboard && claude`). Its agents, hooks and skills load only there.
 
@@ -81,15 +102,16 @@
    - Veto or keep. If you veto, tell me which criterion you want, and the probe changes before E5.
 1. ~~Root CI breaks `master` on the first `/promote`.~~ Fixed in #23 (`c87bdf9`): `pytest -q tests`, with derived data built first.
 2. **The probe bar vs rung 7.** AGENTS.md says a probe runs "in under ~2 min on the Mac", but #16's overfit probe needs the issue's ~200k steps: `model.learn` alone took 130 s at load 7 to 10, and the whole test 118 to 280 s depending on load. Default: accept it for rung 7 (it's `@slow`, so off the Stop hook and CI) and add "rung 7 excepted" to the bar.
-3. **The `final` reviewer can't read `control/results/final/`** (blocked in every guard_runs mode). Decide how the final's review reads its results before the final issue.
-4. **PID recovery speed (before E5).** Decided 2026-10-28: the integral is clamped to [0, `lambda_max`] (#12). That stops unbounded windup, but it does not make λ recover within a run at the defaults: costs are ≥ 0, so the integral drops by at most `ki` per update, and from the cap λ needs (`lambda_max` − `kp`)/`ki` updates to reach 0 at zero cost: 1,990 at the defaults (100, 0.5, 0.05), against ~244 updates per run. A budget of 0 sends λ to the cap on the first violation. Prompt recovery needs a smaller `lambda_max` or a larger `ki`, both per-run settings; choose them when registering E5.
-5. **Zero-cost budgets for residual_lag (before E5).** It also bites selection: with a CO₂ budget of 0, × 1.10 leaves no slack, so one CO₂-violating step disqualifies a checkpoint and §5 falls to "lowest total cost" more often (both smoke manifests the #13c reviewer saw had a CO₂ budget of 0.0).
+3. ~~**The `final` reviewer can't read `control/results/final/`.**~~ Resolved by #40: guard_runs opens it to reads once the checkout's ledger holds a final-result row; #45's reviewer read it that way.
+4. ~~**PID recovery speed (before E5).**~~ Resolved for the zero-budget case by #38 (λ_co2 is fixed at 1); temperature and RH never saturated in E5. Kept for the record: Decided 2026-10-28: the integral is clamped to [0, `lambda_max`] (#12). That stops unbounded windup, but it does not make λ recover within a run at the defaults: costs are ≥ 0, so the integral drops by at most `ki` per update, and from the cap λ needs (`lambda_max` − `kp`)/`ki` updates to reach 0 at zero cost: 1,990 at the defaults (100, 0.5, 0.05), against ~244 updates per run. A budget of 0 sends λ to the cap on the first violation. Prompt recovery needs a smaller `lambda_max` or a larger `ki`, both per-run settings; choose them when registering E5.
+5. ~~**Zero-cost budgets for residual_lag (before E5).**~~ Resolved by #38 (PROTOCOL v2: fixed multiplier, §5 skips zero budgets). Kept for the record: It also bites selection: with a CO₂ budget of 0, × 1.10 leaves no slack, so one CO₂-violating step disqualifies a checkpoint and §5 falls to "lowest total cost" more often (both smoke manifests the #13c reviewer saw had a CO₂ budget of 0.0).
    - Earlier note: rb_default never violates CO₂ on the TRAIN_EVAL seasons, so `budget_frac` × 0 gives a CO₂ budget of 0; the PID's error is then cost / 1e-8 and λ_co2 jumps to its cap (100) at the first CO₂ cost. If rb_tuned also has zero CO₂ cost, residual_lag is pinned at λ = 100 on CO₂. Option: a budget floor.
 
 6. **Crashed runs in a result (from #20's review; E2 had none).** PROTOCOL §6 says crashed runs "count": listed, and they block adoption. #20 never scores them and the ledger counts them. Three questions:
    - An arm with crashes reports its IQM over its surviving seeds, which can bias it upward. How is such a number quoted?
    - A crash followed by a finished rerun still records crashed ≥ 1, so §6 blocks adopting that arm even though every seed is scored. A Modal infrastructure crash would sink an arm; is that wanted?
    - `budget-stop` runs are scored as full runs with no flag.
+   - E5b hit the second question for real: lag_b100 seed 0 crashed on a full disk (the orchestrator's fault, not the method's), and §6 blocks the arm with 4 of 5 seeds scored. Aarmen chose to close it as crashed with no rerun (2026-10-30).
 8. **A plumbing run before any Modal run (#30; from #19b's review; spend). E2 ran locally instead.**
    - Nothing on the container side has ever run: the /root layout, SubprocVecEnv in the container, the volume commit and reload, and train_remote's body against the real SDK.
    - `--remote` refuses `--smoke`, so E2's registered runs would be the first execution, and any plumbing failure becomes a permanent crashed run-end under E2.
@@ -235,6 +257,8 @@
   - `rliable.library` breaks on pandas 3 (through arch 7.2.0);
   - Python 3.12's `sum()` over floats is compensated, so it can differ from a `+=` loop.
 - **Residual evaluation overshoots toward a bound (#15):** PPO optimises the sampled, clipped policy, so when the optimum sits within about σ of the action bound, the deterministic control lands past it. Target 0.40 (a* = 2/3) peaked at 0.432 mid-training, then fell back as σ shrank. Expect the same on the greenhouse residual arms near u = 0 or 1.
+- **The Mac's disk is the tight resource (2026-10-30):** a 15-run grid writes about 1.4 to 2.3 GB of run dirs and each worktree's `.venv` is 1.4 GB. Duplicate run-dir backups filled the 228 GB disk to 123 MB during E5b and crashed a run. Check `df -h /System/Volumes/Data` before a long chain, and don't copy run dirs.
+- **Run times on the Mac:** residual runs take 17 to 25 min per 2M steps (lag_b100 19 to 25, lag_b50 about 17); budget about 20 min a run.
 - **Parallel slow suites contend:** four test suites at once on the M3 (plus other load) slowed probes up to 5×. Ship one slow suite at a time.
 
 ## How Aarmen likes to work

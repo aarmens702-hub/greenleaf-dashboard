@@ -3,15 +3,29 @@
     python -m greenleaf_control.media --out docs/media
 
 writes season_replay.gif (README), season_replay.mp4 (LinkedIn: H.264, 1080 px wide),
-baselines.png and media.json (each file's source, scenario, commit and numbers).
+baselines.png, tradeoff.png (LinkedIn: 1200 x 627 px) and media.json (each file's source,
+scenario, commit and numbers).
 
-Every picture is a simulator run on PAPER, graded by metrics on the same run it draws, and its
-footer says so: until the ledger has rows, the media shows the simulator and the baselines, never
-an RL result. Figures are built without pyplot (headless, no global state), as in viz.
+The replay and baselines.png are simulator runs on PAPER, graded by metrics on the same run they
+draw, and their footers say so. tradeoff.png draws recorded VALIDATION results only: each point is
+a ledger result row with its decision row (TRADEOFF names the rows, never numbers), read when the
+card is drawn, beside rb_tuned's seasons from evaluate's parquet, checked against E1's row first.
+No RL number is drawn without its ledger row. Figures are built without pyplot (headless, no
+global state), as in viz.
+
+    python -m greenleaf_control.media --out docs/media --replay result-d1f0b8e7
+
+also writes the climate stripes: hero.png (README and LinkedIn, 1200 x 627 px), duel_replay.gif
+(1280 x 720) and duel_replay.mp4 (1920 x 1080). They replay that recorded VALIDATION result on
+SEASON: rb_tuned above the lower-median seed's run (PROTOCOL §6, no best seed) at its selected
+checkpoint, each replay checked against its record before anything is written. The run dirs aren't
+in git, so the flag is opt-in. Climate is drawn as export_replay draws it: hour h is frame row
+4h + 3 (the end of the hour), its actuators the hour's mean.
 """
 
 import argparse
 import functools
+import hashlib
 import json
 import math
 from datetime import UTC, datetime
@@ -24,7 +38,17 @@ from matplotlib.colors import LinearSegmentedColormap
 from matplotlib.figure import Figure
 from matplotlib.ticker import FuncFormatter, MultipleLocator
 
-from greenleaf_control import envs, evaluate, manifest, metrics, scenarios
+from greenleaf_control import (
+    envs,
+    evaluate,
+    export_replay,
+    ledger,
+    manifest,
+    metrics,
+    scenarios,
+    selection,
+    stats,
+)
 
 N_DAY = 96  # steps a day: 86,400 s / 900 s
 CARD = ("rb_default", "zero_controls", "random")  # the card's columns, left to right
@@ -40,7 +64,26 @@ HEADINGS = {
 PLACE = f"{scenarios.PAPER['location']} {scenarios.PAPER['growth_year']}"  # PAPER's weather
 PAPER_NAME = f"PAPER ({PLACE})"
 N_FRAMES = 180  # the replay's counter rows; with a 2 s hold at 15 fps, about 14 s
-GIF_DPI, MP4_DPI = 100, 150  # 720 x 900 and 1080 x 1350 px on the replay's 7.2 x 9 in figure
+GIF_DPI, MP4_DPI = 100, 150  # 720 x 900 and 1080 x 1350 px on the replay's 7.2 x 9 in figure,
+# 1280 x 720 and 1920 x 1080 on the stripes' STRIPES_SIZE
+
+# The trade-off still (issue #50): (result_id, arm, status), row ids and statuses, never numbers.
+# Every number is read from the ledger when the card is drawn. E4 has one decision row: its note
+# adopts residual_w1 and drops residual_w4.
+TRADEOFF = [
+    ("result-06364fa1", "ppo", "adopted"),  # E3
+    ("result-d1f0b8e7", "residual_w05", "adopted"),  # E6, seeds 100 to 109
+    ("result-2a890455", "residual_w1", "adopted"),  # E4
+    ("result-1dd39e3a", "lag_b100", "adopted"),  # E7, seeds 200 to 209
+    ("result-2a890455", "residual_w4", "dropped"),  # E4
+]
+E1_RESULT = "result-525a6e90"  # rb_tuned on VALIDATION; its profit is only in RB_PARQUET
+RB_PARQUET = "rb_tuned_validation.parquet"  # evaluate's CLI writes it, one row per season
+HOUR_KEYS = [f"viol_hours_{c}" for c in metrics.CONSTRAINTS]
+VAL_PLACE = f"{scenarios.VALIDATION[0]['location']} {scenarios.VALIDATION[0]['growth_year']}"
+VAL_NAME = f"VALIDATION, {VAL_PLACE} days " + ", ".join(
+    str(s["start_day"]) for s in scenarios.VALIDATION
+)  # "VALIDATION, Amsterdam 2010 days 45, 59, 75"
 
 # The glasshouse palette.
 LEAF, BAND, TOMATO, AMBER = "#2f6b4f", "#d5e7da", "#c23f29", "#a5601c"
@@ -48,6 +91,27 @@ INK, MUTED = "#15231c", "#55655c"
 ACTUATOR_CMAP = LinearSegmentedColormap.from_list("actuator", ["#f6f1ea", AMBER]).with_extremes(
     bad="white"
 )
+MARKERS = ("s", "o", "^", "v", "P", "X")  # each point's shape in TRADEOFF order; rb_tuned is "D"
+ADOPTED = (AMBER, INK, TOMATO)  # the adopted arms' colours in TRADEOFF order; residual_w05 is LEAF
+
+# The climate stripes (issue #51): one VALIDATION season, fixed as the middle of the three (it is
+# also upstream's PAPER season), not by its outcome.
+SEASON = scenarios.VALIDATION[1]  # Amsterdam 2010 from day 59
+# The site's "Instrument" style. Fonts are set per text (fontfamily=), never globally; each list
+# ends on a font matplotlib bundles, so it renders anywhere.
+SITE_BG, SITE_INK, SITE_MUTED = "#F2F3F0", "#111311", "#6A6F68"
+GROTESK = ["Helvetica Neue", "DejaVu Sans"]
+MONO = ["Menlo", "DejaVu Sans Mono"]
+TEMP_SCALE = (10.0, 36.0)  # °C, the same in both panels
+# Air temperature, blue to rust in 26 steps of 1 °C over TEMP_SCALE (discrete, so the GIF's palette
+# doesn't shimmer). Its neutral middle is a grey that isn't the page, so a 23 °C cell still shows;
+# a day not yet drawn is masked and shows as the page.
+TEMP_CMAP = LinearSegmentedColormap.from_list(
+    "air_temperature", ["#1B3A5B", "#DCE3E8", "#E4E6E1", "#E8C9A8", "#B4451A"], N=26
+).with_extremes(bad=SITE_BG)
+REPLAY_FPS = 12
+DAY_FRAMES = 2  # frames a day: 60 days x 2 + a 2 s hold at 12 fps is 12 s
+STRIPES_SIZE, HERO_SIZE = (12.8, 7.2), (12, 6.27)  # in: 1280 x 720 at GIF_DPI, 1200 x 627 at 100
 
 
 def play(controller: str, season_length: int = 60) -> dict:
@@ -78,6 +142,16 @@ def running(states, controls, params, ends) -> pd.DataFrame:
         m = metrics.episode_metrics(states[: k + 1], controls[:k], params, season_steps=k)
         rows.append({"step": k, **{col: m[col] for col in cols}})
     return pd.DataFrame(rows, columns=["step", *cols])
+
+
+def _hourly(frame) -> pd.DataFrame:
+    """export_replay's hourly convention, so the README and the site draw the same series: hour h's
+    t, co2, temp and rh are frame row 4h + 3 (the end of the hour), each u_* the mean of rows
+    4h..4h+3."""
+    n_hours = len(frame) // 4
+    means = frame[U_COLS].to_numpy(dtype=np.float64).reshape(n_hours, 4, len(U_COLS)).mean(axis=1)
+    end_of_hour = frame.iloc[3::4].reset_index(drop=True)
+    return end_of_hour.assign(**{col: means[:, j] for j, col in enumerate(U_COLS)})
 
 
 def _days_axis(ax, n_steps: int, n_ticks: int) -> None:
@@ -126,11 +200,11 @@ def season_replay(
     frame, counters, out_gif, out_mp4=None, *, title, subtitle=None, footer, fps=15
 ) -> Figure:
     """Animates a season: each counters row (its first `step` steps) is one frame, then a 2 s hold
-    on the last. Hourly co2, temp and rh against t over their safe bands (tomato where outside),
-    the actuator strip, and the counters as text, under the title (and the subtitle when given).
-    Saves the GIF (and the MP4 when out_mp4 is given) and returns the Figure in its final frame's
-    state."""
-    hourly = frame.iloc[::4]
+    on the last. _hourly's co2, temp and rh against t over their safe bands (tomato where
+    outside), its actuator strip, and the counters as text, under the title (and the subtitle when
+    given); after k steps, the k // 4 complete hours. Saves the GIF (and the MP4 when out_mp4 is
+    given) and returns the Figure in its final frame's state."""
+    hourly = _hourly(frame)
     t = hourly["t"].to_numpy()
     u = hourly[U_COLS].to_numpy(dtype=np.float64).T
     n_steps, n_days = len(frame), math.ceil(len(frame) / N_DAY)
@@ -185,7 +259,7 @@ def season_replay(
     def draw(i: int) -> None:
         row = counters.iloc[i]
         k = int(row["step"])
-        n = math.ceil(k / 4)  # the hourly rows among the first k steps
+        n = k // 4  # the hours complete after k steps (hour h ends on step 4h + 4)
         for line, dots, y, out in series.values():
             line.set_data(t[:n], y[:n])
             dots.set_offsets(np.column_stack([t[:n][out[:n]], y[:n][out[:n]]]))
@@ -283,7 +357,7 @@ def baselines_card(seasons, out, *, footer) -> Figure:
             extent=(0, N_DAY * share.shape[1], 2.5, -0.5),
         )
         axes[0, j].set_yticks(range(3), labels=[HOURS[k] for k in metrics.BOUNDS])
-        _strip(axes[1, j], frame.iloc[::4][U_COLS].to_numpy(dtype=np.float64).T)
+        _strip(axes[1, j], _hourly(frame)[U_COLS].to_numpy(dtype=np.float64).T)
         for ax in axes[:, j]:
             _style(ax)
             ax.tick_params(axis="y", length=0, labelleft=j == 0)
@@ -297,26 +371,431 @@ def baselines_card(seasons, out, *, footer) -> Figure:
     return fig
 
 
-def footer(source: str, stamp: dict) -> str:
-    """A picture's provenance: its source, the scenario, the simulator's and this repo's commits."""
+def tradeoff_points(path: Path = ledger.LEDGER) -> list[dict]:
+    """One point per TRADEOFF entry, in order, read from the ledger at path: the arm and status,
+    its result, decision and registered row ids, the registered seeds, and from per_arm[arm] the
+    profit and each viol_hours_<c> as (iqm, ci_low, ci_high) and yield_kg_m2's iqm. ValueError,
+    naming the row, for an entry the card can't draw."""
+    found = ledger.rows(path=path)
+    by_id = {r["row_id"]: r for r in found}
+    points = []
+    for result_id, arm, status in TRADEOFF:
+        result = by_id.get(result_id)
+        if result is None or result["kind"] != "result":
+            raise ValueError(f"{result_id} names no result row in {path}")
+        decisions = [
+            r["row_id"] for r in found if r["kind"] == "decision" and r["result"] == result_id
+        ]
+        if len(decisions) != 1:
+            raise ValueError(
+                f"{result_id} has {len(decisions)} decision rows, not one: an undecided result is"
+                " never drawn"
+            )
+        registered = by_id[result["registered"]]
+        if registered["scenarios"] != ["validation"]:
+            raise ValueError(
+                f"{result_id}'s registration {registered['row_id']} is on"
+                f" {registered['scenarios']}, not ['validation']"
+            )
+        numbers = result["per_arm"].get(arm)
+        if numbers is None or numbers["iqm"] is None:
+            raise ValueError(f"{result_id} has no {arm} numbers to draw")
+        if numbers["crashed"] or numbers["invalid_episodes"]:
+            raise ValueError(
+                f"{result_id}'s {arm} has {numbers['crashed']} crashed runs and"
+                f" {numbers['invalid_episodes']} invalid episodes"
+            )
+        missing = [k for k in (*HOUR_KEYS, "yield_kg_m2") if k not in numbers["guards"]]
+        if missing:
+            raise ValueError(f"{result_id}'s {arm} has no {', '.join(missing)} guard")
+        ci = {
+            k: tuple(numbers["guards"][k][s] for s in ("iqm", "ci_low", "ci_high"))
+            for k in HOUR_KEYS
+        }
+        points.append(
+            {
+                "arm": arm,
+                "status": status,
+                "result": result_id,
+                "decision": decisions[0],
+                "registered": registered["row_id"],
+                "seeds": registered["seeds"],
+                "profit": (numbers["iqm"], numbers["ci_low"], numbers["ci_high"]),
+                **ci,
+                "yield_kg_m2": numbers["guards"]["yield_kg_m2"]["iqm"],
+            }
+        )
+    return points
+
+
+def rb_tuned_reference(
+    n_seeds: int, path: Path = ledger.LEDGER, parquet: Path = selection.RESULTS / RB_PARQUET
+) -> dict:
+    """rb_tuned drawn like an n_seeds-seed arm: its parquet's VALIDATION seasons, first checked
+    against E1_RESULT's row (each viol_hours_<c>'s season mean equal to its guard's iqm exactly,
+    paper_return's to the iqm within rel 1e-9; ValueError otherwise), then profit_eur_m2, each
+    viol_hours_<c> and yield_kg_m2 as stats.iqm_ci(np.tile(seasons, (n_seeds, 1)))[0], with
+    n_seeds and the parquet's sha256."""
+    e1 = [r for r in ledger.rows("result", path=path) if r["row_id"] == E1_RESULT]
+    if len(e1) != 1:
+        raise ValueError(f"{E1_RESULT} names no result row in {path}")
+    numbers = e1[0]["per_arm"]["rb_tuned"]
+    seasons = pd.read_parquet(parquet)
+    want = {"paper_return": numbers["iqm"], **{k: numbers["guards"][k]["iqm"] for k in HOUR_KEYS}}
+    for key, v in want.items():
+        got = float(np.mean(seasons[key].to_numpy(dtype=np.float64)))
+        same = math.isclose(got, v, rel_tol=1e-9) if key == "paper_return" else got == v
+        if not same:
+            raise ValueError(
+                f"{parquet.name}'s mean {key} {got!r} isn't {E1_RESULT}'s {v!r}: the parquet"
+                " and E1's row disagree"
+            )
+    keys = ["profit_eur_m2", *HOUR_KEYS, "yield_kg_m2"]
+    tiled = {
+        k: stats.iqm_ci(np.tile(seasons[k].to_numpy(dtype=np.float64), (n_seeds, 1)))[0]
+        for k in keys
+    }
+    sha = hashlib.sha256(parquet.read_bytes()).hexdigest()
+    return {**tiled, "n_seeds": n_seeds, "sha256": sha}
+
+
+def replay_pick(
+    result_id: str, path: Path = ledger.LEDGER, parquet: Path = selection.RESULTS / RB_PARQUET
+) -> dict:
+    """The run the stripes replay, by PROTOCOL §6's rule (no best seed): result_id's scored runs
+    sorted by (recorded SEASON profit, seed), index (n - 1) // 2, the lower median with ties to the
+    lower seed. A run's record is its selected.json's SEASON entry of per_scenario at its selected
+    checkpoint. Returns export_replay._registered_run's keys plus run_dir, decision (the decision
+    row's id), record and rb_record (the parquet's SEASON row). Reads only, plays no season.
+    ValueError, naming the row (or run dir, or parquet), for: a row that isn't a result; a
+    registration not on exactly ["validation"]; not exactly one decision row, or one that isn't
+    adopted; more than one arm; a scored run's run_dir missing; a run's selected.json not on
+    VALIDATION in evaluate.SEASON_LENGTH-day seasons, or its checkpoint not the result row's; a
+    parquet without exactly one SEASON row."""
+    found = ledger.rows(path=path)
+    by_id = {r["row_id"]: r for r in found}
+    result = by_id.get(result_id)
+    if result is None or result["kind"] != "result":
+        raise ValueError(f"{result_id} names no result row in {path}")
+    registered = by_id[result["registered"]]
+    if registered["scenarios"] != ["validation"]:
+        raise ValueError(
+            f"{result_id}'s registration {registered['row_id']} is on"
+            f" {registered['scenarios']}, not ['validation']"
+        )
+    decisions = [r for r in found if r["kind"] == "decision" and r["result"] == result_id]
+    if [d["decision"] for d in decisions] != ["adopted"]:
+        raise ValueError(
+            f"{result_id} has decision rows {[(d['row_id'], d['decision']) for d in decisions]}:"
+            " the replay draws a result with exactly one decision, adopted"
+        )
+    if len(registered["arms"]) != 1:
+        raise ValueError(
+            f"{result_id}'s registration {registered['row_id']} has {len(registered['arms'])}"
+            " arms; the replay draws one"
+        )
+    at = scenarios.VALIDATION.index(SEASON)
+    ranked = []  # (recorded SEASON profit, seed, run dir, record) per scored run
+    for run in (r for r in found if r["kind"] == "run" and r["row_id"] in result["selected"]):
+        run_dir, checkpoint = Path(run["run_dir"]), result["selected"][run["row_id"]]
+        if not run_dir.is_dir():
+            raise ValueError(f"{run['row_id']}'s run dir {run_dir} is missing (it isn't in git)")
+        chosen = json.loads((run_dir / "selected.json").read_text())
+        if (
+            chosen["scenarios"] != scenarios.VALIDATION
+            or chosen["season_length"] != evaluate.SEASON_LENGTH
+        ):
+            raise ValueError(
+                f"{run['row_id']}'s {run_dir / 'selected.json'} was selected on"
+                f" {chosen['scenarios']} in {chosen['season_length']}-day seasons, not VALIDATION"
+                f" in {evaluate.SEASON_LENGTH}-day ones"
+            )
+        if chosen["checkpoint"] != checkpoint:
+            raise ValueError(
+                f"{run['row_id']}'s {run_dir / 'selected.json'} names checkpoint"
+                f" {chosen['checkpoint']!r}, but {result_id} selected {checkpoint!r}"
+            )
+        record = chosen["candidates"][checkpoint]["per_scenario"][at]
+        ranked.append((record["profit_eur_m2"], run["seed"], run_dir, record))
+    seasons = pd.read_parquet(parquet).to_dict("records")
+    rb_rows = [s for s in seasons if {k: s[k] for k in SEASON} == SEASON]
+    if len(rb_rows) != 1:
+        raise ValueError(f"{parquet} has {len(rb_rows)} rows for {SEASON}, not one")
+    ranked.sort(key=lambda r: r[:2])
+    _, _, run_dir, record = ranked[(len(ranked) - 1) // 2]
+    return {
+        **export_replay._registered_run(run_dir, path),
+        "run_dir": run_dir,
+        "decision": decisions[0]["row_id"],
+        "record": record,
+        "rb_record": rb_rows[0],
+    }
+
+
+def tradeoff_card(points, references, out, *, footer) -> Figure:
+    """Each point's profit against its hours outside each safe range on VALIDATION: three panels
+    in metrics.CONSTRAINTS order sharing the profit axis, each point an errorbar at (hours iqm,
+    profit iqm) with bars to both ledger CIs (residual_w05 LEAF, the dropped arm hollow and MUTED),
+    and rb_tuned a hollow diamond without bars (it is deterministic) at the largest-n reference,
+    the others in a note. A legend right of the panels names each point's result row. Saved to
+    out at exactly 1200 x 627 px (LinkedIn's landscape size)."""
+    top = max(references, key=lambda r: r["n_seeds"])
+    seasons = len(scenarios.VALIDATION)
+    fig = Figure(figsize=(12, 6.27), facecolor="white")
+    axes = fig.subplots(
+        1,
+        3,
+        sharey=True,
+        gridspec_kw={"left": 0.07, "right": 0.68, "top": 0.75, "bottom": 0.2, "wspace": 0.2},
+    )
+    fig.text(
+        0.03,
+        0.965,
+        f"Profit against hours outside each safe range, VALIDATION ({VAL_PLACE})",
+        fontsize=17,
+        weight="bold",
+        color=INK,
+        va="top",
+    )
+    fig.text(
+        0.03,
+        0.9,
+        "IQM over seeds × seasons, 95% stratified bootstrap CI",
+        fontsize=11.5,
+        color=INK,
+        va="top",
+    )
+    others = "".join(
+        f"; its profit as a {r['n_seeds']}-seed arm: {r['profit_eur_m2']:.2f} €/m²"
+        for r in sorted(references, key=lambda r: r["n_seeds"])
+        if r is not top
+    )
+    fig.text(
+        0.03,
+        0.86,
+        f"rb_tuned is deterministic: its {seasons} seasons are tiled to {top['n_seeds']} seeds and"
+        f" scored like an arm{others}",
+        fontsize=11.5,
+        color=MUTED,
+        va="top",
+    )
+    fig.text(0.03, 0.015, footer, fontsize=8, color=MUTED, va="bottom", linespacing=1.4)
+
+    colours = iter(ADOPTED)
+    styles = []  # (shape, face, edge) per point
+    for i, p in enumerate(points):
+        if p["status"] == "dropped":
+            face, edge = "none", MUTED
+        else:
+            face = edge = LEAF if p["arm"] == "residual_w05" else next(colours)
+        styles.append((MARKERS[i], face, edge))
+    for ax, c in zip(axes, metrics.CONSTRAINTS, strict=True):
+        key = f"viol_hours_{c}"
+        ax.axhline(0.0, color=MUTED, lw=0.8, ls=":")
+        handles = []
+        for p, (shape, face, edge) in zip(points, styles, strict=True):
+            x, x_low, x_high = p[key]
+            y, y_low, y_high = p["profit"]
+            handles.append(
+                ax.errorbar(
+                    x,
+                    y,
+                    xerr=[[x - x_low], [x_high - x]],
+                    yerr=[[y - y_low], [y_high - y]],
+                    linestyle="none",
+                    marker=shape,
+                    ms=8,
+                    mfc=face,
+                    mec=edge,
+                    mew=1.5,
+                    ecolor=edge,
+                    elinewidth=1.2,
+                    capsize=3,
+                    zorder=3,
+                )
+            )
+        (rb,) = ax.plot(
+            [top[key]],
+            [top["profit_eur_m2"]],
+            linestyle="none",
+            marker="D",
+            ms=9,
+            mfc="none",
+            mec=INK,
+            mew=1.6,
+            zorder=4,
+        )
+        ax.set_title(HOURS[c], loc="left", fontsize=12, weight="bold", color=INK)
+        ax.set_xlabel("hours outside the safe range", fontsize=11, color=INK)
+        _style(ax)
+    axes[0].set_ylabel("profit [€/m²]", fontsize=12, color=INK)
+
+    labels = [
+        f"{p['arm']} ({p['status']}), {p['result']}\n{len(p['seeds'])} seeds × {seasons}"
+        f" VALIDATION seasons\nprofit {p['profit'][0]:.2f} [{p['profit'][1]:.2f},"
+        f" {p['profit'][2]:.2f}] €/m²\nfruit growth {p['yield_kg_m2']:.2f} kg/m²"
+        for p in points
+    ]
+    labels.append(
+        f"rb_tuned (tuned rules), {E1_RESULT}\n{seasons} seasons scored as {top['n_seeds']}"
+        f" seeds, no bars\nprofit {top['profit_eur_m2']:.2f} €/m², fruit growth"
+        f" {top['yield_kg_m2']:.2f} kg/m²"
+    )
+    fig.legend(
+        [*handles, rb],
+        labels,
+        loc="upper left",
+        bbox_to_anchor=(0.695, 0.81),
+        frameon=False,
+        fontsize=9.5,
+        labelcolor=INK,
+        labelspacing=0.5,
+    )
+    fig.savefig(out, dpi=100)
+    return fig
+
+
+def _stripes(panels, figsize, *, title, caption, footer) -> tuple[Figure, object]:
+    """The climate stripes on a figsize Figure on SITE_BG. panels, top to bottom, are dicts of
+    heading, frame, result and counters (running() at the end of each day). Each panel is its
+    heading over one image, _hourly(frame)'s temp as a 24 x days grid (row = hour 00..23 from the
+    top, column = day) on TEMP_CMAP over TEMP_SCALE, with its totals under it in MONO: profit and
+    the hours outside each safe range, never summed. The title is in GROTESK; a "day d / n"
+    counter, the caption and the footer in MONO. Returns (Figure, draw): draw(d) shows days 1..d
+    (later columns masked) and each panel's counters row d - 1."""
+    n_days = len(panels[0]["frame"]) // N_DAY
+    fig = Figure(figsize=figsize, facecolor=SITE_BG)
+    fig.text(
+        0.05,
+        0.955,
+        title,
+        fontfamily=GROTESK,
+        fontsize=20,
+        color=SITE_INK,
+        va="top",
+        linespacing=1.3,
+    )
+    day = fig.text(
+        0.95, 0.95, "", fontfamily=MONO, fontsize=16, color=SITE_INK, ha="right", va="top"
+    )
+    fig.text(0.05, 0.1, caption, fontfamily=MONO, fontsize=9, color=SITE_MUTED, linespacing=1.5)
+    fig.text(0.05, 0.02, footer, fontfamily=MONO, fontsize=7, color=SITE_MUTED, linespacing=1.4)
+    drawn = []  # (image, grid, counters, {key: total's Text}) per panel
+    for i, p in enumerate(panels):
+        bottom = 0.57 - 0.32 * i  # the panel's axes are 0.19 high
+        ax = fig.add_axes((0.05, bottom, 0.9, 0.19))
+        grid = _hourly(p["frame"])["temp"].to_numpy(dtype=np.float64).reshape(n_days, 24).T
+        image = ax.imshow(
+            grid,
+            cmap=TEMP_CMAP,
+            vmin=TEMP_SCALE[0],
+            vmax=TEMP_SCALE[1],
+            aspect="auto",
+            interpolation="nearest",
+        )
+        ax.set_xticks([])
+        hours = [0, 6, 12, 18, 23]
+        ax.set_yticks(hours, labels=[f"{h:02d}" for h in hours], fontfamily=MONO, fontsize=9)
+        ax.tick_params(axis="y", length=0, labelcolor=SITE_MUTED)
+        for spine in ax.spines.values():
+            spine.set_visible(False)
+        fig.text(
+            0.05, bottom + 0.205, p["heading"], fontfamily=GROTESK, fontsize=15, color=SITE_INK
+        )
+        y = bottom - 0.025
+        fig.text(
+            0.24,
+            y,
+            "hours outside the safe range",
+            fontfamily=MONO,
+            fontsize=11,
+            color=SITE_MUTED,
+            va="top",
+        )
+        totals = {
+            key: fig.text(x, y, "", fontfamily=MONO, fontsize=13, color=SITE_INK, va="top")
+            for key, x in zip(["profit_eur_m2", *HOUR_KEYS], (0.05, 0.47, 0.59, 0.73), strict=True)
+        }
+        drawn.append((image, grid, p["counters"], totals))
+
+    def draw(d: int) -> None:
+        day.set_text(f"day {d} / {n_days}")
+        for image, grid, counters, totals in drawn:
+            hidden = np.broadcast_to(np.arange(n_days) >= d, grid.shape)
+            image.set_data(np.ma.masked_array(grid, mask=hidden))
+            row = counters.iloc[d - 1]
+            totals["profit_eur_m2"].set_text(f"profit {row['profit_eur_m2']:.2f} €/m²")
+            for c in metrics.CONSTRAINTS:
+                totals[f"viol_hours_{c}"].set_text(f"{HOURS[c]} {row[f'viol_hours_{c}']:.2f} h")
+
+    return fig, draw
+
+
+def duel_replay(
+    panels, out_gif, out_mp4, out_png, *, title, caption, footer, fps=REPLAY_FPS
+) -> Figure:
+    """The stripes filling in day by day: each day d = 1..n drawn DAY_FRAMES times, then a 2 s
+    hold. Saves the GIF at STRIPES_SIZE and GIF_DPI (1280 x 720), the MP4 at MP4_DPI (1920 x 1080;
+    none when out_mp4 is None), and the still, the last day at HERO_SIZE and 100 dpi, to out_png
+    (1200 x 627). Returns the still's Figure."""
+    fig, draw = _stripes(panels, STRIPES_SIZE, title=title, caption=caption, footer=footer)
+    n_days = len(panels[0]["frame"]) // N_DAY
+    frames = [d for d in range(1, n_days + 1) for _ in range(DAY_FRAMES)] + [n_days] * (2 * fps)
+    anim = FuncAnimation(fig, draw, frames=frames, blit=False, cache_frame_data=False)
+    anim.save(out_gif, writer=PillowWriter(fps=fps), dpi=GIF_DPI)
+    if out_mp4 is not None:
+        writer = FFMpegWriter(fps=fps, codec="h264", extra_args=["-crf", "20"])
+        anim.save(out_mp4, writer=writer, dpi=MP4_DPI)
+    still, draw_still = _stripes(panels, HERO_SIZE, title=title, caption=caption, footer=footer)
+    draw_still(n_days)
+    still.savefig(out_png, dpi=100)
+    return still
+
+
+def footer(
+    source: str,
+    stamp: dict,
+    *,
+    place: str = PAPER_NAME,
+    note: str = "A simulator run, not a registered result",
+) -> str:
+    """A picture's provenance: its source, the place, the simulator's and this repo's commits, and
+    the note."""
     gl7 = manifest._versions()["gl-gym"][:7]
     dirty = " (dirty)" if stamp["dirty"] else ""
     return (
-        f"source: {source}, {PAPER_NAME}\nsimulator GreenLight-Gym @{gl7}, commit"
-        f" {stamp['commit'][:7]}{dirty}. A simulator run, not a registered result"
+        f"source: {source}, {place}\nsimulator GreenLight-Gym @{gl7}, commit"
+        f" {stamp['commit'][:7]}{dirty}. {note}"
     )
 
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         prog="python -m greenleaf_control.media",
-        description="Regenerate the README and LinkedIn visuals from the simulator.",
+        description="Regenerate the README and LinkedIn visuals from the simulator and the ledger.",
     )
     parser.add_argument("--out", type=Path, required=True, help="the dir to write the media into")
+    parser.add_argument(
+        "--replay",
+        metavar="ROW",
+        help="also draw the climate stripes (hero.png, duel_replay.gif, duel_replay.mp4) from this"
+        " VALIDATION result row: rb_tuned beside its lower-median seed (its run dirs must exist)",
+    )
     args = parser.parse_args(argv)
     if not FFMpegWriter.isAvailable():
         parser.error("ffmpeg isn't on PATH, and the MP4 needs it (brew install ffmpeg)")
     stamp = manifest.code_stamp(smoke=True)
+    # The ledger's rows first: a refused row stops main before any season is played or file written.
+    points = tradeoff_points()
+    references = [rb_tuned_reference(n) for n in sorted({len(p["seeds"]) for p in points})]
+    pick = None if args.replay is None else replay_pick(args.replay)
+    # The test weather: sealed until the ledger holds the final-result row (one at most).
+    finals = ledger.rows("final-result", path=ledger.LEDGER)
+    test_weather = (
+        f"the 2012 test results are in docs/REPORT.md §5 ({finals[0]['row_id']})"
+        if finals
+        else "the 2012 test weather is still sealed"
+    )
 
     seasons = {c: play(c) for c in CARD}
     invalid = {c: s["result"] for c, s in seasons.items() if not s["result"]["valid"]}
@@ -333,6 +812,41 @@ def main(argv: list[str] | None = None) -> int:
     n_steps = len(rb["frame"])
     ends = [round(n_steps * (i + 1) / N_FRAMES) for i in range(N_FRAMES)]
     counters = running(rb["states"], rb["controls"], rb["params"], ends)
+    if pick is not None:
+        # Both replays, each equal to its record (hours and steps exactly, the rest to rel 1e-9)
+        # before anything is written.
+        rb_tuned = export_replay._season("rb_tuned", SEASON, None)
+        run = export_replay._season(str(pick["run_dir"]), SEASON, pick)
+        sides = (
+            ("rb_tuned", "Tuned rules", rb_tuned, pick["rb_record"]),
+            (f"{pick['arm']} {pick['id']}", "Rules + co-pilot", run, pick["record"]),
+        )
+        for side, _, (_, got, _), want in sides:
+            off = [
+                f"{key} {got[key]!r}, recorded {want[key]!r}"
+                for key in ledger.RESULT_KEYS
+                if (
+                    got[key] != want[key]
+                    if key in (*HOUR_KEYS, "steps")
+                    else not math.isclose(got[key], want[key], rel_tol=1e-9)
+                )
+            ]
+            if off:
+                parser.error(
+                    f"{side}'s replayed season differs from its record: {'; '.join(off)}. Nothing"
+                    " is drawn; a mismatch is a finding, never a tolerance to loosen"
+                )
+        n_days = len(rb_tuned[0]) // N_DAY
+        day_ends = [N_DAY * d for d in range(1, n_days + 1)]
+        panels = [
+            {
+                "heading": heading,
+                "frame": frame,
+                "result": result,
+                "counters": running(*trace, day_ends),
+            }
+            for _, heading, (frame, result, trace), _ in sides
+        ]
     args.out.mkdir(parents=True, exist_ok=True)
     season_replay(
         rb["frame"],
@@ -345,6 +859,15 @@ def main(argv: list[str] | None = None) -> int:
     )
     card_source = " vs ".join(CARD)
     baselines_card(seasons, args.out / "baselines.png", footer=footer(card_source, stamp))
+    rows = [*dict.fromkeys(p[k] for p in points for k in ("result", "decision")), E1_RESULT]
+    tradeoff_source = ", ".join([*rows, RB_PARQUET])
+    tradeoff_footer = footer(
+        f"{', '.join(rows)},\n{RB_PARQUET}",  # two lines: one is wider than the card
+        stamp,
+        place=VAL_NAME,
+        note=f"Recorded VALIDATION results; {test_weather}",
+    )
+    tradeoff_card(points, references, args.out / "tradeoff.png", footer=tradeoff_footer)
 
     made_at = datetime.now(UTC).isoformat()
     gl_gym = manifest._versions()["gl-gym"]
@@ -365,7 +888,59 @@ def main(argv: list[str] | None = None) -> int:
         entry("season_replay.gif", "rb_default", rb["result"]),
         entry("season_replay.mp4", "rb_default", rb["result"]),
         entry("baselines.png", card_source, {c: seasons[c]["result"] for c in CARD}),
+        {
+            **entry("tradeoff.png", tradeoff_source, {"points": points, "references": references}),
+            "scenario": scenarios.VALIDATION,
+            "split": "validation",
+            "ledger": rows,
+        },
     ]
+    if pick is not None:
+        place = f"{SEASON['location']} {SEASON['growth_year']}"
+        low, high = metrics.BOUNDS["temp"]
+        caption = (
+            f"air temperature, blue {TEMP_SCALE[0]:g} °C to rust {TEMP_SCALE[1]:g} °C, one cell an"
+            f" hour; safe range {low:g} to {high:g} °C.\nCo-pilot: {pick['id']}, {pick['arm']} seed"
+            f" {pick['seed']}, checkpoint {pick['checkpoint']}"
+        )
+        replay_rows = [pick["id"], pick["result"], pick["decision"], E1_RESULT]
+        run_name = (
+            f"{pick['id']} ({pick['arm']} seed {pick['seed']}, checkpoint {pick['checkpoint']},"
+            f" trained at {pick['commit'][:7]})"
+        )
+        named = f"{', '.join(replay_rows[1:])}, {RB_PARQUET}"
+        duel_replay(
+            panels,
+            args.out / "duel_replay.gif",
+            args.out / "duel_replay.mp4",
+            args.out / "hero.png",
+            # The split in the title, as large as it: the caption is unreadable at half size.
+            title=f"{n_days} days of greenhouse air, hour by hour\nVALIDATION season ({place}, day"
+            f" {SEASON['start_day']}), not the final result",
+            caption=caption,
+            footer=footer(
+                f"{run_name},\n{named}",  # two lines: one is wider than the still
+                stamp,
+                place=f"VALIDATION, {place} day {SEASON['start_day']}",
+                note=f"A replay of a recorded VALIDATION result; {test_weather}",
+            ),
+        )
+        replay = {
+            "scenario": SEASON,
+            "split": "validation",
+            "ledger": replay_rows,
+            "run": {
+                "seed": pick["seed"],
+                "checkpoint": pick["checkpoint"],
+                "run_dir": str(pick["run_dir"]),
+                "manifest_commit": pick["commit"],
+            },
+        }
+        numbers = {"rb_tuned": rb_tuned[1], pick["arm"]: run[1]}
+        entries += [
+            {**entry(name, f"rb_tuned vs {run_name}, {named}", numbers), **replay}
+            for name in ("hero.png", "duel_replay.gif", "duel_replay.mp4")
+        ]
     (args.out / "media.json").write_text(json.dumps(entries, indent=2) + "\n")
     return 0
 

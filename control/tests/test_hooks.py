@@ -16,11 +16,26 @@ and control-ci.yml refuses a stale lockfile, reads the repo only and pins its uv
 Issue #27 closes three gaps: guard_tests.py judges the resolved path, so `tests/..` or a symlink
 can't pass app code off as a test; protect_secrets.py reads a Grep's glob and type, not only its
 path; and stop_tests.py blocks (exit 2) when it can't read its input or git can't say what changed.
+
+Issue #29 closes the gaps left after #27. guard_tests.py and protect_secrets.py casefold before they
+match, since the Mac's filesystem ignores case; protect_secrets.py judges a symlink by its target as
+well as its own name, blocks a Grep of the home folder with no filter, and calls the brace cap's
+block what it is, not a crash; stop_tests.py blocks the stop when control/.venv or uv is missing or
+uv can't run; and the Stop hook's settings timeout covers its own worst case.
+
+Issue #40 opens a checkout's control/results/final/ to Read, Grep and Glob, in every mode, once the
+ledger beside it (that checkout's control/ledger/ledger.jsonl) holds a final-result row: the seal is
+spent, so reading the results can't steer anything. No ledger, an unreadable one, or any line that
+isn't a JSON object keeps it sealed. Writes there and the 2012 weather stay blocked for good. These
+tests use fake checkouts under tmp_path, so the real ledger's seal decides none of them: the day F1's
+final-result lands on dev, a test that read the real repo's results/final would turn red.
 """
 
+import ast
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -177,15 +192,13 @@ BLOCKED_BASH = [
     ),
 ]
 
+# The 2012 weather only: control/results/final/ opens with the ledger beside it (#40), so its cases
+# use fake checkouts under tmp_path (below), never this repo's.
 SEALED_READS = [
-    pytest.param(_file_call("Read", CONTROL / "results/final/x.parquet"), id="read results/final"),
     pytest.param(
         _file_call("Read", CONTROL / "data/weather/Amsterdam/2012.csv"), id="read 2012 weather"
     ),
     pytest.param(_file_call("Read", GL_GYM_2012), id="read gl_gym's 2012 weather"),
-    pytest.param(
-        _call("Grep", ROOT, pattern="iqm", path="control/results/final"), id="grep results/final"
-    ),
     pytest.param(
         _call("Glob", ROOT, pattern="control/data/weather/*/2012.csv"), id="glob 2012 weather"
     ),
@@ -254,9 +267,9 @@ def test_guard_runs_blocks_bash_that_writes_results_or_runs_for_real(command, cw
 
 @pytest.mark.parametrize("mode", MODES)
 @pytest.mark.parametrize("payload", SEALED_READS)
-def test_guard_runs_blocks_reads_of_the_sealed_results_and_test_weather(payload, mode):
-    """Read, Grep and Glob can't reach control/results/final/ or any weather/<dir>/2012.csv,
-    gl_gym's copy in the venv included.
+def test_guard_runs_blocks_reads_of_the_test_weather(payload, mode):
+    """Read, Grep and Glob can't reach any weather/<dir>/2012.csv, gl_gym's copy in the venv
+    included. control/results/final/'s reads are tested on fake checkouts (#40, below).
     """
     _assert_blocked(_hook("guard_runs.py", payload, mode))
 
@@ -992,3 +1005,549 @@ def test_ci_pins_the_uv_version():
     assert len(setup) == 1, setup
     version = (setup[0].get("with") or {}).get("version")
     assert isinstance(version, str) and re.fullmatch(r"\d+\.\d+\.\d+", version), version
+
+
+# ---------------------------------------------------------------------------------------------
+# guard_tests.py and protect_secrets.py (#29): case doesn't change what a file is
+# ---------------------------------------------------------------------------------------------
+
+# Test files spelt in capitals. The Mac's filesystem ignores case, so control/TESTS/golden/x.json is
+# the golden number control/tests/golden/x.json. Both hooks casefold before matching, on every
+# platform, so Linux CI judges these paths as the Mac does. Paths only: nothing is created.
+TEST_FILES_IN_CAPITALS = [
+    "control/TESTS/golden/x.json",
+    "control/Tests/probes/x.py",
+    "control/greenleaf_control/TEST_X.PY",
+    "control/CONFTEST.PY",
+]
+
+
+@pytest.mark.parametrize("rel", TEST_FILES_IN_CAPITALS)
+def test_guard_tests_blocks_the_builder_from_tests_in_capitals(rel):
+    """A golden number, probe or test reached through capitals is still a test file: the builder
+    is blocked, as it is from control/tests/golden/x.json.
+    """
+    payload = _file_call("Edit", ROOT / rel)
+    _assert_blocked(_hook("guard_tests.py", payload, "no-tests"), "Blocked: the builder")
+
+
+@pytest.mark.parametrize("rel", TEST_FILES_IN_CAPITALS)
+def test_guard_tests_lets_the_test_writer_edit_tests_in_capitals(rel):
+    """The same casefolded rule lets the test-writer edit them."""
+    _assert_allowed(_hook("guard_tests.py", _file_call("Edit", ROOT / rel), "only-tests"))
+
+
+def test_guard_tests_still_judges_app_code_in_capitals_as_app_code():
+    """Casefolding makes nothing a test that wasn't one: GREENLEAF_CONTROL/ENVS.PY is envs.py, so
+    the builder may edit it and the test-writer is blocked.
+    """
+    payload = _file_call("Edit", CONTROL / "GREENLEAF_CONTROL/ENVS.PY")
+    _assert_allowed(_hook("guard_tests.py", payload, "no-tests"))
+    _assert_blocked(_hook("guard_tests.py", payload, "only-tests"), "Blocked: the test-writer")
+
+
+# Secret files spelt in capitals: on the Mac each name opens the real file. Paths only: nothing
+# named like this is ever created, since inside the repo it would alias the real .env.
+SECRET_FILES_IN_CAPITALS = [
+    pytest.param(ROOT / ".ENV", id=".ENV"),
+    pytest.param(ROOT / "app/.Env", id="app/.Env"),
+    pytest.param(ROOT / ".ENV.LOCAL", id=".ENV.LOCAL"),
+    pytest.param(Path.home() / ".MODAL.TOML", id="~/.MODAL.TOML"),
+]
+
+
+@pytest.mark.parametrize("tool", ["Read", "Edit", "Write"])
+@pytest.mark.parametrize("path", SECRET_FILES_IN_CAPITALS)
+def test_protect_secrets_blocks_a_secret_file_in_capitals(path, tool):
+    """A Read of .ENV on the Mac prints the real .env: the name is casefolded before it is judged."""
+    _assert_blocked(_hook("protect_secrets.py", _file_call(tool, path)))
+
+
+@pytest.mark.parametrize("rel", [".ENV.EXAMPLE", "CONFIG.ENV", "control/GREENLEAF_CONTROL/ENVS.PY"])
+def test_protect_secrets_lets_non_secret_files_in_capitals_through(rel):
+    """Casefolded, these are .env.example, config.env and envs.py: not secrets."""
+    _assert_allowed(_hook("protect_secrets.py", _file_call("Read", ROOT / rel)))
+
+
+@pytest.mark.parametrize(
+    "tool_input",
+    [
+        pytest.param({"path": str(ROOT / ".ENV")}, id="path .ENV"),
+        pytest.param({"glob": ".ENV"}, id="glob .ENV"),
+        pytest.param({"glob": "*.ENV"}, id="glob *.ENV"),
+        pytest.param({"glob": "**/.Env*"}, id="glob **/.Env*"),
+        pytest.param({"glob": ".MODAL.TOML"}, id="glob .MODAL.TOML"),
+    ],
+)
+def test_protect_secrets_blocks_a_grep_of_a_secret_file_in_capitals(tool_input):
+    """A Grep whose path names .ENV opens the real .env on the Mac: blocked. Its glob's last part is
+    casefolded too, one rule for every field. ripgrep matches globs case-sensitively, so a glob in
+    capitals may select nothing: an accepted false positive.
+    """
+    _assert_blocked(_hook("protect_secrets.py", _grep(**tool_input)))
+
+
+@pytest.mark.parametrize("command", ["cat .ENV", "source app/.Env.Local", "cat ~/.MODAL.TOML"])
+def test_protect_secrets_blocks_a_shell_command_on_a_secret_file_in_capitals(command):
+    """The orchestrator's call for #29: a Bash command is casefolded too, so `cat .ENV` is blocked
+    like `cat .env`.
+    """
+    _assert_blocked(_hook("protect_secrets.py", _bash(command, ROOT)))
+
+
+@pytest.mark.parametrize("command", ["cat .ENV.EXAMPLE", 'python -c "LOAD_DOTENV()"'])
+def test_protect_secrets_lets_other_shell_commands_in_capitals_through(command):
+    _assert_allowed(_hook("protect_secrets.py", _bash(command, ROOT)))
+
+
+# ---------------------------------------------------------------------------------------------
+# protect_secrets.py (#29): a symlink is judged by its target and by its own name
+# ---------------------------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("secret", [".env", ".env.local", ".modal.toml"])
+@pytest.mark.parametrize("tool", ["Read", "Edit", "NotebookEdit", "Grep"])
+def test_protect_secrets_judges_a_symlink_by_its_target(tmp_path, tool, secret):
+    """notes.txt linked to a .env (or a .modal.toml) is that file, so reading or searching it
+    through the link prints the keys. The path is resolved before it is judged: blocked. The
+    secret is a dummy in tmp_path.
+    """
+    (tmp_path / secret).write_text("FAKE=1\n")
+    link = tmp_path / "notes.txt"
+    link.symlink_to(tmp_path / secret)
+    if tool == "Grep":
+        payload = _call("Grep", ROOT, pattern="FAKE", path=str(link))
+    else:
+        payload = _file_call(tool, link)
+    _assert_blocked(_hook("protect_secrets.py", payload))
+
+
+def test_protect_secrets_judges_a_symlink_by_its_own_name_too(tmp_path):
+    """A link to a normal file passes, so the block above comes from the target, not from being a
+    link; a link named .env is still blocked by its own name, wherever it points.
+    """
+    (tmp_path / "readme.md").write_text("x\n")
+    (tmp_path / "notes.txt").symlink_to(tmp_path / "readme.md")
+    (tmp_path / ".env").symlink_to(tmp_path / "readme.md")
+    _assert_allowed(_hook("protect_secrets.py", _file_call("Read", tmp_path / "notes.txt")))
+    _assert_blocked(_hook("protect_secrets.py", _file_call("Read", tmp_path / ".env")))
+
+
+# ---------------------------------------------------------------------------------------------
+# protect_secrets.py (#29): a Grep of the home folder, and the brace cap's message
+# ---------------------------------------------------------------------------------------------
+
+# A Grep whose path is the home folder or a folder above it, with no type and no glob that selects
+# anything (a !-glob only excludes). If Claude Code's Grep passes --hidden (unverified, so treated
+# as possible), ripgrep would read ~/.modal.toml: home has no .gitignore to skip it. Each path is
+# resolved against the project (CLAUDE_PROJECT_DIR, the repo root in _hook) and casefolded.
+GREP_OF_HOME = [
+    pytest.param({"path": str(Path.home())}, id="home"),
+    pytest.param({"path": "~"}, id="~"),
+    pytest.param({"path": "~/"}, id="~/"),
+    pytest.param({"path": "/"}, id="/"),
+    pytest.param({"path": str(Path.home().parent)}, id="home's parent"),
+    pytest.param({"path": str(Path.home()).upper()}, id="home in capitals"),
+    pytest.param({"path": os.path.relpath(Path.home(), ROOT)}, id="home relative to the project"),
+    pytest.param({"path": str(Path.home()), "glob": "!*.py"}, id="home, a negation-only glob"),
+]
+
+# The same searches narrowed to a type or a positive glob, or a path that isn't home or above it.
+GREP_NOT_OF_HOME = [
+    pytest.param({"path": str(Path.home()), "glob": "*.py"}, id="home, *.py"),
+    pytest.param({"path": str(Path.home()), "type": "py"}, id="home, type py"),
+    pytest.param({"path": "/", "glob": "!*.md *.py"}, id="/, a negation and *.py"),
+    pytest.param({"path": str(ROOT)}, id="the project"),
+    pytest.param({"path": str(Path.home() / "Desktop")}, id="a folder inside home"),
+    pytest.param({"path": str(Path.home())[:-1]}, id="a sibling named like home, one letter short"),
+]
+
+
+@pytest.mark.parametrize("tool_input", GREP_OF_HOME)
+def test_protect_secrets_blocks_an_unfiltered_grep_of_home(tool_input):
+    """A Grep of home, or of a folder above it, that no type or positive glob narrows could reach
+    ~/.modal.toml: blocked. The hook judges the path; it never opens anything there.
+    """
+    _assert_blocked(_hook("protect_secrets.py", _grep(**tool_input)))
+
+
+@pytest.mark.parametrize("tool_input", GREP_NOT_OF_HOME)
+def test_protect_secrets_lets_a_narrowed_grep_or_one_below_home_through(tool_input):
+    """A type or a positive glob that selects no secret file narrows a Grep of home; a path inside
+    home, or a sibling whose name is a prefix of home's, isn't home or above it. All pass.
+    """
+    _assert_allowed(_hook("protect_secrets.py", _grep(**tool_input)))
+
+
+def test_protect_secrets_says_the_brace_cap_block_is_deliberate():
+    """A glob over the brace cap blocks by design, so its one "Blocked" line says so plainly
+    rather than "protect_secrets crashed", which reads as a bug to report.
+    """
+    proc = _hook("protect_secrets.py", _grep(glob="{,}" * 30 + "x.py"))
+    _assert_blocked(proc)
+    assert "crashed" not in proc.stderr, proc.stderr
+
+
+# ---------------------------------------------------------------------------------------------
+# stop_tests.py (#29): a stop it can't test blocks; its worst case fits its timeout
+# ---------------------------------------------------------------------------------------------
+
+
+def test_stop_tests_blocks_when_control_changed_and_the_venv_is_missing(tmp_path):
+    """control/ changed but control/.venv is gone, so the fast tests can't run: the stop is
+    blocked (exit 2) with the hook's own stop_tests message telling Claude to run `uv sync`, then
+    the fast tests ("not slow"), where it used to pass quietly; not its crash handler's. uv never
+    runs. The hook knows control/ changed, so it doesn't say it can't tell. The stop that follows,
+    stop_hook_active, passes, so the hook can't loop.
+    """
+    repo, env = _stop_repo(tmp_path)
+    (repo / "control/.venv").rmdir()
+    (repo / "control/greenleaf_control/a.py").write_text("A = 2\n")
+    proc = _stop(repo, env)
+    assert proc.returncode == 2 and proc.stderr.startswith("stop_tests"), (
+        proc.returncode,
+        proc.stderr,
+    )
+    assert "uv sync" in proc.stderr and "not slow" in proc.stderr, proc.stderr
+    assert "FAKE-UV-RAN" not in proc.stderr and "crashed" not in proc.stderr, proc.stderr
+    assert "can't tell whether control/ changed" not in proc.stderr, proc.stderr
+    again = _stop(repo, env, stop_hook_active=True)
+    assert again.returncode == 0, (again.returncode, again.stderr)
+
+
+def test_stop_tests_skips_a_missing_venv_when_nothing_changed(tmp_path):
+    """No .venv and no change under control/: nothing to test, so the stop passes (exit 0)."""
+    repo, env = _stop_repo(tmp_path)
+    (repo / "control/.venv").rmdir()
+    proc = _stop(repo, env)
+    assert proc.returncode == 0, (proc.returncode, proc.stderr)
+
+
+def test_stop_tests_blocks_when_control_changed_and_uv_is_missing(tmp_path):
+    """The orchestrator's call for #29: the "no uv at all" skip is dropped. With control/ changed
+    and no uv in ~/.local/bin or on PATH, the stop is blocked (exit 2) with the hook's own
+    stop_tests message naming uv, not its crash handler's. PATH holds only git, so the real uv (the
+    Mac's, or CI's setup-uv) can't be found. The stop that follows, stop_hook_active, passes.
+    """
+    repo, env = _stop_repo(tmp_path)
+    (tmp_path / "home/.local/bin/uv").unlink()
+    bin_dir = tmp_path / "git-only-bin"
+    bin_dir.mkdir()
+    (bin_dir / "git").symlink_to(shutil.which("git"))
+    env = {**env, "PATH": str(bin_dir)}
+    (repo / "control/greenleaf_control/a.py").write_text("A = 2\n")
+    # The git on this PATH sees the change, so the block below is about uv, not a failing git.
+    status = subprocess.run(
+        ["git", "-C", str(repo), "status", "--porcelain"],
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=20,
+    )
+    assert "a.py" in status.stdout, (status.returncode, status.stderr)
+    proc = _stop(repo, env)
+    assert proc.returncode == 2 and proc.stderr.startswith("stop_tests"), (
+        proc.returncode,
+        proc.stderr,
+    )
+    # A whole word: tmp_path's folder (test_..._uv_is_missing0) doesn't count.
+    assert re.search(r"\buv\b", proc.stderr) and "crashed" not in proc.stderr, proc.stderr
+    again = _stop(repo, env, stop_hook_active=True)
+    assert again.returncode == 0, (again.returncode, again.stderr)
+
+
+def test_stop_tests_blocks_when_uv_cant_run(tmp_path):
+    """A uv that exists but can't start (its #! interpreter is missing, so the exec raises OSError)
+    blocks the stop (exit 2) with the hook's own stop_tests message naming uv, not its crash
+    handler's, where it used to pass as if the tests had. The stop that follows, stop_hook_active,
+    passes.
+    """
+    repo, env = _stop_repo(tmp_path)
+    uv = tmp_path / "home/.local/bin/uv"
+    uv.write_text("#!/nonexistent/interpreter\n")
+    uv.chmod(0o755)
+    (repo / "control/greenleaf_control/a.py").write_text("A = 2\n")
+    proc = _stop(repo, env)
+    assert proc.returncode == 2 and proc.stderr.startswith("stop_tests"), (
+        proc.returncode,
+        proc.stderr,
+    )
+    # A whole word: tmp_path's folder (test_..._when_uv_cant_run0) doesn't count.
+    assert re.search(r"\buv\b", proc.stderr) and "crashed" not in proc.stderr, proc.stderr
+    again = _stop(repo, env, stop_hook_active=True)
+    assert again.returncode == 0, (again.returncode, again.stderr)
+
+
+def _stop_hook_timeout() -> int:
+    """The timeout .claude/settings.json gives the Stop hook that runs stop_tests.py, in seconds."""
+    settings = json.loads((ROOT / ".claude/settings.json").read_text())
+    hooks = [
+        hook
+        for entry in settings["hooks"]["Stop"]
+        for hook in entry["hooks"]
+        if "stop_tests.py" in hook.get("command", "")
+    ]
+    assert len(hooks) == 1, hooks
+    return hooks[0]["timeout"]
+
+
+def test_stop_tests_worst_case_fits_its_settings_timeout():
+    """Claude Code kills a Stop hook at its settings timeout and lets the stop through, so the
+    hook's slowest path must end first: both git calls time out (GIT_TIMEOUT each), then the fast
+    suite does (PYTEST_TIMEOUT), plus 20 s for python and the hook's own work. #29's decision: git
+    20 s, pytest 280 s, settings 360 s, so 2 * 20 + 280 + 20 = 340 s <= 360 s. Before it the steps
+    alone took 20 + 20 + 280 = 320 s against 300 s.
+
+    stop_tests.py runs at import, so it is parsed, not imported. Every timeout= in it must be one
+    of the two module-level constants, so the sum covers everything the hook waits on.
+    """
+    tree = ast.parse((HOOKS / "stop_tests.py").read_text())
+    constants = {
+        target.id: node.value
+        for node in tree.body
+        if isinstance(node, ast.Assign)
+        for target in node.targets
+        if isinstance(target, ast.Name)
+    }
+    assert {"GIT_TIMEOUT", "PYTEST_TIMEOUT"} <= constants.keys(), (
+        "stop_tests.py needs module-level GIT_TIMEOUT and PYTEST_TIMEOUT",
+        sorted(constants),
+    )
+    git_timeout = ast.literal_eval(constants["GIT_TIMEOUT"])
+    pytest_timeout = ast.literal_eval(constants["PYTEST_TIMEOUT"])
+    calls = [node for node in ast.walk(tree) if isinstance(node, ast.Call)]
+    git_calls = [c for c in calls if isinstance(c.func, ast.Name) and c.func.id == "git"]
+    assert len(git_calls) == 2, [ast.unparse(c) for c in git_calls]
+    timeouts = sorted(ast.unparse(k.value) for c in calls for k in c.keywords if k.arg == "timeout")
+    assert timeouts == ["GIT_TIMEOUT", "PYTEST_TIMEOUT"], timeouts
+    worst_case = len(git_calls) * git_timeout + pytest_timeout + 20
+    assert worst_case <= _stop_hook_timeout(), (worst_case, _stop_hook_timeout())
+
+
+# ---------------------------------------------------------------------------------------------
+# guard_runs.py (#40): control/results/final/ opens once the ledger beside it has a final-result
+# ---------------------------------------------------------------------------------------------
+
+LEDGER = "control/ledger/ledger.jsonl"
+
+
+def _row(kind: str, **fields) -> str:
+    """One ledger line of kind, with the base fields the ledger CLI stamps on every row."""
+    return json.dumps(
+        {
+            "schema_version": 1,
+            "row_id": f"{kind}-0000abcd",
+            "kind": kind,
+            "at": "2026-11-01T00:00:00+00:00",
+            "issue": 40,
+            "fingerprints": {},
+            **fields,
+        }
+    )
+
+
+# A ledger up to an approved final that hasn't run yet, then the same ledger with the final's row.
+UNSPENT = [
+    _row("registered", hypothesis="h"),
+    _row("result", registered="registered-0000abcd"),
+    _row("final-registered", approved_by="Aarmen"),
+]
+FINAL_RESULT = _row(
+    "final-result", **{"final-registered": "final-registered-0000abcd", "per_split": {}}
+)
+SPENT = [*UNSPENT, FINAL_RESULT]
+
+# Ledgers that keep the seal: no final-result row, or a line that isn't a JSON object anywhere in
+# the file (fail closed), or bytes that aren't text.
+SEALED_LEDGERS = [
+    pytest.param(None, id="no ledger"),
+    pytest.param([], id="an empty ledger"),
+    pytest.param(UNSPENT, id="registered, result and final-registered rows only"),
+    pytest.param([*SPENT, "not json"], id="a final-result row, then a line that isn't JSON"),
+    pytest.param(["not json", *SPENT], id="a line that isn't JSON, then a final-result row"),
+    pytest.param(
+        [*UNSPENT, json.dumps({"kind": "result", "note": "final-result"})],
+        id="final-result as a value, not the kind",
+    ),
+    pytest.param([*UNSPENT, json.dumps("final-result")], id="a JSON string, not an object"),
+    pytest.param(
+        [*UNSPENT, json.dumps([json.loads(FINAL_RESULT)])], id="a final-result row inside a list"
+    ),
+    pytest.param(
+        "".join(f"{line}\n" for line in SPENT).encode() + b"\xff\n",
+        id="a final-result row, then bytes that aren't UTF-8",
+    ),
+]
+
+# How Read, Grep and Glob name a checkout's sealed results: by absolute path ({checkout} is filled
+# in), relative to the call's cwd (the checkout), and in mixed case past the checkout. Only
+# Control/Results/Final changes case, never the tmp_path part: Linux CI's filesystem is
+# case-sensitive, so a re-cased tmp_path would be another folder there.
+FINAL_READS_ABSOLUTE = [
+    pytest.param("Read", {"file_path": "{checkout}/control/results/final/x.json"}, id="Read"),
+    pytest.param("Grep", {"pattern": "iqm", "path": "{checkout}/control/results/final"}, id="Grep"),
+    pytest.param(
+        "Glob", {"pattern": "*.json", "path": "{checkout}/control/results/final"}, id="Glob"
+    ),
+]
+FINAL_READS = [
+    *FINAL_READS_ABSOLUTE,
+    pytest.param("Read", {"file_path": "control/results/final/x.json"}, id="Read relative"),
+    pytest.param("Grep", {"pattern": "iqm", "path": "control/results/final"}, id="Grep relative"),
+    pytest.param("Glob", {"pattern": "control/results/final/*.json"}, id="Glob relative, no path"),
+    pytest.param(
+        "Read", {"file_path": "{checkout}/Control/Results/Final/x.json"}, id="Read mixed case"
+    ),
+    pytest.param(
+        "Grep", {"pattern": "iqm", "path": "{checkout}/Control/Results/Final"}, id="Grep mixed case"
+    ),
+    pytest.param(
+        "Glob",
+        {"pattern": "*.json", "path": "{checkout}/Control/Results/Final"},
+        id="Glob mixed case",
+    ),
+]
+
+# Read, Grep and Glob of the checkout's 2012 weather, which no ledger row opens.
+WEATHER_READS = [
+    pytest.param(
+        "Read", {"file_path": "{checkout}/control/data/weather/Amsterdam/2012.csv"}, id="Read"
+    ),
+    pytest.param(
+        "Grep",
+        {"pattern": "x", "path": "{checkout}/control/data/weather/Amsterdam/2012.csv"},
+        id="Grep",
+    ),
+    pytest.param(
+        "Glob", {"pattern": "*/2012.csv", "path": "{checkout}/control/data/weather"}, id="Glob"
+    ),
+]
+
+
+def _checkout(root: Path, ledger: list[str] | bytes | None) -> Path:
+    """A fake checkout at root, inside tmp_path: control/results/final/x.json and
+    control/data/weather/Amsterdam/2012.csv (dummies), and, unless ledger is None, LEDGER holding
+    ledger's lines, or its bytes as they are. Never this repo, so the real seal decides nothing.
+
+    Callers name root with capitals (Repo, A): a hook that opened the case-folded ledger path would
+    miss it on Linux CI, where case matters, and keep the seal it should open.
+    """
+    for rel in ("control/results/final/x.json", "control/data/weather/Amsterdam/2012.csv"):
+        (root / rel).parent.mkdir(parents=True)
+        (root / rel).write_text("x\n")
+    if ledger is not None:
+        if not isinstance(ledger, bytes):
+            ledger = "".join(f"{line}\n" for line in ledger).encode()
+        (root / LEDGER).parent.mkdir(parents=True)
+        (root / LEDGER).write_bytes(ledger)
+    return root
+
+
+def _in_checkout(tool: str, tool_input: dict, checkout: Path, cwd: Path | None = None) -> dict:
+    """tool's call with {checkout} filled in, from cwd (the checkout itself by default)."""
+    filled = {key: value.format(checkout=checkout) for key, value in tool_input.items()}
+    return _call(tool, cwd or checkout, **filled)
+
+
+def _assert_blocked_not_crashed(proc: subprocess.CompletedProcess) -> None:
+    """Blocked by a rule. A crash blocks too, since the hook fails closed, so exit 2 alone can't
+    tell a seal kept on purpose from a ledger check that raised.
+    """
+    _assert_blocked(proc)
+    assert "crashed" not in proc.stderr, proc.stderr
+
+
+@pytest.mark.parametrize("mode", MODES)
+@pytest.mark.parametrize(("tool", "tool_input"), FINAL_READS_ABSOLUTE)
+@pytest.mark.parametrize("ledger", SEALED_LEDGERS)
+def test_guard_runs_keeps_results_final_sealed_without_a_final_result_row(
+    tmp_path, ledger, tool, tool_input, mode
+):
+    """Read, Grep and Glob of control/results/final/ stay blocked, by the hook's rule and not its
+    crash handler, while the ledger beside it has no final-result row, or has one plus any line
+    that isn't a JSON object (fail closed): no ledger, an empty one, registered, result and
+    final-registered rows only, a line that isn't JSON before or after the row, "final-result" as
+    a value rather than the kind, a JSON string or list where an object should be, and bytes that
+    aren't UTF-8.
+    """
+    checkout = _checkout(tmp_path / "Repo", ledger)
+    _assert_blocked_not_crashed(
+        _hook("guard_runs.py", _in_checkout(tool, tool_input, checkout), mode)
+    )
+
+
+@pytest.mark.parametrize("mode", MODES)
+@pytest.mark.parametrize(("tool", "tool_input"), FINAL_READS_ABSOLUTE)
+def test_guard_runs_keeps_results_final_sealed_when_the_ledger_cant_be_opened(
+    tmp_path, tool, tool_input, mode
+):
+    """A ledger.jsonl that is a folder raises an OSError when opened: still sealed, by the hook's
+    rule and not its crash handler.
+    """
+    checkout = _checkout(tmp_path / "Repo", None)
+    (checkout / LEDGER).mkdir(parents=True)
+    _assert_blocked_not_crashed(
+        _hook("guard_runs.py", _in_checkout(tool, tool_input, checkout), mode)
+    )
+
+
+@pytest.mark.parametrize("mode", MODES)
+@pytest.mark.parametrize(("tool", "tool_input"), FINAL_READS)
+def test_guard_runs_opens_results_final_once_the_seal_is_spent(tmp_path, tool, tool_input, mode):
+    """The same Read, Grep or Glob of control/results/final/ is blocked while the checkout's
+    ledger holds registered, result and final-registered rows, and passes in every mode once a
+    final-result row is appended: by absolute path, relative to the cwd (the checkout), and with
+    Control/Results/Final in mixed case. The block first shows the pass comes from the row, not
+    from the hook missing the path.
+    """
+    checkout = _checkout(tmp_path / "Repo", UNSPENT)
+    payload = _in_checkout(tool, tool_input, checkout)
+    _assert_blocked_not_crashed(_hook("guard_runs.py", payload, mode))
+    with (checkout / LEDGER).open("a") as ledger:
+        ledger.write(FINAL_RESULT + "\n")
+    _assert_allowed(_hook("guard_runs.py", payload, mode))
+
+
+@pytest.mark.parametrize("mode", MODES)
+@pytest.mark.parametrize(("tool", "tool_input"), FINAL_READS_ABSOLUTE)
+def test_guard_runs_asks_the_ledger_beside_the_results(tmp_path, tool, tool_input, mode):
+    """Checkout A's seal is spent. Checkout B sits inside it, as .worktrees/<n> sits inside the
+    main checkout, and has no ledger. B's results/final stays blocked with the cwd in A, and A's
+    opens with the cwd in B: the ledger beside the results decides, not the cwd's, not this repo's,
+    and not the nearest one found by climbing above B.
+    """
+    spent = _checkout(tmp_path / "A", SPENT)
+    sealed = _checkout(spent / ".worktrees/9", None)
+    _assert_blocked_not_crashed(
+        _hook("guard_runs.py", _in_checkout(tool, tool_input, sealed, cwd=spent), mode)
+    )
+    _assert_allowed(_hook("guard_runs.py", _in_checkout(tool, tool_input, spent, cwd=sealed), mode))
+
+
+@pytest.mark.parametrize("mode", MODES)
+@pytest.mark.parametrize("tool", [*WRITE_TOOLS, "Bash"])
+def test_guard_runs_keeps_results_final_unwritable_after_the_seal_is_spent(tmp_path, tool, mode):
+    """A spent seal opens reads only: Write, Edit, MultiEdit and NotebookEdit of
+    control/results/final/x.json, and `echo x > control/results/final/x.json` from the checkout,
+    stay blocked.
+    """
+    checkout = _checkout(tmp_path / "Repo", SPENT)
+    if tool == "Bash":
+        payload = _bash("echo x > control/results/final/x.json", checkout)
+    else:
+        payload = _file_call(tool, checkout / "control/results/final/x.json", checkout)
+    _assert_blocked_not_crashed(_hook("guard_runs.py", payload, mode))
+
+
+@pytest.mark.parametrize("mode", MODES)
+@pytest.mark.parametrize(("tool", "tool_input"), WEATHER_READS)
+def test_guard_runs_keeps_the_2012_weather_sealed_after_the_seal_is_spent(
+    tmp_path, tool, tool_input, mode
+):
+    """A final-result row opens control/results/final/ only: Read, Grep and Glob of the same
+    checkout's control/data/weather/Amsterdam/2012.csv stay blocked.
+    """
+    checkout = _checkout(tmp_path / "Repo", SPENT)
+    _assert_blocked_not_crashed(
+        _hook("guard_runs.py", _in_checkout(tool, tool_input, checkout), mode)
+    )

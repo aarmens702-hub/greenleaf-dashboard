@@ -5,9 +5,11 @@ block the stop (exit 2) and hand Claude the failures, so "done" always means
 
 It tests the tree the session is working in (stdin's cwd, resolved to its
 git top level), so parallel worktrees don't block each other. Skips quietly
-when nothing relevant changed, when uv or control/.venv is missing, or when
-this stop was itself caused by this hook (stop_hook_active, read before any
-git call), so it can't loop.
+when nothing relevant changed, or when this stop was itself caused by this
+hook (stop_hook_active, read before any git call), so it can't loop. When
+control/ changed but uv is missing or can't run, or control/.venv is
+missing, it blocks and asks Claude to run `uv sync` and the fast tests
+itself.
 
 When the tests pass but a scorer file changed (SCORER_FILES: what decides a
 result's number), it blocks once more: results recorded before the change
@@ -21,6 +23,11 @@ outside any repo falls back to CLAUDE_PROJECT_DIR (or the hook's cwd), and
 the git status there still fails closed. In theory unreadable stdin blocks
 every stop, since it can't show stop_hook_active; Claude Code always sends
 an object, and Esc interrupts. Standard library only. Ported from crivo.
+
+Its slowest path, both git calls (GIT_TIMEOUT each) and the suite
+(PYTEST_TIMEOUT) timing out, plus ~20 s of its own, must end inside the Stop
+hook's timeout in .claude/settings.json (360 s): Claude Code kills a hook at
+that timeout and lets the stop through.
 """
 
 import json
@@ -37,12 +44,17 @@ SCORER_FILES = (
     "docs/PROTOCOL.md",
 )
 
-# The end of every message for a stop the hook can't judge.
-RUN_THEM_YOURSELF = (
-    "so it can't tell whether control/ changed. Before finishing, run "
+# Seconds the hook waits on each git call, and on the fast suite.
+GIT_TIMEOUT = 20
+PYTEST_TIMEOUT = 280
+
+# What Claude does before finishing when the hook can't run the fast tests itself.
+RUN_THEM = (
     "`uv run pytest -q -m 'not slow'` in your worktree's control/, tell the user the result, "
     f"and say whether a scorer file ({', '.join(SCORER_FILES)}) changed."
 )
+# The end of every message for a stop the hook can't judge.
+RUN_THEM_YOURSELF = "so it can't tell whether control/ changed. Before finishing, run " + RUN_THEM
 
 
 def git(*args, cwd):
@@ -50,7 +62,7 @@ def git(*args, cwd):
         ["git", "-C", cwd, *args],
         capture_output=True,
         text=True,
-        timeout=20,
+        timeout=GIT_TIMEOUT,
         check=False,
     )
 
@@ -100,8 +112,17 @@ def main():
     uv = os.path.expanduser("~/.local/bin/uv")
     if not os.access(uv, os.X_OK):
         uv = shutil.which("uv")
-    if not uv or not os.path.isdir(os.path.join(project, ".venv")):
-        return None
+    if not uv:
+        return (
+            "stop_tests: control/ changed, but there's no uv in ~/.local/bin or on PATH to run "
+            "its fast tests. Install uv and run `uv sync` in control/, then before finishing run "
+            + RUN_THEM
+        )
+    if not os.path.isdir(os.path.join(project, ".venv")):
+        return (
+            "stop_tests: control/ changed, but control/.venv is missing, so its fast tests can't "
+            "run. Run `uv sync` in control/, then before finishing run " + RUN_THEM
+        )
 
     try:
         run = subprocess.run(
@@ -120,16 +141,20 @@ def main():
             cwd=project,
             capture_output=True,
             text=True,
-            timeout=280,
+            timeout=PYTEST_TIMEOUT,
             check=False,
         )
     except subprocess.TimeoutExpired:
         return (
-            "The fast test suite did not finish in 280 s. Run `uv run pytest -q -m 'not slow'` "
-            "in control/ yourself and tell the user the result before finishing."
+            f"The fast test suite did not finish in {PYTEST_TIMEOUT} s. Run "
+            "`uv run pytest -q -m 'not slow'` in control/ yourself and tell the user the result "
+            "before finishing."
         )
-    except OSError:
-        return None
+    except OSError as exc:
+        return (
+            f"stop_tests: uv at {uv} couldn't run ({type(exc).__name__}: {exc}). Fix uv, then "
+            "before finishing run " + RUN_THEM
+        )
 
     # pytest exit 5 = no tests collected (an empty project): not a failure.
     if run.returncode in (0, 5):

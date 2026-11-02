@@ -9,6 +9,9 @@ cost into a multiplier. lam, I and e_prev all start at 0.0, and each update does
 VecLagrangianReward turns each reward into (r - sum(lam_i * c_i)) / (1 + sum(lam_i)) and keeps the
 per-step mean cost since the last pop. LagrangianCallback updates the PIDs from those means at each
 rollout end, sets the wrapper's lambdas, records lag/* and appends a row to lambdas.csv.
+Issue #38: a FixedMultiplier(value=1.0) stands in for a PID on a zero-budget constraint; its lam
+and every update() are its value. At training start the callback sets the wrapper's lambdas to
+the multipliers' lam, so a fixed one prices its constraint from the first step.
 
 The env under the wrapper is a scripted toy (no gl_gym): every step reports fixed costs under
 cost_co2, cost_temp and cost_rh, so every mean, lambda and reward below is computed by hand.
@@ -247,6 +250,50 @@ def test_cost_held_at_zero_makes_lambda_decay_to_zero(gains, lam_start, lam_afte
     assert pid.I == 0.0
 
 
+# FixedMultiplier (issue #38: a zero-budget constraint keeps a multiplier of 1 in residual_lag)
+
+
+@pytest.mark.parametrize(
+    ("args", "value"),
+    [((), 1.0), ((2.5,), 2.5)],
+    ids=["default_1", "value_2.5"],
+)
+def test_fixed_multiplier_signature_default_and_lam(args, value):
+    import greenleaf_control.lagrangian as lagrangian
+
+    params = inspect.signature(lagrangian.FixedMultiplier.__init__).parameters
+    assert {name: p.default for name, p in params.items() if name != "self"} == {"value": 1.0}
+    # lam is the value from construction, before any update (a PIDLagrangian's starts at 0.0)
+    assert lagrangian.FixedMultiplier(*args).lam == value
+
+
+@pytest.mark.parametrize("cost", [0.0, 1e-8, 0.5, 1e6])
+def test_fixed_multiplier_update_returns_its_value_for_any_cost(cost):
+    """Known answer: update returns the float value, 1.0 by default, whatever the cost. A
+    PIDLagrangian(0.0) with the default gains gives 0.0 at cost 0 (e = 0), 0.65 at 1e-8
+    (e = 1e-8 / 1e-8 = 1: 0.05 + 0.5 + 0.1) and the cap, 100, at 0.5 and 1e6."""
+    import greenleaf_control.lagrangian as lagrangian
+
+    fixed = lagrangian.FixedMultiplier()
+    lam = fixed.update(cost)
+    assert isinstance(lam, float)
+    assert lam == 1.0
+    assert fixed.lam == 1.0
+
+
+def test_fixed_multiplier_never_moves_over_a_sequence_of_costs():
+    """1,000 updates at cost 1e6 (a PID's lambda would sit on its cap), then 1,000 at 0 (a PID's
+    would unwind): every update returns the value, 1.0 by default or 2.5 when given, and lam stays
+    there."""
+    import greenleaf_control.lagrangian as lagrangian
+
+    costs = [1e6] * 1000 + [0.0] * 1000
+    for value in (1.0, 2.5):
+        fixed = lagrangian.FixedMultiplier(value)
+        assert [fixed.update(c) for c in costs] == [value] * 2000
+        assert fixed.lam == value
+
+
 # VecLagrangianReward
 
 
@@ -448,6 +495,106 @@ def test_callback_updates_lambdas_logs_and_appends_a_csv_row_at_each_rollout_end
         [3.0, 0.0, 1.0, 0.5, 0.125, 0.25],
         [5.0, 1.0, 0.0, 0.75, 0.25, 0.125],
     ]
+
+
+def test_callback_with_a_fixed_multiplier_logs_its_constant_beside_the_pids(tmp_path):
+    """Issue #38: LagrangianCallback takes a FixedMultiplier wherever it takes a PIDLagrangian.
+
+    Known answer: pids [FixedMultiplier(), PID(0.125) x 2], the PIDs proportional only, so
+    lam = e = (mean - 0.125) / 0.125, and co2's lam is 1.0 whatever its cost:
+      rollout 1, means (0.5, 0.125, 0.25): lam = (1, 0 / 0.125, 0.125 / 0.125) = (1, 0, 1)
+      rollout 2, means (0.75, 0.25, 0.125): lam = (1, 0.125 / 0.125, 0 / 0.125) = (1, 1, 0)
+    (a PID on co2 with this budget would give 3 then 5, as in the test above).
+    """
+    import greenleaf_control.lagrangian as lagrangian
+
+    w = lagrangian.VecLagrangianReward(_venv(MIX_A, MIX_B))
+    pids = [
+        lagrangian.FixedMultiplier(),
+        *(lagrangian.PIDLagrangian(0.125, kp=1.0, ki=0.0, kd=0.0) for _ in range(2)),
+    ]
+    log = tmp_path / "lambdas.csv"
+    cb = lagrangian.LagrangianCallback(w, pids, log)
+    model = _ppo(w)
+    cb.init_callback(model)
+    w.reset()
+    w.step(ACTIONS)
+    w.step(ACTIONS)
+    cb.on_rollout_end()
+    assert w.lambdas.tolist() == [1.0, 0.0, 1.0]
+    assert _lag_logged(model) == {
+        "lag/lambda_co2": 1.0,
+        "lag/lambda_temp": 0.0,
+        "lag/lambda_rh": 1.0,
+        "lag/cost_co2": 0.5,
+        "lag/cost_temp": 0.125,
+        "lag/cost_rh": 0.25,
+    }
+    w.step(ACTIONS)  # both toys restarted: (1.0, 0, 0.25) and (0.5, 0.5, 0)
+    cb.on_rollout_end()
+    assert w.lambdas.tolist() == [1.0, 1.0, 0.0]
+    rows = list(csv.reader(log.read_text().splitlines()))
+    assert rows[0] == HEADER
+    assert [[float(v) for v in row[1:]] for row in rows[1:]] == [
+        [1.0, 0.0, 1.0, 0.5, 0.125, 0.25],
+        [1.0, 1.0, 0.0, 0.75, 0.25, 0.125],
+    ]
+
+
+def test_callback_sets_the_wrapper_lambdas_from_the_multipliers_at_training_start(tmp_path):
+    """Issue #38 (the orchestrator's addition): at training start the callback sets
+    wrapper.lambdas to [pid.lam for pid in pids], so a fixed multiplier prices its constraint from
+    the first step, not only after the first rollout end. PIDLagrangian's lam starts at 0.0.
+
+    Known answer: pids [FixedMultiplier(), PID, PID] give lambdas (1, 0, 0). The first step's
+    costs are (1.0, 0, 0.25) in env 0 and (0.5, 0.5, 0) in env 1, reward 1, so the rewards are
+    (1 - 1 x 1.0) / (1 + 1) = 0 and (1 - 1 x 0.5) / (1 + 1) = 0.25 (with lambdas still at 0: 1, 1).
+    """
+    import greenleaf_control.lagrangian as lagrangian
+
+    w = lagrangian.VecLagrangianReward(_venv(MIX_A, MIX_B))
+    pids = [lagrangian.FixedMultiplier(), *(lagrangian.PIDLagrangian(0.125) for _ in range(2))]
+    cb = lagrangian.LagrangianCallback(w, pids, tmp_path / "lambdas.csv")
+    cb.init_callback(_ppo(w))
+    cb.on_training_start(locals(), globals())
+    assert isinstance(w.lambdas, np.ndarray)
+    assert w.lambdas.dtype == np.float64
+    assert w.lambdas.tolist() == [1.0, 0.0, 0.0]
+    w.reset()
+    _, rewards, _, _ = w.step(ACTIONS)
+    assert rewards.tolist() == [0.0, 0.25]  # exact: every value here is dyadic
+
+
+def test_ppo_learn_prices_the_first_rollout_with_the_fixed_multiplier(tmp_path):
+    """Issue #38, through PPO.learn: the first rollout's rewards are priced with lambda_co2 = 1.
+
+    No VecNormalize, so the rollout buffer holds the wrapper's rewards. 2 envs x n_steps 8 = one
+    16-step rollout; each toy plays its 2-step episode 4 times. With lambdas (1, 0, 0) from the
+    start, reward 1, each reward is (1 - 1 x cost_co2) / (1 + 1):
+      env 0 (MIX_A): step 0, co2 1.0: 0;    step 1, co2 0.5: 0.25
+      env 1 (MIX_B): step 0, co2 0.5: 0.25; step 1, co2 0:   0.5
+    so the buffer's rows alternate (0, 0.25) and (0.25, 0.5); with lambdas at 0 they would all be
+    1. At the rollout end the means are (0.5, 0.125, 0.25) and the default-gain PIDs on budget
+    0.125 give e = (0, 1): temp I = 0, d = 0, lam 0; rh I = 0.05, d = 1, lam 0.05 + 0.5 + 0.1 = 0.65.
+    """
+    import greenleaf_control.lagrangian as lagrangian
+
+    w = lagrangian.VecLagrangianReward(_venv(MIX_A, MIX_B))
+    pids = [lagrangian.FixedMultiplier(), *(lagrangian.PIDLagrangian(0.125) for _ in range(2))]
+    log = tmp_path / "lambdas.csv"
+    cb = lagrangian.LagrangianCallback(w, pids, log)
+    model = _ppo(w)
+    model.learn(total_timesteps=16, callback=cb)
+    rewards = model.rollout_buffer.rewards
+    assert rewards.shape == (8, 2)
+    assert rewards.tolist() == [[0.0, 0.25], [0.25, 0.5]] * 4
+    rows = list(csv.reader(log.read_text().splitlines()))
+    assert rows[0] == HEADER
+    assert len(rows) == 2
+    assert int(rows[1][0]) == 16
+    assert [float(v) for v in rows[1][1:]] == pytest.approx(
+        [1.0, 0.0, 0.65, 0.5, 0.125, 0.25], rel=1e-12, abs=1e-12
+    )
 
 
 def test_callback_refuses_to_overwrite_an_existing_log(tmp_path):

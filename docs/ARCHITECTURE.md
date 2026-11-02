@@ -37,6 +37,7 @@ selection.py (VALIDATION) ─► evaluate.run_policy (rebuilds the stack from th
 | `control/configs/rule_based_tuned.yml` | `tune_rb` CLI only | Via `/experiment` E1 |
 | `control/ledger/ledger.jsonl` | `ledger` CLI only | Append-only; `check_locks.py` |
 | `control/results/` | `evaluate`, `stats`, `ledger` CLIs only | `final/` is empty until the seal |
+| `control/results/analysis/` | `report` CLI only | A derived view of the ledger and runs, replaced on each run |
 | `control/runs/` | `train` CLI only | Git-ignored; mirrors the Modal volume |
 | `control/data/weather/` | `scripts/fetch_weather.py`, once | Immutable; hashed into every run |
 | `.claude/`, `AGENTS.md`, `CLAUDE.md`, `docs/`, `specs/` | the orchestrating session, with Aarmen | Harness and docs |
@@ -87,3 +88,6 @@ Dated, with who decided. Not re-argued without a new reason.
   matched to 6e-17.
 - **2026-10-28, Claude (veto open).** Modal containers get hard limits equal to their requests (4 cores, 8 GiB, 4 h),
   so `run_grid --dry`'s worst case is a real bound: Modal bills max(request, usage).
+- **2026-11-01, Claude (veto open).** Every replay samples hours as `export_replay` does: climate at the end of each
+  hour (frame row 4h+3), actuators as the hour's mean, profit and violation counters on the prefix to the hour's end.
+  media.py's README GIF (row 4h, instants) moves to it at D5 (#48).
