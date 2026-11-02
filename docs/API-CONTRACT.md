@@ -415,3 +415,55 @@ Paths are relative to `control/`. Scenario dicts are `{"location": str, "growth_
       `finally`, and returns `/runs/<run_rel>/manifest.json`, read by its own path (the commit reloads the volume, so
       other containers' manifests are visible).
   - volume `greenleaf-runs` (`create_if_missing=True`) mounted at `/runs`.
+
+## `greenleaf_control.report` (A1a; plays no season, writes no ledger row)
+- `ANALYSIS` = `control/results/analysis`; `BASELINE` = `"rb_tuned"`; `METRICS` = `(profit_eur_m2, viol_hours_total,
+  viol_hours_co2, viol_hours_temp, viol_hours_rh, yield_kg_m2, paper_return)`.
+- **VALIDATION only.** Any other split is refused (a ValueError naming it from `load_scores`, an argparse error from the
+  CLI) before a file is opened. The three 2012 splits come after F1's `final-result` row.
+- `load_scores(split, *, ledger_path=ledger.LEDGER) -> pd.DataFrame`: one row per label × run × scenario.
+  - **Columns:** `label, arm, issue, registered, result, decision, protocol, run, seed, crashed, split, location,
+    growth_year, start_day`, every `ledger.RESULT_KEYS` key, `valid`, `viol_hours_total` (co2 + temp + rh). `issue`,
+    `seed` and `crashed` are nullable Int64.
+  - **Order** (selection's; the bootstrap depends on it): baselines in `envs.BASELINES` order, then each `registered`
+    row with scenarios `["validation"]` and a `result` row in ledger order, arms in registration order, runs by seed,
+    scenarios in `scenarios.SPLITS` order.
+  - **Baselines:** every `*.parquet` in `selection.RESULTS`, rows with split `validation` (others ignored), labelled by
+    name; ids, `run`, `seed` and `crashed` null. Refused: a controller not in `envs.BASELINES` (a run dir included), a
+    (controller, scenario) in two parquets, a baseline without every scenario of the split.
+  - **Arms:** runs from `selection._registration` (every run that didn't crash, by seed); each run's seasons are
+    `selection._read`'s `candidates[checkpoint]["per_scenario"]`. Refused: a run with no `selected.json` ("run
+    selection first"), a stale one, an arm whose runs all crashed, two result rows on a registration, two decision rows
+    on a result. A registration with no result row prints `skipped <row>: no result row yet`, and none of its files
+    are read.
+  - **Ids:** `label` = `<arm> #<issue>/<first 4 hex of the registered id>`; `decision` = `"<adopted|dropped> <decision
+    row id>"` or null; `protocol` = the first 8 hex of the registration's `fingerprints["docs/PROTOCOL.md"]`; `crashed`
+    = `ledger._arm_tally`'s count for the arm (null for a baseline).
+  - **E1:** an arm of method `rb_tuned` is no row of its own; its arm name, `registered`, `result`, `decision` and
+    `protocol` go on the `rb_tuned` baseline rows. Refused: a second such arm, one with no run that didn't crash, one
+    with no `rb_tuned` parquet.
+- `summarize(scores) -> pd.DataFrame`: one row per label (a `label` column), in the scores' first-appearance order.
+  Each statistic is on the label's runs (by seed) × scenarios (split order) array, whatever the input's row order.
+  - `label, decision, protocol, n_runs, crashed, invalid_episodes` (the count of `valid` False; PROTOCOL §4).
+  - `<m>_{iqm,lo,hi}` = `stats.iqm_ci` for each m in `METRICS`; `viol_hours_sum_iqm` = the sum of the three
+    per-constraint IQMs (no CI). The table carries both "total" violation hours.
+  - **rb_tuned like-for-like:** `rb_tuned_profit_iqm` = `stats.iqm_ci(np.tile(<rb_tuned's 1 × S profits>, (n_runs,
+    1)))[0]`; `rb_tuned_viol_sum_iqm` = the same per constraint, summed.
+  - **Paired gains over rb_tuned's same scenario:** `profit_gain_{iqm,lo,hi}` = `iqm_ci(arm − rb_tuned)` on profit;
+    `viol_saved_{iqm,lo,hi}` = `iqm_ci(rb_tuned − arm)` on `viol_hours_total`.
+  - `p_improve_profit` = `stats.prob_improvement(arm, rb_tuned)`; `p_improve_viol` = the same on negated
+    `viol_hours_total`. Against a 1-run baseline it's the share of same-season wins (ties half), with no CI.
+  - `flag`: `deterministic, 1 run` for zero_controls, rb_default and rb_tuned (PROTOCOL §6); `n<5: no claim` under 5
+    runs, random included; otherwise `""`.
+  - No `rb_tuned` rows raises ValueError.
+- `check_ledger(scores, *, ledger_path) -> int`: for every `result` row of a registration in the scores, each arm's
+  primary and every guard (`iqm, ci_low, ci_high`) must equal `stats.iqm_ci` on the scores within 1e-12, else
+  ValueError naming the result row, arm and key. Returns the number of (arm, key) pairs checked.
+- `main(argv=None, *, ledger_path=ledger.LEDGER) -> int`; CLI `python -m greenleaf_control.report --split validation
+  [--out DIR]`, `--out` defaulting to `ANALYSIS`.
+  - Loads, checks and summarizes before a dir is made or a file is written; a refusal writes nothing.
+  - Writes `<out>/<split>/scores.parquet` (load_scores' frame), `summary.csv` (summarize's, full precision) and
+    `summary.md`, replacing any previous version. `summary.md`: line 1 names the command and `summary.csv`, a legend,
+    then a pipe table with one row per label (3 decimals, hours 2). Neither text file carries a timestamp or the out
+    path.
+  - Prints `matches the ledger: <k> (arm, key) pairs`, then one line per label.

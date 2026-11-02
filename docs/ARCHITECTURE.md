@@ -37,6 +37,7 @@ selection.py (VALIDATION) ─► evaluate.run_policy (rebuilds the stack from th
 | `control/configs/rule_based_tuned.yml` | `tune_rb` CLI only | Via `/experiment` E1 |
 | `control/ledger/ledger.jsonl` | `ledger` CLI only | Append-only; `check_locks.py` |
 | `control/results/` | `evaluate`, `stats`, `ledger` CLIs only | `final/` is empty until the seal |
+| `control/results/analysis/` | `report` CLI only | A derived view of the ledger and runs, replaced on each run |
 | `control/runs/` | `train` CLI only | Git-ignored; mirrors the Modal volume |
 | `control/data/weather/` | `scripts/fetch_weather.py`, once | Immutable; hashed into every run |
 | `.claude/`, `AGENTS.md`, `CLAUDE.md`, `docs/`, `specs/` | the orchestrating session, with Aarmen | Harness and docs |
