@@ -4,7 +4,8 @@ envs.py builds every method's env one way (docs/API-CONTRACT.md). make_raw_env i
 env (gl_gym @2d3febb) with our ConstraintCostReward and WEATHER_DIR, a season that ends after exactly
 N steps, a flat Box observation, and season progress when asked. make_env adds the co-pilot
 (ResidualRBWrapper) for the residual arms and always puts SolverFailureFlag on top. A TEST (2012)
-scenario is refused unless allow_test=True, which only make_raw_env takes.
+scenario is refused unless allow_test=True, which make_env and run_baseline pass through to
+make_raw_env (keyword-only, default False; issue #41).
 
 Known answers used throughout:
 - One day is 86,400 s / 900 s = 96 steps; 60 days is 5,760. Upstream ends `terminated` on step
@@ -20,7 +21,9 @@ never step it, and reduce any check on it to a bool so no weather value is print
 tests run under a tripwire on the file read itself (pandas.read_csv, which upstream's loader
 calls): it fails before any 2012.csv is opened, including the next year's file upstream appends
 when a season plus its 0.5-day lookahead runs past the end of the year (so a late 2011 season
-reads 2012.csv although its scenario says 2011).
+reads 2012.csv although its scenario says 2011). The allow_test tests that step a TEST scenario
+(issue #41) run on a synthetic weather dir in tmp_path whose 2012.csv files are byte copies of the
+real Amsterdam/2010.csv, under a tripwire that fails on any 2012.csv outside tmp_path.
 """
 
 import functools
@@ -29,6 +32,7 @@ import inspect
 import json
 import shutil
 from pathlib import Path
+from types import SimpleNamespace
 
 import gl_gym  # noqa: F401  (importing gl_gym registers its env ids with gymnasium)
 import gl_gym.environments.greenlight_env as greenlight_env
@@ -180,6 +184,53 @@ def seal_tripwire(monkeypatch) -> list[tuple[str, ...]]:
     return reads
 
 
+@pytest.fixture
+def synthetic_2012(tmp_path, monkeypatch) -> SimpleNamespace:
+    """A synthetic weather dir, tmp_path/"synthetic", where Amsterdam, London and Abbotsford each
+    have a 2012.csv that is a byte copy of the real Amsterdam/2010.csv, under a pandas.read_csv
+    tripwire that fails on any *2012.csv outside tmp_path (the real data dir, gl_gym's own copy).
+
+    scenarios.WEATHER_DIR is not patched here: a test points it at .dir itself, after building
+    anything it compares against on the real dir. .reads lists every 2012.csv read (resolved, so
+    /var and /private/var compare equal on the Mac); .trips every one the tripwire refused, in case
+    upstream swallows the AssertionError.
+    """
+    synthetic = tmp_path / "synthetic"
+    for site in ("Amsterdam", "London", "Abbotsford"):
+        (synthetic / site).mkdir(parents=True)
+        shutil.copyfile(
+            scenarios.WEATHER_DIR / "Amsterdam" / "2010.csv", synthetic / site / "2012.csv"
+        )
+    root = tmp_path.resolve()
+    real_read_csv = pd.read_csv
+    out = SimpleNamespace(dir=synthetic, reads=[], trips=[])
+
+    def read_csv(filepath_or_buffer, *args, **kwargs):
+        path = Path(str(filepath_or_buffer)).resolve()
+        if path.name.endswith("2012.csv"):
+            if not path.is_relative_to(root):
+                out.trips.append(path)
+                raise AssertionError(f"the sealed 2012 test weather was read: {path}")
+            out.reads.append(path)
+        return real_read_csv(filepath_or_buffer, *args, **kwargs)
+
+    monkeypatch.setattr(pd, "read_csv", read_csv)
+    return out
+
+
+def _assert_read_only_synthetic_2012(synthetic: SimpleNamespace, location: str) -> None:
+    """The tripwire never fired, and the only 2012.csv read was location's synthetic copy (so the
+    test did open TEST-year weather, and from tmp_path)."""
+    assert synthetic.trips == [], f"a real 2012.csv was read: {synthetic.trips}"
+    assert set(synthetic.reads) == {(synthetic.dir / location / "2012.csv").resolve()}
+
+
+def _takes_allow_test(fn) -> bool:
+    """fn has a keyword-only allow_test defaulting to False (issue #41)."""
+    p = inspect.signature(fn).parameters.get("allow_test")
+    return p is not None and p.kind is inspect.Parameter.KEYWORD_ONLY and p.default is False
+
+
 # --- The contract surface ----------------------------------------------------------------------
 
 
@@ -192,7 +243,8 @@ def test_methods_and_baselines_are_the_contract_tuples():
 
 def test_signatures_match_the_contract():
     """make_raw_env is keyword-only with the contract's defaults (normalize_actions has none);
-    make_env and run_baseline take no allow_test, so they can never open a TEST scenario."""
+    make_env and run_baseline take allow_test keyword-only, default False (issue #41), so with
+    the default they can never open a TEST scenario."""
     import greenleaf_control.envs as envs
 
     empty = inspect.Parameter.empty
@@ -216,14 +268,18 @@ def test_signatures_match_the_contract():
         "penalty_weight": 1.0,
         "rb_params": None,
         "residual_scale": 0.15,
+        "allow_test": False,
     }
     assert make["seed"].kind is inspect.Parameter.KEYWORD_ONLY
+    assert make["allow_test"].kind is inspect.Parameter.KEYWORD_ONLY
     baseline = inspect.signature(envs.run_baseline).parameters
     assert {name: p.default for name, p in baseline.items()} == {
         "name": empty,
         "scenario": empty,
         "season_length": 60,
+        "allow_test": False,
     }
+    assert baseline["allow_test"].kind is inspect.Parameter.KEYWORD_ONLY
 
 
 @pytest.mark.parametrize("method", METHODS)
@@ -649,7 +705,7 @@ def test_make_raw_env_refuses_every_test_scenario(name):
 @pytest.mark.usefixtures("seal_tripwire")
 @pytest.mark.parametrize("method", METHODS)
 def test_make_env_refuses_every_test_scenario(method):
-    """make_env has no allow_test: all 24 TEST scenarios are refused for every method."""
+    """With the default allow_test=False, all 24 TEST scenarios are refused for every method."""
     for s in TEST_SCENARIOS:
         with pytest.raises(ValueError, match="allow_test"):
             _make(method, scenario=s)
@@ -658,7 +714,8 @@ def test_make_env_refuses_every_test_scenario(method):
 @pytest.mark.usefixtures("seal_tripwire")
 @pytest.mark.parametrize("name", ["zero_controls", "random", "rb_default"])
 def test_run_baseline_refuses_every_test_scenario(name):
-    """run_baseline has no allow_test: all 24 TEST scenarios are refused, before a single step."""
+    """With the default allow_test=False, all 24 TEST scenarios are refused, before a single
+    step."""
     import greenleaf_control.envs as envs
 
     for s in TEST_SCENARIOS:
@@ -784,6 +841,56 @@ def test_allow_test_lets_a_test_scenario_reset(name):
     assert shape_ok, f"wrong observation shape after resetting on {s}"
     finite = bool(np.all(np.isfinite(obs)))
     assert finite, f"non-finite observation after resetting on {s}"
+
+
+@pytest.mark.parametrize("name", TEST_NAMES)
+@pytest.mark.parametrize("method", METHODS)
+def test_make_env_with_allow_test_plays_a_synthetic_test_day(
+    method, name, synthetic_2012, monkeypatch
+):
+    """Issue #41: make_env(method, scenario=<the split's first TEST scenario>, season_length=1,
+    allow_test=True) on the synthetic weather dir resets onto that scenario and plays a whole day
+    of zero actions: exactly 96 steps, terminated on the last and never truncated, each
+    observation the method's dim and finite. Its only 2012 read is the site's synthetic copy."""
+    import greenleaf_control.envs as envs
+
+    assert _takes_allow_test(envs.make_env), "make_env takes no keyword-only allow_test=False"
+    s = scenarios.TEST[name][0]
+    monkeypatch.setattr(scenarios, "WEATHER_DIR", synthetic_2012.dir)
+    env = _make(method, scenario=s, allow_test=True)
+    obs, info = env.reset(seed=0)
+    assert info["scenario"] == s
+    observations, flags = [obs], []
+    terminated = truncated = False
+    while not (terminated or truncated):
+        obs, _, terminated, truncated, _ = env.step(ZERO)
+        observations.append(obs)
+        flags.append((bool(terminated), bool(truncated)))
+    env.close()
+    assert flags == [(False, False)] * (N_DAY - 1) + [(True, False)]
+    observations = np.stack(observations)
+    assert observations.shape == (N_DAY + 1, DIMS[method])
+    assert bool(np.all(np.isfinite(observations)))
+    _assert_read_only_synthetic_2012(synthetic_2012, s["location"])
+
+
+@pytest.mark.parametrize("name", TEST_NAMES)
+@pytest.mark.parametrize("baseline", BASELINES)
+def test_run_baseline_with_allow_test_returns_a_synthetic_test_day(
+    baseline, name, synthetic_2012, monkeypatch
+):
+    """Issue #41: run_baseline(baseline, <the split's first TEST scenario>, 1, allow_test=True) on
+    the synthetic weather dir returns one day, 96 infos, each carrying the raw states. Its only
+    2012 read is the site's synthetic copy."""
+    import greenleaf_control.envs as envs
+
+    assert _takes_allow_test(envs.run_baseline), "run_baseline takes no keyword-only allow_test"
+    s = scenarios.TEST[name][0]
+    monkeypatch.setattr(scenarios, "WEATHER_DIR", synthetic_2012.dir)
+    infos = envs.run_baseline(baseline, s, 1, allow_test=True)
+    assert len(infos) == N_DAY
+    assert all("x_prev" in info and "x" in info for info in infos)
+    _assert_read_only_synthetic_2012(synthetic_2012, s["location"])
 
 
 @pytest.mark.parametrize(

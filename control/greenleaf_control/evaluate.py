@@ -12,6 +12,7 @@ one frame row per step t = 0..T-1, read from the state after the step.
 
 The TEST splits are sealed (PROTOCOL §8): only --final <final-registered row> may score them, and
 that is F1's (Stage 3), so every --final is refused here. make_raw_env refuses TEST weather too.
+run_rb and run_policy pass allow_test through (default False); only evaluate --final will set it.
 """
 
 import argparse
@@ -65,11 +66,21 @@ def _frame(infos: list[dict]) -> pd.DataFrame:
 
 
 def run_rb(
-    params: dict, scenario: dict, season_length: int = 60, record_steps: bool = False
+    params: dict,
+    scenario: dict,
+    season_length: int = 60,
+    record_steps: bool = False,
+    *,
+    allow_test: bool = False,
 ) -> tuple[dict, pd.DataFrame | None]:
     """The rule-based controller with params, one season on the raw env."""
     env = envs.SolverFailureFlag(
-        envs.make_raw_env(scenario=scenario, season_length=season_length, normalize_actions=False)
+        envs.make_raw_env(
+            scenario=scenario,
+            season_length=season_length,
+            normalize_actions=False,
+            allow_test=allow_test,
+        )
     )
     controller = rule_based.make_controller(params)
     env.reset()
@@ -90,13 +101,17 @@ def run_policy(
     season_length: int = 60,
     record_steps: bool = False,
     return_trace: bool = False,
+    *,
+    allow_test: bool = False,
 ) -> tuple:
     """A run's checkpoint, one deterministic season on its training stack with frozen stats.
 
     With return_trace, also the graded season's (states, controls, params) as a third item."""
     run_dir = Path(run_dir)
     config = json.loads((run_dir / "manifest.json").read_text())["config"]
-    stack = train.build_vec_env(config, 1, scenario=scenario, season_length=season_length)
+    stack = train.build_vec_env(
+        config, 1, scenario=scenario, season_length=season_length, allow_test=allow_test
+    )
     venv = VecNormalize.load(run_dir / f"vecnorm_{checkpoint}.pkl", stack.venv)
     venv.training = False
     venv.norm_reward = False

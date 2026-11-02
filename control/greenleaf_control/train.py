@@ -81,11 +81,17 @@ def _from_yml(key: str, value):
 
 
 def build_vec_env(
-    config: dict, n_envs: int, *, scenario: dict | None = None, season_length: int | None = None
+    config: dict,
+    n_envs: int,
+    *,
+    scenario: dict | None = None,
+    season_length: int | None = None,
+    allow_test: bool = False,
 ) -> VecNormalize:
     """The run's env stack, env i = make_env(method, seed=seed + i), VecNormalize training.
 
     scenario and season_length override the config's weather and season (for evaluation).
+    allow_test passes through to make_env; only evaluate --final sets it.
     """
     # The residual arms' recorded scale; the other arms don't use one, so make_env's default stands.
     scale = config.get("residual_scale")
@@ -99,6 +105,7 @@ def build_vec_env(
             penalty_weight=config["penalty_weight"],
             rb_params=config.get("rb_params"),
             **({} if scale is None else {"residual_scale": scale}),
+            allow_test=allow_test,
         )
         for i in range(n_envs)
     ]

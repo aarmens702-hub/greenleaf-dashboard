@@ -1423,15 +1423,18 @@ def test_build_vec_env_scenario_and_season_length_override_the_config(tmp_path):
 
 
 def test_build_functions_match_the_contract_signatures():
-    """build_vec_env(config, n_envs, *, scenario=None, season_length=None) and
-    build_model(config, venv), exposed for evaluate and the probes."""
+    """build_vec_env(config, n_envs, *, scenario=None, season_length=None, allow_test=False) and
+    build_model(config, venv), exposed for evaluate and the probes. allow_test (issue #41) passes
+    through to make_env; only evaluate --final will set it."""
     import greenleaf_control.train as train
 
     params = inspect.signature(train.build_vec_env).parameters
-    assert list(params) == ["config", "n_envs", "scenario", "season_length"]
+    assert list(params) == ["config", "n_envs", "scenario", "season_length", "allow_test"]
     for name in ("scenario", "season_length"):
         assert params[name].kind is inspect.Parameter.KEYWORD_ONLY, name
         assert params[name].default is None, name
+    assert params["allow_test"].kind is inspect.Parameter.KEYWORD_ONLY
+    assert params["allow_test"].default is False
     assert list(inspect.signature(train.build_model).parameters) == ["config", "venv"]
 
 

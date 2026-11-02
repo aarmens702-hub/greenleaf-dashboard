@@ -39,15 +39,17 @@ Paths are relative to `control/`. Scenario dicts are `{"location": str, "growth_
   -> gym.Env`
   - Always uses `ConstraintCostReward` and `weather_data_dir=WEATHER_DIR`.
   - A fixed `scenario` uses the fixed sampler; `sampler_kwargs` uses the random one.
-  - Refuses a TEST scenario unless `allow_test=True` is passed. That flag exists only for `evaluate --final` and the
-    reset-only weather test.
+  - Refuses a TEST scenario unless `allow_test=True` is passed. Only `evaluate --final` sets it True (plus the
+    reset-only weather test). `make_env`, `run_baseline`, `train.build_vec_env`, `evaluate.run_rb` and `run_policy`
+    pass it through, default False.
   - A season that would read a TEST year's file (its own year, or the next year's via upstream's year-end expansion)
     is refused unless `allow_test`, at construction (every scenario the sampler can draw) and at `reset`.
   - Ends the season after exactly N steps (decision B) and returns a flat `Box` observation (`FlattenObservation`,
     then `SeasonProgress` if asked).
   - Every step's info carries `x_prev` and `x`: float64 copies of the raw state before and after the step.
 - `make_env(method: str, *, seed: int, scenario: dict | None = None, season_length: int = 60, penalty_weight: float = 1.0,
-  rb_params: dict | None = None, residual_scale: float = 0.15) -> gym.Env`
+  rb_params: dict | None = None, residual_scale: float = 0.15, allow_test: bool = False) -> gym.Env`
+  - `allow_test` passes through to `make_raw_env`; only `evaluate --final` sets it.
   - Returns a flat `Box` observation.
   - `ppo_paper`: PAPER, normalized rate actions, upstream observations.
   - `ppo`: TRAIN sampler, normalized rate actions, plus season progress.
@@ -61,8 +63,9 @@ Paths are relative to `control/`. Scenario dicts are `{"location": str, "growth_
 - `class SeasonProgress(gym.ObservationWrapper)`: appends `timestep / N` in [0, 1].
 - `class SolverFailureFlag(gym.Wrapper)`: sets `info["solver_failure"] = bool(truncated)` (nothing truncates for time;
   a season ends terminated after exactly N steps).
-- `run_baseline(name: str, scenario: dict, season_length: int = 60) -> list[dict]`: a full episode's per-step info
-  dicts for a BASELINES entry (`random` is seeded by the scenario's start day).
+- `run_baseline(name: str, scenario: dict, season_length: int = 60, *, allow_test: bool = False) -> list[dict]`: a full
+  episode's per-step info dicts for a BASELINES entry (`random` is seeded by the scenario's start day). `allow_test`
+  passes through to `make_raw_env`; only `evaluate --final` sets it.
 
 ## `greenleaf_control.metrics` (scorer file; never imports `rewards`)
 - `episode_metrics(states: np.ndarray, controls: np.ndarray, params: np.ndarray, *, dt: float = 900.0,
@@ -162,23 +165,28 @@ Paths are relative to `control/`. Scenario dicts are `{"location": str, "growth_
     season at the run's season length, played by the end-of-training model with frozen copies of its VecNormalize
     stats. Its `paper_return` is Σ `info["paper_reward"]` summed in step order with `+=` (evaluate's
     `paper_reward_sum`, a reload check), not `metrics`' `paper_return`; selection uses the metrics one.
-- `build_vec_env(config: dict, n_envs: int, *, scenario: dict | None = None, season_length: int | None = None)
-  -> VecNormalize`: `SubprocVecEnv` (`DummyVecEnv` for one env) → `VecMonitor` → `VecLagrangianReward` (residual_lag
-  only) → `VecNormalize`, env i = `make_env(method, seed=seed + i, ...)` from the manifest's config; `scenario` and
-  `season_length` override the config's (for evaluation).
+- `build_vec_env(config: dict, n_envs: int, *, scenario: dict | None = None, season_length: int | None = None,
+  allow_test: bool = False) -> VecNormalize`: `SubprocVecEnv` (`DummyVecEnv` for one env) → `VecMonitor` →
+  `VecLagrangianReward` (residual_lag only) → `VecNormalize`, env i = `make_env(method, seed=seed + i, ...)` from the
+  manifest's config; `scenario` and `season_length` override the config's (for evaluation). `allow_test` passes
+  through to `make_env`; only `evaluate --final` sets it.
 - `build_model(config: dict, venv) -> PPO`: `configs/ppo.yml`'s PPO on cpu, seeded, with only `log_std_init` changed
   (-1.0 for the residual arms).
 
 ## `greenleaf_control.evaluate`
-- `run_rb(params: dict, scenario: dict, season_length: int = 60, record_steps: bool = False) -> tuple[dict, pd.DataFrame | None]`
+- `run_rb(params: dict, scenario: dict, season_length: int = 60, record_steps: bool = False, *, allow_test: bool = False)
+  -> tuple[dict, pd.DataFrame | None]`
 - `run_policy(run_dir: Path, checkpoint: str, scenario: dict, season_length: int = 60, record_steps: bool = False,
-  return_trace: bool = False) -> tuple[dict, pd.DataFrame | None]`, or with `return_trace=True`
+  return_trace: bool = False, *, allow_test: bool = False) -> tuple[dict, pd.DataFrame | None]`, or with
+  `return_trace=True`
   `(result, frame, (states, controls, params))`: the same season's raw trace that metrics graded (no second season).
   - Rebuilds the training stack with `train.build_vec_env(manifest["config"], 1, scenario=..., season_length=...)`
     (`DummyVecEnv` → `VecMonitor` → `VecLagrangianReward` for residual_lag), loads
     `VecNormalize.load(run_dir/"vecnorm_<checkpoint>.pkl", <that stack>)`, sets `training = False` and
     `norm_reward = False` before reset, then `PPO.load(run_dir/"ckpt_<checkpoint>.zip", device="cpu")` and
     deterministic predict until the season ends.
+- **`allow_test`** (both): passes through, `run_rb` to `make_raw_env` and `run_policy` to `train.build_vec_env`;
+  default False, and only `evaluate --final` sets it.
 - **Result dict** (both): `metrics.episode_metrics(...)` graded with the env's own `p` and `season_steps = N`, plus
   `paper_reward_sum` = Σ `info["paper_reward"]` in step order with `+=` (a reproduction check, not a graded metric).
 - **CLI:** `--controller {zero_controls|random|rb_default|rb_tuned|<run_dir>}`
