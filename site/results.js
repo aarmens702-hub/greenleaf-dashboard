@@ -209,7 +209,9 @@
       "season-by-season differences from the tuned rules on the same seasons; the tuned rules' " +
       `like-for-like profit: ${num(r.rb_tuned_profit_iqm, 2)} ${UNIT[X]}</span></dd>` +
       `<dt>Hours outside the safe range</dt><dd>${value(r, "viol_hours_total")}` +
-      `<span>IQMs by constraint: ${by}</span></dd>` +
+      `<span>IQMs by constraint: ${by}; these three add to ` +
+      `${num(r.viol_hours_sum_iqm, digits("viol_hours_sum_iqm"))} h, the sum the README and report ` +
+      "quote; the total above is the IQM of each season's total</span></dd>" +
       `<dt>Fruit growth</dt><dd>${value(r, "yield_kg_m2")}</dd>` +
       `<dt>Runs</dt><dd>${r.n_runs}</dd>` +
       `<dt>Invalid seasons</dt><dd>${r.invalid_episodes}</dd></dl>`;

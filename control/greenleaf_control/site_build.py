@@ -23,8 +23,8 @@ from greenleaf_control import ledger, manifest
 CONTROLLERS = {
     "rb_tuned": "Tuned rules",
     "rb_default": "Default rules",
-    "residual_w05": "Co-pilot, fixed penalty",
-    "lag_b100": "Co-pilot, constrained",
+    "residual_w05": "Residual agent, fixed penalty",
+    "lag_b100": "Residual agent, constrained",
     "ppo": "PPO, no rules",
     "ppo_paper": "PPO, paper setup",
     "zero_controls": "Do nothing",

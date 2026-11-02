@@ -522,7 +522,7 @@ Paths are relative to `control/`. Scenario dicts are `{"location": str, "growth_
 - **Reads only recorded files:** imports stdlib, `ledger` and `manifest` only (no env, `evaluate`, `report`,
   `export_replay` or `rewards`, so no `gl_gym`); opens no weather file; writes nothing outside `out`.
 - `CONTROLLERS`: the page's controllers, id → display name, in order: `rb_tuned` "Tuned rules", `rb_default`
-  "Default rules", `residual_w05` "Co-pilot, fixed penalty", `lag_b100` "Co-pilot, constrained", `ppo` "PPO, no
+  "Default rules", `residual_w05` "Residual agent, fixed penalty", `lag_b100` "Residual agent, constrained", `ppo` "PPO, no
   rules", `ppo_paper` "PPO, paper setup", `zero_controls` "Do nothing". `random` is left out everywhere.
 - `build(out: Path, *, root=manifest.REPO_ROOT, ledger_path=ledger.LEDGER, force=False) -> dict`:
   - returns `{"final_result": <final-result row id>, "replays": <int, copied into out/data/final>, "files": <int,

@@ -82,12 +82,14 @@ FAKE_RESULT = "final-result-1e1e1e1e"
 FAKE_REGISTERED = "final-registered-0f0f0f0f"
 
 # (id, display name, meta.run.seed of its final replays: the lowest seed the final scored; None
-# for a baseline), in the issue's order.
+# for a baseline), in the issue's order. #63 (a requirement change, the issue's scope comment,
+# 2026-11-02): the two residual arms' names are "Residual agent, ..." (#58's were "Co-pilot, ...");
+# their ids, and every other name, are unchanged.
 CONTROLLERS = [
     ("rb_tuned", "Tuned rules", None),
     ("rb_default", "Default rules", None),
-    ("residual_w05", "Co-pilot, fixed penalty", 100),
-    ("lag_b100", "Co-pilot, constrained", 200),
+    ("residual_w05", "Residual agent, fixed penalty", 100),
+    ("lag_b100", "Residual agent, constrained", 200),
     ("ppo", "PPO, no rules", 0),
     ("ppo_paper", "PPO, paper setup", 0),
     ("zero_controls", "Do nothing", None),
@@ -97,7 +99,7 @@ VALIDATION_CONTROLLERS = [
     {"id": "rb_tuned", "name": "Tuned rules", "file_prefix": "rb_tuned", "seed": None},
     {
         "id": "residual_w05",
-        "name": "Co-pilot, fixed penalty",
+        "name": "Residual agent, fixed penalty",
         "file_prefix": "residual_w05_seed100",
         "seed": 100,
     },
@@ -422,7 +424,9 @@ def test_index_controllers_names_prefixes_and_seeds(built, split_id):
     """The 2012 splits list the 7 controllers in the issue's order, file_prefix = id, seeds 100,
     200, 0, 0 for residual_w05, lag_b100, ppo, ppo_paper and null for the baselines; validation
     lists rb_tuned and residual_w05 (file prefix residual_w05_seed100, seed 100). ppo's and
-    ppo_paper's seed is the int 0, not null or false."""
+    ppo_paper's seed is the int 0, not null or false. Names are CONTROLLERS': since #63 (a
+    requirement change, not a loosened check) residual_w05 is "Residual agent, fixed penalty" and
+    lag_b100 "Residual agent, constrained" on every split; #58's names were "Co-pilot, ..."."""
     out, _ = built()
     split = {s.get("id"): s for s in _load(out / "data" / "index.json")["splits"]}[split_id]
     expected = VALIDATION_CONTROLLERS if split_id == "validation" else TEST_CONTROLLERS

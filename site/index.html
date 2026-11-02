@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>GreenLeaf: a simulated tomato season</title>
-  <meta name="description" content="Two controllers run the same simulated tomato greenhouse side by side: a grower's tuned rules, the rules with an AI co-pilot on top, and others. A GreenLight-Gym simulator replay, not real-world results.">
+  <meta name="description" content="Two controllers run the same simulated tomato greenhouse side by side: a grower's tuned rules, the rules with a residual RL agent on top, and others. A GreenLight-Gym simulator replay, not real-world results.">
   <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Geist+Mono:wght@400;500&family=Schibsted+Grotesk:wght@500;700&family=Source+Serif+4:opsz,wght@8..60,400;8..60,600&display=swap">
   <link rel="stylesheet" href="style.css">
 </head>
@@ -14,7 +14,7 @@
     <header>
       <h1>GreenLeaf: a simulated tomato season</h1>
       <p id="label" class="label"></p>
-      <p class="lede">Two controllers run the same simulated greenhouse side by side, for <span data-fill="days"></span> days of <span data-fill="place"></span> weather. By default the grower's tuned rules are on the left, and on the right the same rules with the AI co-pilot on top, a reinforcement-learning policy that nudges the rules' equipment settings every 15 minutes. Pick a city, a start day and any two controllers, then press play.</p>
+      <p class="lede">Two controllers run the same simulated greenhouse side by side, for <span data-fill="days"></span> days of <span data-fill="place"></span> weather. By default the grower's tuned rules are on the left, and on the right the same rules with a residual RL agent on top: a PPO policy that adds a small correction to the rules' equipment settings every 15 minutes. Pick a city, a start day and any two controllers, then press play.</p>
     </header>
     <div class="layout">
       <nav class="side" aria-label="Sections">
@@ -83,7 +83,7 @@
             <div id="results-readout" class="readout" aria-live="polite"></div>
             <div class="scroll">
               <table>
-                <caption>IQMs over each controller's runs × seasons. Profit and its gain over the tuned rules in €/m², hours outside the safe range in h, fruit growth in kg/m².</caption>
+                <caption>IQMs over each controller's runs × seasons. Profit in €/m². Gain over the tuned rules in €/m², paired with the tuned rules' same seasons (like-for-like), not the distance to the diamond. Hours outside the safe range in h, fruit growth in kg/m².</caption>
                 <thead><tr><th scope="col">Controller</th><th scope="col">Profit</th><th scope="col">Gain</th><th scope="col">Hours</th><th scope="col">Fruit</th><th scope="col">Runs</th></tr></thead>
                 <tbody id="results-rows"></tbody>
               </table>

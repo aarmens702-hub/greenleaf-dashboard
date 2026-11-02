@@ -63,6 +63,13 @@ The conventions pinned here.
   control/results/analysis/<split>/summary.csv files are committed and only read here. The chart's
   positions against tradeoff.png, the axis switch, the readouts (hover, tap, keyboard) and 390 px
   are checked in Chrome (the issue's QA item).
+- Issue #63 (#60's review, and the issue's scope comment, 2026-11-02, matching Aarmen's wording in
+  his posts): requirement changes, not loosened checks. The readout's hours line adds the sum the
+  README and report quote, read from the row's viol_hours_sum_iqm, never typed; the Results
+  table's caption says Gain is paired (each season against the tuned rules' same season); and the
+  page no longer says "co-pilot": index.html's lede and meta description use residual RL agent
+  wording, and the residual arms' names ("Residual agent, ...", site_build's) come from
+  index.json, never typed in app.js or results.js.
 
 Every check reads files inside its test body, so while site/ is missing each test FAILS on an
 assertion rather than ERRORs. Nothing here builds an env, reads weather or trains.
@@ -111,6 +118,8 @@ RIGHT_MINUS_LEFT = re.compile(r"right\s*(?:−|\\u2212|&minus;|-|minus)\s*left")
 SECTIONS = ("replay", "results", "scoreboard", "source")  # section.sec ids, in page order (#60)
 SCRIPTS = ("app.js", "results.js")  # index.html's scripts, in load order (#60)
 RESULTS_IDS = {"results-readout", "results-note"}  # inside <section id="results"> (#60)
+# "co-pilot", "copilot" or "co pilot" (any Unicode hyphen), on lowercased, collapsed text (#63).
+CO_PILOT = re.compile(r"co[-‐‑ ]?pilot")
 ANALYSIS = Path(__file__).resolve().parents[1] / "results" / "analysis"
 RESULT_SPLITS = ("amsterdam_2012", "london_2012", "abbotsford_2012", "validation")  # its dirs
 # summary.csv's metrics whose _iqm, _lo and _hi results.json carries (site_build's, #58).
@@ -388,6 +397,39 @@ class _ResultsIds(HTMLParser):
     def handle_endtag(self, tag):
         if tag == "section" and self._depth:
             self._depth -= 1
+
+
+class _ResultsCaptions(HTMLParser):
+    """Whether index.html has a <section id="results">, and the text of each <caption> inside it
+    (nested <section>s counted, as in _ResultsIds)."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.found = False
+        self.captions: list[str] = []
+        self._depth = 0  # <section>s open since #results opened, itself included
+        self._in_caption = False
+
+    def handle_starttag(self, tag, attrs):
+        if self._depth:
+            if tag == "section":
+                self._depth += 1
+            if tag == "caption":
+                self._in_caption = True
+                self.captions.append("")
+        elif tag == "section" and (dict(attrs).get("id") or "").strip() == "results":
+            self.found = True
+            self._depth = 1
+
+    def handle_endtag(self, tag):
+        if tag == "section" and self._depth:
+            self._depth -= 1
+        if tag == "caption":
+            self._in_caption = False
+
+    def handle_data(self, data):
+        if self._in_caption:
+            self.captions[-1] += data
 
 
 def _strip_comments(js: str) -> str:
@@ -944,6 +986,90 @@ def test_site_results_js_types_no_result_number():
     assert path.is_file(), f"{path} is missing"
     typed = _typed_values(path.read_text(encoding="utf-8"), values)
     assert not typed, f"site/results.js types result numbers by hand: {typed}"
+
+
+# --- #63: the Results wording and the residual agent's name (Done when) ------------------------
+
+
+def test_site_results_js_reads_the_readmes_hours_sum_from_the_row():
+    """Done when (#63 step 1, #60's review): the readout's hours line says which statistic the
+    README quotes. Its total is the IQM of each season's total (viol_hours_total_iqm); the README
+    and report quote the sum of the three per-constraint IQMs (summary.csv's viol_hours_sum_iqm),
+    and the two differ. So site/results.js, comments stripped, names viol_hours_sum_iqm as a whole
+    word: the clause "these three add to <sum> h" reads it from the row, never types it (the
+    typed-number scanner above still runs over the file). The clause's wording and its 365.2 h
+    for Amsterdam 2012's tuned rules are checked in Chrome (the issue's QA item). #60's
+    results.js never names it.
+
+    Non-vacuous: in the committed amsterdam_2012 summary.csv (only read), the tuned rules' sum and
+    total differ, so the readout's total can't stand in for the README's number."""
+    with (ANALYSIS / "amsterdam_2012" / "summary.csv").open(newline="", encoding="utf-8") as f:
+        rows = {row["label"]: row for row in csv.DictReader(f)}
+    rules = rows["rb_tuned"]
+    # CO2 0.0 h + temperature 83.125 h + humidity 282.0625 h = 365.1875 h (365.2 to 1 decimal);
+    # the IQM of each season's total is 366.25 h.
+    assert float(rules["viol_hours_sum_iqm"]) == 0.0 + 83.125 + 282.0625 == 365.1875
+    assert float(rules["viol_hours_total_iqm"]) == 366.25
+
+    path = SITE / "results.js"
+    assert path.is_file(), f"{path} is missing"
+    js = _strip_comments(path.read_text(encoding="utf-8"))
+    assert re.search(r"\bviol_hours_sum_iqm\b", js), (
+        "site/results.js never names viol_hours_sum_iqm: the README's hours sum isn't in the readout"
+    )
+
+
+def test_site_results_table_caption_says_gain_is_paired():
+    """Done when (#63 step 2, #60's review): the Results table's caption, the one <caption> inside
+    <section id="results">, whitespace collapsed, any case, contains "paired": Gain is the IQM of
+    each season's difference from the tuned rules on the same season (like-for-like), not the
+    distance from a controller's dot to the tuned rules' diamond, which compares two IQMs. #60's
+    caption says only "its gain over the tuned rules"."""
+    index = SITE / "index.html"
+    assert index.is_file(), f"{index} is missing"
+    inside = _ResultsCaptions()
+    inside.feed(index.read_text(encoding="utf-8"))
+    inside.close()
+
+    assert inside.found, 'index.html has no <section id="results">'
+    assert len(inside.captions) == 1, (
+        f'<section id="results"> holds {len(inside.captions)} <caption>s, not the table\'s one'
+    )
+    caption = " ".join(inside.captions[0].split()).lower()
+    assert "paired" in caption, f"the Results table's caption doesn't say paired: {caption!r}"
+
+
+def test_site_says_residual_agent_not_co_pilot():
+    """Done when (#63's scope comment, 2026-11-02, Aarmen's wording in his posts and resume; a
+    requirement change, not a loosened check):
+    - site/index.html, all of it (the meta description and other attributes included), whitespace
+      collapsed, any case, no longer says "co-pilot" (nor "copilot" or "co pilot"), and says
+      "residual" (the lede's and meta description's residual RL agent wording). #60's lede and
+      meta description say "the AI co-pilot";
+    - its static text (inside <body>, outside <script>, <style> and <template>) still says
+      "simulated" (AGENTS.md);
+    - neither site/app.js nor site/results.js contains the literal "Co-pilot": the residual arms'
+      names, "Residual agent, fixed penalty" and "Residual agent, constrained", come from
+      index.json (site_build's, pinned in test_site_build.py), never typed. #60's scripts type no
+      name; this part guards the rename."""
+    index = SITE / "index.html"
+    assert index.is_file(), f"{index} is missing"
+    html = index.read_text(encoding="utf-8")
+    page = _Text()
+    page.feed(html)
+    page.close()
+
+    whole = " ".join(html.split()).lower()
+    stale = sorted({m.group(0) for m in CO_PILOT.finditer(whole)})
+    assert not stale, f"site/index.html still says {stale}: the page's word is residual RL agent"
+    assert "residual" in whole, "site/index.html never says residual: the lede lost the agent"
+    text = " ".join(page.text.split()).lower()
+    assert "simulated" in text, "index.html's static text doesn't say simulated"
+    scripts = [SITE / name for name in SCRIPTS]
+    missing = [p for p in scripts if not p.is_file()]
+    assert not missing, f"{missing} missing"
+    typed = [p.name for p in scripts if "Co-pilot" in p.read_text(encoding="utf-8")]
+    assert not typed, f"{typed} type the old name Co-pilot: names come from index.json"
 
 
 # --- site/: the whole page (Done when) ----------------------------------------------------------
