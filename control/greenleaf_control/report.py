@@ -1,6 +1,6 @@
 """Per-split stats tables from the ledger and the runs (A1a, PROTOCOL §6), one command:
 
-    python -m greenleaf_control.report --split validation [--out DIR]
+    python -m greenleaf_control.report --split <validation | a TEST split> [--out DIR]
 
 rebuilds every arm's per-season scores from the ledger, the runs' selected.json files and
 evaluate's baseline parquets, checks them against the ledger's result rows, and only then writes
@@ -9,10 +9,13 @@ profiles, tradeoff}.png, replacing any previous version (a derived view; the led
 Every figure is derived from scores.parquet and summary.csv. It plays no season, trains nothing
 and writes no ledger row.
 
+A 2012 TEST split (A1c) is sealed (PROTOCOL §8) until the ledger holds the final-result row; then
+its scores come only from the final's seasons.parquet, and are checked against that row's
+per_split before anything is written.
+
 Every statistic is stats' on a label's runs (by seed) x scenarios (split order) array, the order
 selection scored in. rb_tuned is 1 deterministic run x S seasons, so its like-for-like bar is its
-row tiled to the arm's n runs before the IQM; gains are paired with its same season. VALIDATION
-only: the three 2012 splits follow F1's final-result row.
+row tiled to the arm's n runs before the IQM; gains are paired with its same season.
 """
 
 import argparse
@@ -21,7 +24,7 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
-from greenleaf_control import envs, ledger, metrics, scenarios, selection, stats, viz
+from greenleaf_control import envs, evaluate, ledger, metrics, scenarios, selection, stats, viz
 
 ANALYSIS = Path(__file__).resolve().parents[1] / "results" / "analysis"
 BASELINE = "rb_tuned"
@@ -41,6 +44,8 @@ DETERMINISTIC = ("zero_controls", "rb_default", "rb_tuned")
 # draw (decision row id, arm) -> that arm's own call, as media.TRADEOFF does. E4 (#34) has one
 # decision row, decision-b159ac9a, "adopted", and its note drops residual_w4.
 NOTE_CALLS = {("decision-b159ac9a", "residual_w4"): "dropped"}
+# A TEST split's footer, figure titles and summary.md line 1 say so (PROTOCOL §8)
+SCORED_ONCE = "2012 test weather, scored once"
 IDS = ("label", "arm", "issue", "registered", "result", "decision", "protocol", "run", "seed")
 COLUMNS = (
     *IDS,
@@ -123,15 +128,125 @@ def _baselines(split: str) -> dict[str, list[dict]]:
     return out
 
 
+def _ids(reg: dict, existing: list[dict]) -> dict | None:
+    """The ids reg's arms carry: its issue, registered, result, decision and protocol; None while
+    it has no result row. Two result rows, or two decision rows on its result, are refused."""
+    reg_id = reg["row_id"]
+    results = [r for r in existing if r["kind"] == "result" and r["registered"] == reg_id]
+    if not results:
+        return None
+    if len(results) > 1:
+        raise ValueError(f"{reg_id} has {len(results)} result rows; the table shows one")
+    result = results[0]["row_id"]
+    decisions = [r for r in existing if r["kind"] == "decision" and r["result"] == result]
+    if len(decisions) > 1:
+        raise ValueError(
+            f"result {result} has {len(decisions)} decision rows"
+            f" ({', '.join(d['row_id'] for d in decisions)}); the table shows one"
+        )
+    return {
+        "issue": reg["issue"],
+        "registered": reg_id,
+        "result": result,
+        "decision": f"{decisions[0]['decision']} {decisions[0]['row_id']}" if decisions else None,
+        "protocol": reg["fingerprints"]["docs/PROTOCOL.md"][:8],
+    }
+
+
+def _final(split: str, existing: list[dict]) -> tuple[dict, dict]:
+    """(the final-result row, the final-registered row it names). A TEST split is sealed (PROTOCOL
+    §8) until the ledger holds the final-result: a ValueError naming the split says so."""
+    finals = [r for r in existing if r["kind"] == "final-result"]
+    if not finals:
+        raise ValueError(
+            f"split {split!r} is 2012 test weather, sealed (PROTOCOL §8): the report reads it only"
+            " from the final's files, once the ledger holds the final-result row, and it has none"
+        )
+    return finals[0], ledger._find(existing, finals[0]["final-registered"], "final-registered")
+
+
+def _ordered(mine: list[dict], split: str, who: str, seasons: Path) -> list[dict]:
+    """mine, one run's rows of the final's seasons on split, in scenarios.SPLITS[split] order;
+    refused unless it holds each of the split's scenarios once."""
+    order = [_key(s) for s in scenarios.SPLITS[split]]
+    if sorted(_key(r) for r in mine) != sorted(order):
+        raise ValueError(
+            f"{seasons}: {who} has {len(mine)} rows on {split}, not its {len(order)} scenarios"
+            " once each"
+        )
+    at = {_key(r): r for r in mine}
+    return [at[k] for k in order]
+
+
+def _final_scores(split: str, existing: list[dict]) -> list[dict]:
+    """A TEST split's score rows, from the final's seasons.parquet only: the final's baselines in
+    envs.BASELINES order, then its learning arms by registration (ledger order) and arm
+    (registration order), runs by seed. label = arm = the name; a learning arm's ids are its
+    registration's, a baseline's null; crashed null (the final scores every season)."""
+    final, registered = _final(split, existing)
+    seasons = evaluate.FINAL_RESULTS / registered["row_id"] / "seasons.parquet"
+    if not seasons.is_file():
+        raise ValueError(
+            f"no {seasons}: a test split's scores come only from the final's files"
+            f" ({final['row_id']})"
+        )
+    frame = pd.read_parquet(seasons)
+    rows = frame[frame["split"] == split].to_dict("records")
+    order = scenarios.SPLITS[split]
+    out = []
+    for b in envs.BASELINES:
+        if b in registered["baselines"]:
+            mine = _ordered([r for r in rows if r["arm"] == b], split, b, seasons)
+            out += [
+                _record(season, s, split, label=b, arm=b)
+                for season, s in zip(mine, order, strict=True)
+            ]
+    arms = ledger.final_arms(registered, existing)
+    runs = {r["row_id"]: r for r in existing if r["kind"] == "run"}
+    for reg in existing:
+        if reg["kind"] != "registered":
+            continue
+        for name in (a["name"] for a in reg["arms"]):
+            mine = [runs[r] for r in arms.get(name, {}) if runs[r]["registered"] == reg["row_id"]]
+            if not mine:
+                continue
+            ids = _ids(reg, existing)
+            for run in sorted(mine, key=lambda r: r["seed"]):
+                who = f"{name} run {run['row_id']} (seed {run['seed']})"
+                got = _ordered([r for r in rows if r["run"] == run["row_id"]], split, who, seasons)
+                out += [
+                    _record(
+                        season,
+                        s,
+                        split,
+                        label=name,
+                        arm=name,
+                        **ids,
+                        run=run["row_id"],
+                        seed=run["seed"],
+                    )
+                    for season, s in zip(got, order, strict=True)
+                ]
+    return out
+
+
+def _frame(records: list[dict]) -> pd.DataFrame:
+    frame = pd.DataFrame(records, columns=list(COLUMNS))
+    return frame.astype({"issue": "Int64", "seed": "Int64", "crashed": "Int64"})
+
+
 def load_scores(split: str, *, ledger_path: Path = ledger.LEDGER) -> pd.DataFrame:
     """One row per label x run x scenario: baselines in envs.BASELINES order, then each registration
     on [split] with a result row, in ledger order, arms in registration order, runs by seed,
     scenarios in scenarios.SPLITS[split] order. Plays nothing: a run without selected.json is
-    refused."""
+    refused. A TEST split reads the final's seasons.parquet (_final_scores), once the ledger holds
+    the final-result row."""
+    if split in scenarios.TEST:
+        return _frame(_final_scores(split, ledger.rows(path=ledger_path)))
     if split != "validation":
         raise ValueError(
-            f"split {split!r}: the report reads VALIDATION only; the test splits"
-            f" ({', '.join(scenarios.TEST)}) follow F1's final-result row"
+            f"split {split!r}: the report reads validation, and the TEST splits"
+            f" ({', '.join(scenarios.TEST)}) from the final's files"
         )
     baselines = _baselines(split)
     existing = ledger.rows(path=ledger_path)
@@ -140,28 +255,11 @@ def load_scores(split: str, *, ledger_path: Path = ledger.LEDGER) -> pd.DataFram
         if reg["kind"] != "registered" or reg["scenarios"] != [split]:
             continue
         reg_id = reg["row_id"]
-        results = [r for r in existing if r["kind"] == "result" and r["registered"] == reg_id]
-        if not results:
+        ids = _ids(reg, existing)
+        if ids is None:
             print(f"skipped {reg_id}: no result row yet")
             continue
-        if len(results) > 1:
-            raise ValueError(f"{reg_id} has {len(results)} result rows; the table shows one")
-        result = results[0]["row_id"]
-        decisions = [r for r in existing if r["kind"] == "decision" and r["result"] == result]
-        if len(decisions) > 1:
-            raise ValueError(
-                f"result {result} has {len(decisions)} decision rows"
-                f" ({', '.join(d['row_id'] for d in decisions)}); the table shows one"
-            )
-        ids = {
-            "issue": reg["issue"],
-            "registered": reg_id,
-            "result": result,
-            "decision": f"{decisions[0]['decision']} {decisions[0]['row_id']}"
-            if decisions
-            else None,
-            "protocol": reg["fingerprints"]["docs/PROTOCOL.md"][:8],
-        }
+        result = ids["result"]
         _, runs = selection._registration(reg_id, ledger_path)
         ends = ledger._run_ends(existing, reg_id)
         for arm in reg["arms"]:
@@ -213,9 +311,7 @@ def load_scores(split: str, *, ledger_path: Path = ledger.LEDGER) -> pd.DataFram
                     )
                     for season, s in zip(seasons, scenarios.SPLITS[split], strict=True)
                 ]
-    records = [row for rows in baselines.values() for row in rows] + arms
-    frame = pd.DataFrame(records, columns=list(COLUMNS))
-    return frame.astype({"issue": "Int64", "seed": "Int64", "crashed": "Int64"})
+    return _frame([row for rows in baselines.values() for row in rows] + arms)
 
 
 def _matrix(rows: pd.DataFrame, key: str) -> np.ndarray:
@@ -275,30 +371,50 @@ def summarize(scores: pd.DataFrame) -> pd.DataFrame:
     return pd.DataFrame(out).astype({"crashed": "Int64"})
 
 
+def _rebuilt(rows: pd.DataFrame, numbers: dict, keys: tuple, where: str) -> int:
+    """Each key's recorded (iqm, ci_low, ci_high), the first key's at numbers' top level and the
+    others' in numbers["guards"], equal stats.iqm_ci on rows within 1e-12, or ValueError starting
+    with where. Returns the number of keys checked."""
+    for key in keys:
+        recorded = numbers if key == keys[0] else numbers["guards"][key]
+        got = stats.iqm_ci(_matrix(rows, key))
+        for field, value in zip(("iqm", "ci_low", "ci_high"), got, strict=True):
+            if recorded[field] is None or abs(recorded[field] - value) > 1e-12:
+                raise ValueError(
+                    f"{where} {key} {field} is {recorded[field]!r} in the ledger but {value!r}"
+                    " from the scores"
+                )
+    return len(keys)
+
+
 def check_ledger(scores: pd.DataFrame, *, ledger_path: Path) -> int:
     """Every result row of a registration in the scores, rebuilt: its per_arm primary and each guard
     (iqm, ci_low, ci_high) equal stats.iqm_ci on the scores within 1e-12, or ValueError naming the
-    result row, arm and key. Returns the number of (arm, key) pairs checked."""
+    result row, arm and key. A TEST split's scores rebuild the final-result row's per_split[split]
+    instead: every arm's evaluate.FINAL_PRIMARY and each guard, or ValueError naming the
+    final-result row, split, arm and key. Returns the number of (arm, key) pairs checked."""
     existing = ledger.rows(path=ledger_path)
+    split = scores["split"].iloc[0]
+    checked = 0
+    if split in scenarios.TEST:
+        final, _ = _final(split, existing)
+        for arm, numbers in final["per_split"][split].items():
+            where = f"{final['row_id']}: per_split[{split!r}][{arm!r}]"
+            rows = scores[scores["arm"] == arm]
+            if rows.empty:
+                raise ValueError(f"{where} has no score rows to rebuild it from")
+            checked += _rebuilt(rows, numbers, (evaluate.FINAL_PRIMARY, *numbers["guards"]), where)
+        return checked
     regs = {r["row_id"]: r for r in existing if r["kind"] == "registered"}
     mine = set(scores["registered"].dropna())
-    checked = 0
     for result in existing:
         if result["kind"] != "result" or result["registered"] not in mine:
             continue
         reg = regs[result["registered"]]
         for arm, numbers in result["per_arm"].items():
             rows = scores[(scores["registered"] == reg["row_id"]) & (scores["arm"] == arm)]
-            for key in (reg["primary"], *reg["guards"]):
-                recorded = numbers if key == reg["primary"] else numbers["guards"][key]
-                got = stats.iqm_ci(_matrix(rows, key))
-                for field, value in zip(("iqm", "ci_low", "ci_high"), got, strict=True):
-                    if recorded[field] is None or abs(recorded[field] - value) > 1e-12:
-                        raise ValueError(
-                            f"result {result['row_id']}: per_arm[{arm!r}] {key} {field} is"
-                            f" {recorded[field]!r} in the ledger but {value!r} from the scores"
-                        )
-                checked += 1
+            where = f"result {result['row_id']}: per_arm[{arm!r}]"
+            checked += _rebuilt(rows, numbers, (reg["primary"], *reg["guards"]), where)
     return checked
 
 
@@ -312,12 +428,20 @@ def _ci(row: dict, prefix: str, digits: int) -> str:
     return f"{iqm:.{digits}f} [{lo:.{digits}f}, {hi:.{digits}f}]"
 
 
-def _markdown(summary: pd.DataFrame, split: str) -> str:
-    """summary.md: the command, a legend, then a pipe table with one row per label."""
+def _markdown(summary: pd.DataFrame, split: str, final: tuple[dict, dict] | None = None) -> str:
+    """summary.md: the command and its source (a TEST split's: the final's seasons.parquet, by its
+    repo path, and the final-result row, from final = _final's pair), a legend, then a pipe table
+    with one row per label."""
+    source = "the ledger, the runs' selected.json and evaluate's baseline parquets"
+    if final is not None:
+        result, registered = final
+        source = (
+            f"control/results/final/{registered['row_id']}/seasons.parquet, checked against"
+            f" {result['row_id']} ({SCORED_ONCE})"
+        )
     lines = [
         f"Made by `uv run python -m greenleaf_control.report --split {split}` (in control/) from"
-        " the ledger, the runs' selected.json and evaluate's baseline parquets; every number is in"
-        " summary.csv, at full precision.",
+        f" {source}; every number is in summary.csv, at full precision.",
         "",
         "IQM [95% stratified-bootstrap CI] over each row's runs x seasons. Profit and gain in"
         " EUR/m², hours in h, yield in kg/m². rb_tuned like-for-like: rb_tuned's one-run row"
@@ -363,9 +487,16 @@ def _markdown(summary: pd.DataFrame, split: str) -> str:
     return "\n".join(lines) + "\n"
 
 
+def _title(split: str, title: str) -> dict:
+    """viz's title= for a TEST split's figure: title, the split and SCORED_ONCE. Nothing on
+    validation, so viz draws its own."""
+    return {"title": f"{title} · {split}, {SCORED_ONCE}"} if split in scenarios.TEST else {}
+
+
 def figures(scores: pd.DataFrame, summary: pd.DataFrame, out_dir: Path) -> None:
     """out_dir/{per_scenario, profiles, tradeoff}.png, drawn by viz from the scores and the summary
-    (PROTOCOL §6), each with a footer naming the command:
+    (PROTOCOL §6), each with a footer naming the command (on a TEST split, SCORED_ONCE on a second
+    footer line, and in each title with the split):
     - per_scenario: every label's raw runs x scenarios profit and total violation hours, the
       scenarios labelled `<location> day <start_day>`;
     - profiles: every label but rb_tuned, paired with rb_tuned's same season: profit gain (arm -
@@ -382,6 +513,8 @@ def figures(scores: pd.DataFrame, summary: pd.DataFrame, out_dir: Path) -> None:
         f"source: python -m greenleaf_control.report --split {split}; derived from"
         " summary.csv / scores.parquet"
     )
+    if split in scenarios.TEST:  # its own line: on the first, the 8 in wide tradeoff cuts it off
+        footer += f"\n{SCORED_ONCE}"
     arm = dict(zip(scores["label"], scores["arm"], strict=True))
     status = {}
     for label, decision in zip(summary["label"], summary["decision"].fillna(""), strict=True):
@@ -392,7 +525,13 @@ def figures(scores: pd.DataFrame, summary: pd.DataFrame, out_dir: Path) -> None:
     profit = {label: _matrix(r, "profit_eur_m2") for label, r in rows.items()}
     hours = {label: _matrix(r, "viol_hours_total") for label, r in rows.items()}
     panels = {"profit [€/m²]": profit, "total violation hours [h]": hours}
-    viz.per_scenario(panels, seasons, out_dir / "per_scenario.png", footer=footer)
+    viz.per_scenario(
+        panels,
+        seasons,
+        out_dir / "per_scenario.png",
+        footer=footer,
+        **_title(split, viz.PER_SCENARIO_TITLE),
+    )
     arms = [label for label in rows if label != BASELINE]
     gains = {
         "profit gain over rb_tuned's same season [€/m²]": {
@@ -403,7 +542,13 @@ def figures(scores: pd.DataFrame, summary: pd.DataFrame, out_dir: Path) -> None:
         },
     }
     adopted = tuple(label for label in arms if status[label] == "adopted")
-    viz.profiles(gains, out_dir / "profiles.png", highlight=adopted, footer=footer)
+    viz.profiles(
+        gains,
+        out_dir / "profiles.png",
+        highlight=adopted,
+        footer=footer,
+        **_title(split, viz.PROFILES_TITLE),
+    )
     points = [
         {
             "label": r["label"],
@@ -420,6 +565,7 @@ def figures(scores: pd.DataFrame, summary: pd.DataFrame, out_dir: Path) -> None:
         xlabel="violation hours saved vs rb_tuned [h]",
         ylabel="profit gain over rb_tuned [€/m²]",
         footer=footer,
+        **_title(split, viz.TRADEOFF_TITLE),
     )
 
 
@@ -427,9 +573,9 @@ def main(argv: list[str] | None = None, *, ledger_path: Path = ledger.LEDGER) ->
     p = argparse.ArgumentParser(prog="python -m greenleaf_control.report")
     p.add_argument(
         "--split",
-        choices=["validation"],
+        choices=["validation", *scenarios.TEST],
         required=True,
-        help=f"VALIDATION only; the test splits ({', '.join(scenarios.TEST)}) follow F1",
+        help="validation, or a 2012 test split once the ledger holds the final-result row",
     )
     p.add_argument("--out", type=Path, default=ANALYSIS, help="default control/results/analysis")
     args = p.parse_args(argv)
@@ -437,7 +583,10 @@ def main(argv: list[str] | None = None, *, ledger_path: Path = ledger.LEDGER) ->
     scores = load_scores(args.split, ledger_path=ledger_path)
     pairs = check_ledger(scores, ledger_path=ledger_path)
     summary = summarize(scores)
-    table = _markdown(summary, args.split)
+    final = None
+    if args.split in scenarios.TEST:
+        final = _final(args.split, ledger.rows(path=ledger_path))
+    table = _markdown(summary, args.split, final)
 
     out = args.out / args.split
     out.mkdir(parents=True, exist_ok=True)

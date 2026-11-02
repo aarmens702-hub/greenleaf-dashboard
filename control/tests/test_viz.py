@@ -45,6 +45,12 @@ The fix round on #47 (the orchestrator's rules) adds:
   on that row's edge plus a text giving their true lo and hi, never dots;
 - viz.BASELINES, its own copy of envs.BASELINES (viz can't import envs), kept equal to it.
 
+#53 (A1c, the orchestrator's scope note) adds one keyword to the three report figures: title,
+keyword-only, defaulting to today's exact title (per_scenario "Every run on every season",
+profiles "Performance profiles", tradeoff "Trade-off: IQM and 95% CI per label"), so a caller
+that passes none (the validation report) draws what it drew before; given, it is the figure's
+suptitle in its place (the report names a test split in it).
+
 A refused input (a frame without 6 actuators, a run dir without exactly one event file, a
 per_scenario array whose columns aren't the scenarios, or nothing to draw: no run dirs, no points,
 no panels, a header-only lambdas.csv) is a ValueError, and no PNG is written.
@@ -492,6 +498,37 @@ def test_the_report_figures_print_the_footer_they_are_given(plot, tmp_path):
     fig = plot_fn(*_args(plot, tmp_path), out, footer=FOOTER)
     _assert_png(out)
     assert any(FOOTER in text for text in _texts(fig)), _texts(fig)
+
+
+# The report figures' titles before #53, their title= defaults
+TITLES = {
+    "per_scenario": "Every run on every season",
+    "profiles": "Performance profiles",
+    "tradeoff": "Trade-off: IQM and 95% CI per label",
+}
+
+
+@pytest.mark.parametrize("plot", list(TITLES))
+def test_the_report_figures_take_a_title_keyword_defaulting_to_todays(plot, tmp_path):
+    """title is keyword-only and defaults to today's exact title: with none given, the figure's
+    suptitle is today's (validation's figures don't change). Given, it is the suptitle instead,
+    drawn once, and today's isn't drawn beside it (the report's test-split title starts with
+    today's, so "instead" is checked on the whole text)."""
+    plot_fn = _viz(plot)
+    title = inspect.signature(plot_fn).parameters.get("title")
+    assert title is not None, f"viz.{plot} takes no title keyword yet (#53)"
+    assert (title.kind, title.default) == (inspect.Parameter.KEYWORD_ONLY, TITLES[plot])
+    plain = plot_fn(*_args(plot, tmp_path), tmp_path / "plain.png")
+    assert plain.get_suptitle() == TITLES[plot]
+
+    named = f"{TITLES[plot]} · london_2012, 2012 test weather, scored once"
+    out = tmp_path / f"{plot}.png"
+    fig = plot_fn(*_args(plot, tmp_path), out, title=named)
+    _assert_png(out)
+    assert fig.get_suptitle() == named
+    texts = [t.get_text() for t in fig.findobj(Text)]
+    assert texts.count(named) == 1, texts
+    assert TITLES[plot] not in texts, texts
 
 
 def _imported_modules(path: Path) -> set[str]:

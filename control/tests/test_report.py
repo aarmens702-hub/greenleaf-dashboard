@@ -3,9 +3,9 @@ validation [--out DIR]` rebuilds every arm's per-season scores from the ledger, 
 selected.json files and evaluate's baseline parquets, checks them against the ledger's result rows,
 and only then writes <out>/validation/{scores.parquet, summary.csv, summary.md}.
 
-With the orchestrator's defaults on the issue: A1a is VALIDATION only (a test split is an argparse
-error; the 2012 path is a follow-up after F1), and load_scores carries a per-label crashed column,
-null for a baseline. As these tests pin it:
+With the orchestrator's defaults on the issue: A1a was VALIDATION only (a test split was an
+argparse error; #53 opens the 2012 path once the ledger has a final-result row, below), and
+load_scores carries a per-label crashed column, null for a baseline. As these tests pin it:
 - ANALYSIS = control/results/analysis, BASELINE = "rb_tuned", METRICS = (profit_eur_m2,
   viol_hours_total, viol_hours_co2, viol_hours_temp, viol_hours_rh, yield_kg_m2, paper_return).
 - load_scores(split, *, ledger_path=ledger.LEDGER): one row per label x run x scenario.
@@ -28,7 +28,8 @@ null for a baseline. As these tests pin it:
   - An arm of method rb_tuned (E1) is not a second row: its registered, result, decision and
     protocol go on the rb_tuned baseline row. A second such arm is refused, as is one whose run
     crashed.
-  - A test split is refused with a ValueError before any parquet is read.
+  - A test split is refused with a ValueError naming the seal, before any parquet is read, while
+    the ledger has no final-result row (#53); train_eval and paper are always refused.
 - summarize(scores): one row per label (a `label` column), in the scores' order, each statistic on
   the label's runs (by seed) x scenarios array: n_runs, crashed, invalid_episodes; <m>_{iqm,lo,hi}
   from stats.iqm_ci for m in METRICS; viol_hours_sum_iqm (the sum of the 3 per-constraint IQMs);
@@ -64,14 +65,36 @@ null for a baseline. As these tests pin it:
   is the labels whose status is "adopted"; a learning label under 5 runs has "(n=<k>, no claim)"
   in its drawn tradeoff label.
 
-Offline: every ledger, run dir, parquet and output is under tmp_path; selection.RESULTS is patched
-to tmp_path in every test that loads; every --out is under tmp_path. Nothing plays a season:
+#53 (A1c) opens the three 2012 TEST splits, read only from the final's files (the orchestrator's
+defaults on the issue and its scope note):
+- --split takes validation and the TEST splits. A test split is refused (a ValueError naming the
+  split and the seal) until the ledger holds a final-result row, before any parquet is read.
+- load_scores(<test split>) reads evaluate.FINAL_RESULTS/<the final-registered row the
+  final-result names>/seasons.parquet (#43's columns: arm, run, seed, checkpoint, split, location,
+  growth_year, start_day, season_length, then the season's keys), keeps that split's rows and
+  builds validation's columns: label = arm = the learning arm's or baseline's name; a learning
+  arm's issue, registered, result, decision and protocol as on validation, its run and seed from
+  its run rows; crashed null; a baseline's ids all null. Order: baselines in envs.BASELINES order,
+  then registrations in ledger order, arms in registration order, runs by seed, scenarios in
+  scenarios.SPLITS order. A missing seasons.parquet, or a registered run or baseline without
+  exactly the split's 8 seasons, is a ValueError naming it.
+- check_ledger(<test split's scores>) rebuilds every arm's final-result per_split[split] entry
+  (the primary and each guard: iqm, ci_low, ci_high) with stats.iqm_ci within 1e-12, else a
+  ValueError naming the final-result row, split, arm and key; it returns the (arm, key) count.
+- summarize and figures run unchanged; the footer adds "2012 test weather, scored once", each
+  figure's title (viz's title=) names the split and it, and summary.md's first line names the
+  final's seasons.parquet, the final-result row and it. Validation's output is unchanged.
+
+Offline: every ledger, run dir, parquet and output is under tmp_path; selection.RESULTS and
+evaluate.FINAL_RESULTS are patched to tmp_path in every test that loads (the real
+control/results/final is never read); every --out is under tmp_path. Nothing plays a season:
 evaluate.run_policy and run_rb, envs.run_baseline, make_raw_env and make_env,
 train.build_vec_env, rule_based.load_rb_params and selection.select_checkpoint raise if called. The
 last test checks the real ledger and control/results/ are as they were when this module was
 collected. No 2012 weather is opened.
 """
 
+import functools
 import importlib
 import importlib.util
 import inspect
@@ -486,11 +509,13 @@ def _trip(monkeypatch) -> None:
 
 def _report(monkeypatch, tmp_path: Path):
     """(report, results): selection.RESULTS patched to tmp_path/results/validation (made here),
-    and every season-playing function tripped."""
+    evaluate.FINAL_RESULTS to tmp_path/results/final (#53; not made), and every season-playing
+    function tripped."""
     report = _module()
     results = tmp_path / "results" / "validation"
     results.mkdir(parents=True)
     monkeypatch.setattr(selection, "RESULTS", results)
+    monkeypatch.setattr(evaluate, "FINAL_RESULTS", tmp_path / "results" / "final")
     _trip(monkeypatch)
     return report, results
 
@@ -1179,33 +1204,6 @@ def test_main_refuses_before_writing_anything(case, names, tmp_path, monkeypatch
     assert _tree(tmp_path) == before
 
 
-@pytest.mark.parametrize("split", list(scenarios.TEST))
-def test_a_test_split_is_refused_before_any_parquet_is_read(split, tmp_path, monkeypatch):
-    """A1a is VALIDATION only (the 2012 path follows F1): `--split <test split>` is an argparse
-    error (SystemExit 2), and load_scores(<test split>) a ValueError naming it. Neither reads a
-    parquet (a spy on pd.read_parquet) or makes --out."""
-    report, results = _report(monkeypatch, tmp_path)
-    path = tmp_path / "ledger.jsonl"
-    _world(path, tmp_path, results, seeds=(0,))
-    reads = []
-    real = pd.read_parquet
-
-    def read_parquet(*args, **kwargs):
-        reads.append(args)
-        return real(*args, **kwargs)
-
-    monkeypatch.setattr(pd, "read_parquet", read_parquet)
-    out = tmp_path / "analysis"
-
-    with pytest.raises(SystemExit) as e:
-        report.main(["--split", split, "--out", str(out)], ledger_path=path)
-    assert e.value.code == 2
-    with pytest.raises(ValueError, match=split):
-        report.load_scores(split, ledger_path=path)
-    assert reads == []
-    assert not out.exists()
-
-
 # --- figures (#47) -----------------------------------------------------------------------------
 
 GAIN_KEY = "profit gain over rb_tuned's same season [€/m²]"
@@ -1473,6 +1471,563 @@ def test_a_note_call_drops_one_arm_of_an_adopted_registration(tmp_path, monkeypa
     status = {p["label"]: p.get("status") for p in calls["tradeoff"][0]["points"]}
     assert status == {"zero_controls": None, "rb_tuned": None, alpha: "adopted", bravo: "dropped"}
     assert list(calls["profiles"][0]["highlight"]) == [alpha]
+
+
+# --- The 2012 test splits, from the final's files (#53) ------------------------------------------
+
+CHECKPOINT = "500000"
+# The final's learning arms, name -> (its registration's issue, method, seeds), in ledger order:
+# zulu's #36 is registered before alpha's #39, though sorted() (evaluate's parquet order) and the
+# final-registered row's checkpoints both put alpha first.
+FINAL_ARMS = {"zulu": (36, "ppo", (0, 1)), "alpha": (39, "residual_lag", (0, 1, 2))}
+# The final-registered row's baselines, deliberately not in envs.BASELINES order.
+FINAL_BASELINES = ("rb_tuned", "rb_default")
+# Every TEST split has 8 scenarios: 2 baselines x 1 run + zulu's 2 + alpha's 3 = 7 runs x 8 = 56
+# score rows; 4 arms x (the primary + 6 guards) = 28 (arm, key) pairs.
+FINAL_ROWS, FINAL_PAIRS = 56, 28
+SCORED_ONCE = "2012 test weather, scored once"
+# The report figures' titles before #53: viz's title= defaults, drawn on validation.
+TITLES = {
+    "per_scenario": "Every run on every season",
+    "profiles": "Performance profiles",
+    "tradeoff": "Trade-off: IQM and 95% CI per label",
+}
+VALIDATION_FOOTER = (
+    "source: python -m greenleaf_control.report --split validation; derived from"
+    " summary.csv / scores.parquet"
+)
+VALIDATION_FIRST_LINE = (
+    "Made by `uv run python -m greenleaf_control.report --split validation` (in control/) from"
+    " the ledger, the runs' selected.json and evaluate's baseline parquets; every number is in"
+    " summary.csv, at full precision."
+)
+
+
+def _final_season(split: str, arm: str, seed: int | None, j: int) -> dict:
+    """arm's season on split's j-th scenario (seed None for a baseline's one run). Split i (its
+    index in ledger.TEST_SPLITS) adds 100 i to profit and 10 i to each violation-hours key, so a
+    row read from another split shows; arms and seeds differ too. alpha's seed 2 last season is
+    invalid (a solver failure). Profits, n = 8 seed + j: zulu 100 i + n + 1 (1..16 over its two
+    seeds); alpha 100 i + n / 2 - 3; rb_tuned 100 i + j - 3; rb_default 100 i - 2 j."""
+    i = ledger.TEST_SPLITS.index(split)
+    k = ("zulu", "alpha", "rb_tuned", "rb_default").index(arm)
+    n = 8 * (seed or 0) + j
+    profit = {"zulu": n + 1, "alpha": n / 2 - 3, "rb_tuned": j - 3, "rb_default": -2 * j}[arm]
+    return _season(
+        valid=(arm, seed, j) != ("alpha", 2, 7),
+        profit_eur_m2=float(100 * i + profit),
+        viol_hours_co2=float(10 * i + k + j % 3),
+        viol_hours_temp=float(10 * i + 2 * k + n % 5),
+        viol_hours_rh=float(10 * i + 3 * k + 7 * n % 11),
+        yield_kg_m2=20.0 + i + k + 0.25 * n,
+        paper_return=i - k + 0.125 * n,
+    )
+
+
+def _final_runs(split: str, arm: str) -> list[list[dict]]:
+    """arm's seasons on split: its runs by seed (a baseline has one), scenarios in split order."""
+    seeds = FINAL_ARMS[arm][2] if arm in FINAL_ARMS else (None,)
+    return [[_final_season(split, arm, s, j) for j in range(8)] for s in seeds]
+
+
+def _final_array(split: str, arm: str, key: str) -> np.ndarray:
+    return np.array([[s[key] for s in run] for run in _final_runs(split, arm)], dtype=np.float64)
+
+
+@functools.cache
+def _final_numbers(split: str) -> str:
+    """per_split[split] as evaluate._final computes it, but "scored", as JSON (each caller loads
+    its own copy): per arm (learning arms sorted, then FINAL_BASELINES) stats.iqm_ci of its runs
+    (by seed) x scenarios (split order) array of evaluate.FINAL_PRIMARY and each FINAL_GUARDS key,
+    float64; invalid_episodes; prob_improvement on the primary against rb_tuned (null for
+    rb_tuned). Cached: 28 bootstraps, about 2 s a split."""
+
+    def ci(arm: str, key: str) -> dict:
+        iqm, low, high = stats.iqm_ci(_final_array(split, arm, key))
+        return {"iqm": iqm, "ci_low": low, "ci_high": high}
+
+    rb = _final_array(split, "rb_tuned", evaluate.FINAL_PRIMARY)
+    numbers = {}
+    for arm in [*sorted(FINAL_ARMS), *FINAL_BASELINES]:
+        primary = _final_array(split, arm, evaluate.FINAL_PRIMARY)
+        numbers[arm] = {
+            **ci(arm, evaluate.FINAL_PRIMARY),
+            "guards": {g: ci(arm, g) for g in evaluate.FINAL_GUARDS},
+            "invalid_episodes": sum(not s["valid"] for run in _final_runs(split, arm) for s in run),
+            "prob_improvement": None if arm == "rb_tuned" else stats.prob_improvement(primary, rb),
+        }
+    return json.dumps(numbers)
+
+
+def _placeholder(arm: str) -> dict:
+    """Another split's per_split entry: zeros, which no split's scores rebuild (only the keys are
+    checked by the ledger), so a check that reads the wrong split refuses."""
+    zero = {"iqm": 0.0, "ci_low": 0.0, "ci_high": 0.0}
+    return {
+        **zero,
+        "guards": {g: dict(zero) for g in evaluate.FINAL_GUARDS},
+        "invalid_episodes": 0,
+        "prob_improvement": None if arm == "rb_tuned" else 0.5,
+    }
+
+
+def _final_world(
+    path: Path, root: Path, results: Path, split: str, *, result: bool = True, off=None
+) -> dict:
+    """A recorded final, on top of validation's rb_tuned parquet (RB, which a test split never
+    reads):
+    - #36: arms zulu (ppo) and xray (residual), seeds 0 and 1, each run's dir holding a decoy
+      selected.json; its result (validation placeholders, 1.0 everywhere, which no test split's
+      scores rebuild, so running validation's check on a test split refuses), selected
+      {every run: CHECKPOINT}, and an adopted decision;
+    - #39: arm alpha (residual_lag), seeds 0-2, the same; its result and no decision;
+    - the final-registered row (#45): zulu's and alpha's runs (not xray's) at CHECKPOINT, alpha's
+      first and each arm's seeds descending; baselines FINAL_BASELINES;
+    - evaluate.FINAL_RESULTS/<final-registered>/seasons.parquet as evaluate._final writes it: per
+      TEST split, per scenario, the learning arms sorted, each arm's runs by seed, then the
+      baselines in the row's order; arm, run, seed, checkpoint, split, the scenario,
+      season_length, then _final_season's keys;
+    - unless result is False, the final-result row: per_split[split] _final_numbers' exact
+      numbers, the other splits _placeholder's, each arm's scored its registered checkpoints ({}
+      for a baseline). off = (arm, key, field) adds 1e-9 to one number of per_split[split].
+    Returns the rows' ids, the parquet's path ("seasons") and its rows ("rows")."""
+    assert evaluate.FINAL_RESULTS.is_relative_to(root), "evaluate.FINAL_RESULTS isn't patched"
+    _baseline(results, "rb_tuned", RB)
+    w = {"runs": {}, "results": {}}
+    one = {"iqm": 1.0, "ci_low": 1.0, "ci_high": 1.0}
+    for name, issue, arms, decision in (
+        ("r1", 36, (("zulu", "ppo"), ("xray", "residual")), "adopted"),
+        ("r2", 39, (("alpha", "residual_lag"),), None),
+    ):
+        seeds = FINAL_ARMS[arms[0][0]][2]
+        reg = _register(path, issue=issue, arms=arms, seeds=seeds)
+        selected = {}
+        for arm, method in arms:
+            for s in sorted(seeds, reverse=True):
+                run, _ = _run(path, root, reg, arm, s, method=method, seasons=_decoy())
+                w["runs"][arm, s] = run
+                selected[run["row_id"]] = CHECKPOINT
+        per_arm = {
+            arm: {**one, "guards": {g: one for g in GUARDS}, "invalid_episodes": 0}
+            for arm, _ in arms
+        }
+        res = ledger.record_result(
+            registered=reg["row_id"], per_arm=per_arm, selected=selected, path=path
+        )
+        w[name] = reg
+        w["results"].update({arm: res["row_id"] for arm, _ in arms})
+        if decision:
+            w["decision"] = ledger.decide(
+                result=res["row_id"], decision=decision, note=name, path=path
+            )["row_id"]
+    scored = {
+        arm: {w["runs"][arm, s]["row_id"]: CHECKPOINT for s in sorted(seeds, reverse=True)}
+        for arm, (_, _, seeds) in sorted(FINAL_ARMS.items())
+    }
+    freg = ledger.final_register(
+        issue=45,
+        checkpoints={run: c for runs in scored.values() for run, c in runs.items()},
+        baselines=list(FINAL_BASELINES),
+        approved_by="Aarmen",
+        path=path,
+    )
+    rows = []
+    for sp in ledger.TEST_SPLITS:
+        for j, s in enumerate(scenarios.TEST[sp]):
+            where = {"split": sp, **s, "season_length": 60}
+            for arm in sorted(FINAL_ARMS):
+                for seed in FINAL_ARMS[arm][2]:
+                    run = w["runs"][arm, seed]["row_id"]
+                    identity = {"arm": arm, "run": run, "seed": seed, "checkpoint": CHECKPOINT}
+                    rows.append({**identity, **where, **_final_season(sp, arm, seed, j)})
+            for b in FINAL_BASELINES:
+                identity = {"arm": b, "run": None, "seed": None, "checkpoint": None}
+                rows.append({**identity, **where, **_final_season(sp, b, None, j)})
+    seasons = evaluate.FINAL_RESULTS / freg["row_id"] / "seasons.parquet"
+    seasons.parent.mkdir(parents=True)
+    pd.DataFrame(rows).to_parquet(seasons)
+    w.update(freg=freg, seasons=seasons, rows=rows, final_result=None)
+    if result:
+        per_split = {
+            sp: json.loads(_final_numbers(sp))
+            if sp == split
+            else {arm: _placeholder(arm) for arm in [*FINAL_ARMS, *FINAL_BASELINES]}
+            for sp in ledger.TEST_SPLITS
+        }
+        for numbers in per_split.values():
+            for arm, entry in numbers.items():
+                entry["scored"] = scored.get(arm, {})
+        if off is not None:
+            arm, key, field = off
+            entry = per_split[split][arm]
+            (entry if key == evaluate.FINAL_PRIMARY else entry["guards"][key])[field] += 1e-9
+        fres = ledger.final_result(final_registered=freg["row_id"], per_split=per_split, path=path)
+        w["final_result"] = fres["row_id"]
+    return w
+
+
+def _read_spy(monkeypatch) -> list:
+    """The path of every pd.read_parquet call, from now on (it still reads)."""
+    reads = []
+    real = pd.read_parquet
+
+    def read_parquet(*args, **kwargs):
+        reads.append(args[0] if args else kwargs.get("path"))
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(pd, "read_parquet", read_parquet)
+    return reads
+
+
+def _accepted(report, split: str, path: Path) -> pd.DataFrame:
+    """load_scores(split), where the ledger holds a final-result: a refusal fails the test (an
+    assertion, not an error)."""
+    try:
+        return report.load_scores(split, ledger_path=path)
+    except ValueError as e:
+        pytest.fail(f"load_scores({split!r}) refused a final with its final-result row: {e}")
+
+
+def _ran(report, argv: list[str], path: Path) -> None:
+    """main(argv) returns 0: a refusal (a ValueError or a parser exit) fails the test."""
+    try:
+        code = report.main(argv, ledger_path=path)
+    except (ValueError, SystemExit) as e:
+        pytest.fail(f"main {argv} refused: {e!r}")
+    assert code == 0
+
+
+@pytest.mark.parametrize("split", list(scenarios.TEST))
+def test_a_test_split_is_refused_without_a_final_result_row_before_any_parquet_is_read(
+    split, tmp_path, monkeypatch, capsys
+):
+    """Rewritten by #53, which reverses A1a's "a test split is always refused (an argparse
+    error)": a test split is now refused only while the ledger has no final-result row (PROTOCOL
+    §8, the seal). The ledger has everything else (_final_world without its final-result:
+    registrations, runs, run-ends, results, a decision, the final-registered row) and
+    seasons.parquet is on disk, as between `evaluate --final` and `ledger final-result`.
+    load_scores(<split>) is a ValueError naming the split and the seal; main --split <split>
+    refuses naming both too. Neither reads a parquet (a spy on pd.read_parquet: not the final's
+    seasons.parquet, not validation's rb_tuned one), makes --out or writes anything."""
+    report, results = _report(monkeypatch, tmp_path)
+    path = tmp_path / "ledger.jsonl"
+    _final_world(path, tmp_path, results, split, result=False)
+    reads = _read_spy(monkeypatch)
+    out = tmp_path / "analysis"
+    before = _tree(tmp_path)
+
+    with pytest.raises(ValueError) as e:
+        report.load_scores(split, ledger_path=path)
+    said = str(e.value)
+    assert split in said, said
+    assert "seal" in said.lower(), f"the refusal doesn't name the seal: {said!r}"
+    said = _refused(report, ["--split", split, "--out", str(out)], path, capsys)
+    assert split in said, said
+    assert "seal" in said.lower(), f"main's refusal doesn't name the seal: {said!r}"
+    assert reads == []
+    assert not out.exists()
+    assert _tree(tmp_path) == before
+
+
+@pytest.mark.parametrize("split", ["train_eval", "paper"])
+def test_train_eval_and_paper_stay_refused_with_a_final_result_row(
+    split, tmp_path, monkeypatch, capsys
+):
+    """Only the three TEST splits open with a final-result row: with a recorded final in the
+    ledger, load_scores(train_eval or paper) is still a ValueError naming the split, and main
+    --split <it> still refuses. Neither reads a parquet nor writes anything. A guard: it passes
+    before #53 too, and pins that the lift is the TEST splits' only."""
+    report, results = _report(monkeypatch, tmp_path)
+    path = tmp_path / "ledger.jsonl"
+    _final_world(path, tmp_path, results, "amsterdam_2012")
+    reads = _read_spy(monkeypatch)
+    out = tmp_path / "analysis"
+    before = _tree(tmp_path)
+
+    with pytest.raises(ValueError, match=split):
+        report.load_scores(split, ledger_path=path)
+    said = _refused(report, ["--split", split, "--out", str(out)], path, capsys)
+    assert split in said, said
+    assert reads == []
+    assert not out.exists()
+    assert _tree(tmp_path) == before
+
+
+@pytest.mark.parametrize("split", list(scenarios.TEST))
+def test_a_test_split_with_a_final_result_reads_only_the_finals_seasons(
+    split, tmp_path, monkeypatch
+):
+    """With a final-result row, load_scores(<split>) reads FINAL_RESULTS/<the final-registered row
+    the final-result names>/seasons.parquet (#43's shape), keeps that split's rows, and reads no
+    other parquet (not validation's rb_tuned one) and no selected.json (each run dir's is a decoy,
+    1000 in every metric).
+
+    Order (the orchestrator's default): rb_default then rb_tuned (envs.BASELINES order; the
+    final-registered row lists rb_tuned first), then zulu (#36, first in the ledger) then alpha
+    (#39), though the parquet and the final-registered row both put alpha first; each arm's runs
+    by seed (the row lists them descending), scenarios in scenarios.SPLITS[split] order. 8 + 8 +
+    2 x 8 + 3 x 8 = 56 rows; xray, #36's other arm, isn't in the final and has none.
+
+    Ids: label = arm = the name; zulu's and alpha's issue, registered, result, decision ("adopted
+    <row>" for zulu, null for alpha: #39 has no decision) and protocol (the first 8 hex of the
+    registration's PROTOCOL.md fingerprint) as on validation, run and seed from their run rows;
+    crashed null (the final has no crashes); a baseline's ids all null. Each row carries its
+    season's numbers from the parquet, viol_hours_total = co2 + temp + rh, and valid (alpha seed
+    2's last season False)."""
+    report, results = _report(monkeypatch, tmp_path)
+    path = tmp_path / "ledger.jsonl"
+    w = _final_world(path, tmp_path, results, split)
+    reads = _read_spy(monkeypatch)
+
+    scores = _accepted(report, split, path)
+
+    want_ids, want_seasons = [], []
+    for b in ("rb_default", "rb_tuned"):
+        want_ids += [(b, *[None] * 8)] * 8
+        want_seasons += _final_runs(split, b)[0]
+    for arm, reg, decision in (
+        ("zulu", w["r1"], f"adopted {w['decision']}"),
+        ("alpha", w["r2"], None),
+    ):
+        protocol = reg["fingerprints"]["docs/PROTOCOL.md"][:8]
+        for seed, run in zip(FINAL_ARMS[arm][2], _final_runs(split, arm), strict=True):
+            run_id = w["runs"][arm, seed]["row_id"]
+            ids = (reg["issue"], reg["row_id"], w["results"][arm], decision, protocol)
+            want_ids += [(arm, *ids, run_id, seed, None)] * 8
+            want_seasons += run
+    assert SCORE_COLUMNS <= set(scores.columns), SCORE_COLUMNS - set(scores.columns)
+    assert len(scores) == len(want_ids) == FINAL_ROWS
+    assert list(zip(*(_vals(scores[c]) for c in IDS), strict=True)) == want_ids
+    assert _vals(scores["arm"]) == [ids[0] for ids in want_ids]
+    assert "xray" not in set(scores["arm"])
+    assert scores["split"].tolist() == [split] * FINAL_ROWS
+    for col in ("location", "growth_year", "start_day"):
+        assert scores[col].tolist() == [s[col] for s in scenarios.SPLITS[split]] * 7, col
+    for key in (*ledger.RESULT_KEYS, "valid"):
+        assert scores[key].tolist() == [x[key] for x in want_seasons], key
+    assert scores["viol_hours_total"].tolist() == [sum(x[v] for v in VIOL) for x in want_seasons]
+    assert {Path(read).resolve() for read in reads} <= {w["seasons"].resolve()}, reads
+
+
+@pytest.mark.parametrize("split", list(scenarios.TEST))
+def test_check_ledger_rebuilds_a_test_splits_final_result_exactly(split, tmp_path, monkeypatch):
+    """check_ledger on a test split's scores rebuilds every arm's per_split[split] entry in the
+    final-result row: the primary (profit_eur_m2) and each of the 6 guards, iqm, ci_low and
+    ci_high, from stats.iqm_ci on the scores' runs (by seed) x scenarios array, exactly as
+    evaluate._final computed them. It returns 4 arms x 7 keys = 28 pairs. The other splits'
+    entries are placeholders, so reading the wrong split refuses, and so do the registrations'
+    validation result rows (1.0 everywhere), so running validation's check on a test split
+    refuses.
+
+    Known answer for the fixture: zulu's profits on split i are 100 i + 1..16; the IQM of 16
+    values trims int(0.25 x 16) = 4 from each end, the mean of 100 i + 5..12 = 100 i + 8.5
+    €/m²."""
+    report, results = _report(monkeypatch, tmp_path)
+    path = tmp_path / "ledger.jsonl"
+    _final_world(path, tmp_path, results, split)
+    i = ledger.TEST_SPLITS.index(split)
+    assert json.loads(_final_numbers(split))["zulu"]["iqm"] == 100 * i + 8.5
+    scores = _accepted(report, split, path)
+
+    assert report.check_ledger(scores, ledger_path=path) == FINAL_PAIRS
+
+
+@pytest.mark.parametrize(
+    ("split", "off"),
+    [
+        ("amsterdam_2012", ("zulu", "profit_eur_m2", "iqm")),
+        ("london_2012", ("rb_tuned", "viol_hours_rh", "ci_low")),
+        ("abbotsford_2012", ("alpha", "solver_failures", "ci_high")),
+    ],
+    ids=["primary-iqm", "baseline-guard-ci_low", "all-zero-guard-ci_high"],
+)
+def test_a_final_result_1e9_off_is_refused_naming_split_arm_and_key_with_nothing_written(
+    split, off, tmp_path, monkeypatch, capsys
+):
+    """One number of the final-result row's per_split[split] is 1e-9 off what stats.iqm_ci gives
+    on the scores: a learning arm's primary iqm, a baseline's guard ci_low, or alpha's
+    solver_failures ci_high (rebuilt (0, 0, 0): its one failure of 24 seasons is always
+    trimmed). main --split <split> refuses naming the final-result row, the split, the arm and
+    the key, never prints "matches the ledger", doesn't make --out and writes nothing."""
+    report, results = _report(monkeypatch, tmp_path)
+    path = tmp_path / "ledger.jsonl"
+    w = _final_world(path, tmp_path, results, split, off=off)
+    out = tmp_path / "analysis"
+    before = _tree(tmp_path)
+
+    said = _refused(report, ["--split", split, "--out", str(out)], path, capsys)
+
+    arm, key, _ = off
+    for name in (w["final_result"], split, arm, key):
+        assert name in said, f"the refusal doesn't name {name!r}: {said!r}"
+    assert "matches the ledger" not in said
+    assert not out.exists()
+    assert _tree(tmp_path) == before
+
+
+MISSING_SPLIT = "london_2012"
+# (case, names): case breaks _final_world's seasons.parquet on MISSING_SPLIT, its final-result row
+# as recorded; the refusal must name each of names.
+MISSING = [
+    pytest.param("no-parquet", ["seasons.parquet"], id="no-seasons-parquet"),
+    pytest.param("learning-season", ["zulu", MISSING_SPLIT], id="a-learning-run-short-a-season"),
+    pytest.param("baseline-season", ["rb_default", MISSING_SPLIT], id="a-baseline-short-a-season"),
+    pytest.param("whole-arm", ["alpha", MISSING_SPLIT], id="a-registered-arm-with-no-rows"),
+    pytest.param("twice", ["zulu", MISSING_SPLIT], id="a-season-twice"),
+]
+
+
+@pytest.mark.parametrize(("case", "names"), MISSING)
+def test_a_missing_season_or_seasons_parquet_is_a_valueerror(
+    case, names, tmp_path, monkeypatch, capsys
+):
+    """The final-result row is recorded but its files aren't whole: no seasons.parquet; zulu's
+    seed 1 without the split's 4th season; rb_default without its 6th; alpha (a registered arm)
+    with no rows on the split; zulu's seed 0 first season twice. load_scores is a ValueError
+    naming what's missing (the parquet, or the arm and the split), never a bare IndexError,
+    KeyError or FileNotFoundError; main refuses the same way and writes nothing."""
+    report, results = _report(monkeypatch, tmp_path)
+    path = tmp_path / "ledger.jsonl"
+    w = _final_world(path, tmp_path, results, MISSING_SPLIT)
+    days = [s["start_day"] for s in scenarios.TEST[MISSING_SPLIT]]
+    here = [r for r in w["rows"] if r["split"] == MISSING_SPLIT]
+    drop = {
+        "learning-season": [
+            r for r in here if (r["arm"], r["seed"], r["start_day"]) == ("zulu", 1, days[3])
+        ],
+        "baseline-season": [
+            r for r in here if (r["arm"], r["start_day"]) == ("rb_default", days[5])
+        ],
+        "whole-arm": [r for r in here if r["arm"] == "alpha"],
+    }.get(case, [])
+    rows = [r for r in w["rows"] if r not in drop]
+    if case == "twice":
+        rows.append(next(r for r in here if (r["arm"], r["seed"]) == ("zulu", 0)))
+    if case == "no-parquet":
+        w["seasons"].unlink()
+    else:
+        assert len(rows) != len(w["rows"]), case
+        pd.DataFrame(rows).to_parquet(w["seasons"])
+    out = tmp_path / "analysis"
+    before = _tree(tmp_path)
+
+    with pytest.raises(ValueError) as e:
+        report.load_scores(MISSING_SPLIT, ledger_path=path)
+    for name in names:
+        assert name in str(e.value), f"load_scores' refusal doesn't name {name!r}: {e.value}"
+    said = _refused(report, ["--split", MISSING_SPLIT, "--out", str(out)], path, capsys)
+    for name in names:
+        assert name in said, f"main's refusal doesn't name {name!r}: {said!r}"
+    assert "matches the ledger" not in said
+    assert not out.exists()
+    assert _tree(tmp_path) == before
+
+
+def test_main_writes_a_test_splits_tables_and_figures_with_its_footer_and_titles(
+    tmp_path, monkeypatch, capsys
+):
+    """main --split london_2012 --out DIR writes DIR/london_2012/ the six files (scores.parquet,
+    summary.csv, summary.md and the three PNGs) and prints `matches the ledger: 28 (arm, key)
+    pairs`. scores.parquet is load_scores' frame; the summary runs unchanged:
+
+    Known answers (london_2012 is split 1, so 100 is added to every profit):
+    - zulu's profits are 101..116: its IQM trims 4 from each end, the mean of 105..112 = 108.5
+      €/m²; 2 runs, so "n<5: no claim". alpha: 3 runs, 1 invalid season, "n<5: no claim".
+    - rb_tuned's profits are 97..104 over the 8 seasons; tiled to zulu's 2 runs and trimmed
+      (97, 97, 98, 98 and 103, 103, 104, 104 off) the mean of 99..102, each twice = 100.5 €/m².
+    - zulu's gain over rb_tuned's same season is 4 on every seed-0 season and 12 on every seed-1
+      one (n + 1 - (j - 3)): the IQM of eight 4s and eight 12s trimmed 4 each end is 8.0 €/m²,
+      and it wins all 16, so P(profit > rb_tuned) = 1.0.
+    - the baselines are "deterministic, 1 run"; labels rb_default, rb_tuned, zulu, alpha.
+
+    The figures (#53, the orchestrator's defaults): each footer keeps today's text with --split
+    london_2012 and adds "2012 test weather, scored once"; each title, passed as viz's title=,
+    starts with today's title and names london_2012 and "2012 test weather, scored once", and is
+    the figure's drawn suptitle. per_scenario's scenarios are `London day <start_day>` for the 8
+    test days. The tradeoff's statuses: zulu "adopted", alpha None (no decision), baselines None.
+    summary.md's first line names the command with --split london_2012, the final's
+    seasons.parquet, the final-result row and "2012 test weather, scored once"."""
+    report, results = _report(monkeypatch, tmp_path)
+    calls = _spies(monkeypatch)
+    split = "london_2012"
+    path = tmp_path / "ledger.jsonl"
+    w = _final_world(path, tmp_path, results, split)
+    out = tmp_path / "analysis"
+    capsys.readouterr()
+
+    _ran(report, ["--split", split, "--out", str(out)], path)
+
+    printed = capsys.readouterr().out
+    d = out / split
+    assert sorted(p.name for p in d.iterdir()) == [
+        "per_scenario.png",
+        "profiles.png",
+        "scores.parquet",
+        "summary.csv",
+        "summary.md",
+        "tradeoff.png",
+    ]
+    for name in FIGURES:
+        assert (d / f"{name}.png").read_bytes()[:8] == PNG, name
+    assert f"matches the ledger: {FINAL_PAIRS} (arm, key) pairs" in printed, printed
+    scores = pd.read_parquet(d / "scores.parquet").reset_index(drop=True)
+    want = report.load_scores(split, ledger_path=path).reset_index(drop=True)
+    pd.testing.assert_frame_equal(scores, want, check_dtype=False)
+
+    summary = pd.read_csv(d / "summary.csv", float_precision="round_trip")
+    assert summary["label"].tolist() == ["rb_default", "rb_tuned", "zulu", "alpha"]
+    zulu, alpha = _row(summary, "zulu"), _row(summary, "alpha")
+    assert zulu["profit_eur_m2_iqm"] == pytest.approx(108.5, abs=1e-12)
+    assert zulu["rb_tuned_profit_iqm"] == pytest.approx(100.5, abs=1e-12)
+    assert zulu["profit_gain_iqm"] == pytest.approx(8.0, abs=1e-12)
+    assert zulu["p_improve_profit"] == pytest.approx(1.0, abs=1e-12)
+    assert (zulu["n_runs"], zulu["flag"]) == (2, NO_CLAIM)
+    assert (alpha["n_runs"], alpha["invalid_episodes"], alpha["flag"]) == (3, 1, NO_CLAIM)
+    for b in ("rb_default", "rb_tuned"):
+        assert _row(summary, b)["flag"] == DETERMINISTIC, b
+
+    first = (d / "summary.md").read_text().splitlines()[0]
+    for text in (f"report --split {split}", "seasons.parquet", w["final_result"], SCORED_ONCE):
+        assert text in first, (text, first)
+
+    for name in FIGURES:
+        [call] = calls[name]
+        footer = call["footer"]
+        assert f"python -m greenleaf_control.report --split {split}" in footer, (name, footer)
+        assert "derived from summary.csv / scores.parquet" in footer, (name, footer)
+        assert SCORED_ONCE in footer, (name, footer)
+        title = call.get("title")
+        assert isinstance(title, str), f"report passed viz.{name} no title= ({title!r})"
+        assert title.startswith(TITLES[name]), (name, title)
+        assert split in title and SCORED_ONCE in title, (name, title)
+        assert call["fig"].get_suptitle() == title, (name, call["fig"].get_suptitle())
+    test_days = [s["start_day"] for s in scenarios.TEST[split]]
+    labels = list(calls["per_scenario"][0]["scenario_labels"])
+    assert labels == [f"London day {day}" for day in test_days]
+    status = {p["label"]: p.get("status") for p in calls["tradeoff"][0]["points"]}
+    assert status == {"rb_default": None, "rb_tuned": None, "zulu": "adopted", "alpha": None}
+
+
+def test_the_validation_report_keeps_todays_titles_footer_and_first_line(tmp_path, monkeypatch):
+    """#53 changes nothing on validation (the orchestrator's default: validation's output
+    byte-identical): each figure's drawn title is today's exactly (the report passes viz no
+    title=, so its default draws), its footer today's exactly (no "2012"), and summary.md's
+    first line today's. A guard: it passes before #53 too, and pins validation's output so the
+    test splits' titles and footer can't leak into it."""
+    report, results = _report(monkeypatch, tmp_path)
+    calls = _spies(monkeypatch)
+    path = tmp_path / "ledger.jsonl"
+    _world(path, tmp_path, results, seeds=(0,), e1=None)
+    out = tmp_path / "analysis"
+
+    assert report.main(["--split", "validation", "--out", str(out)], ledger_path=path) == 0
+
+    for name in FIGURES:
+        [call] = calls[name]
+        assert call["fig"].get_suptitle() == TITLES[name], name
+        assert call["footer"] == VALIDATION_FOOTER, name
+    first = (out / "validation" / "summary.md").read_text().splitlines()[0]
+    assert first == VALIDATION_FIRST_LINE
 
 
 # --- The contract ------------------------------------------------------------------------------

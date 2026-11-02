@@ -14,7 +14,7 @@ import csv
 from pathlib import Path
 
 import numpy as np
-from matplotlib import patheffects
+from matplotlib import patheffects, transforms
 from matplotlib.figure import Figure
 from tensorboard.backend.event_processing.event_accumulator import EventAccumulator
 
@@ -45,6 +45,13 @@ PROFILES_KEY = (
     "ink: adopted · pale: dropped, undecided or baseline · each value paired with rb_tuned's"
     " same season · dashed: τ = 0"
 )
+# The report figures' default titles; a caller's title= replaces one (#53 names a test split in it)
+TRADEOFF_TITLE = "Trade-off: IQM and 95% CI per label"
+PER_SCENARIO_TITLE = "Every run on every season"
+PROFILES_TITLE = "Performance profiles"
+# per_scenario's scenario key sits beside the title up to this many scenarios (validation's 3);
+# more get their own band under the title, 4 to a row
+KEY_BESIDE_TITLE = 3
 
 
 def _ylabel(ax, text: str) -> None:
@@ -136,7 +143,8 @@ def _ground(
     figsize: tuple[float, float], title: str, footer: str | None, key: str | None = None
 ) -> Figure:
     """A report figure: GROUND, constrained layout, a SANS title top left and, along the bottom,
-    the footer and above it the key (each if given) in MONO lines, the layout kept clear of them."""
+    the footer and above it the key (each if given) in MONO lines, the layout kept clear of them.
+    A footer or key with a line break takes one more line of height per break."""
     fig = Figure(figsize=figsize, facecolor=GROUND, layout="constrained")
     fig.suptitle(title, x=0.01, ha="left", fontfamily=SANS, fontsize=12, color=INK)
     pt = 1 / (72 * figsize[1])  # one point in figure fractions
@@ -144,7 +152,7 @@ def _ground(
     for text, size in ((footer, 7), (key, 7.5)):
         if text is not None:
             fig.text(0.01, bottom, text, fontfamily=MONO, fontsize=size, color=MUTED, va="bottom")
-            bottom += (size + 7) * pt
+            bottom += (size + 7 + 1.2 * size * text.count("\n")) * pt  # 1.2: the line spacing
     if bottom > 3 * pt:
         fig.get_layout_engine().set(rect=(0, bottom, 1, 1 - bottom))
     return fig
@@ -231,6 +239,7 @@ def tradeoff(
     xlabel: str = "violation hours [h]",
     ylabel: str = "profit [€/m²]",
     footer: str | None = None,
+    title: str = TRADEOFF_TITLE,
 ) -> Figure:
     """Profit against violation-hours: one errorbar per point at its (viol_hours, profit) IQMs, its
     bars reaching each CI's lo and hi. A point is {"label", "profit": (iqm, lo, hi), "viol_hours":
@@ -251,7 +260,7 @@ def tradeoff(
         raise ValueError("tradeoff needs at least one point")
     fit = [p for p in points if p["label"] not in FAR] or points
     (x0, x1), (y0, y1) = (_fit([v for p in fit for v in p[k]]) for k in ("viol_hours", "profit"))
-    fig = _ground((8, 5.8), "Trade-off: IQM and 95% CI per label", footer, TRADEOFF_KEY)
+    fig = _ground((8, 5.8), title, footer, TRADEOFF_KEY)
     ax = fig.subplots()
     _instrument(ax)
     ax.set_xlim(x0, x1)
@@ -298,10 +307,12 @@ def per_scenario(
     out: Path,
     *,
     footer: str | None = None,
+    title: str = PER_SCENARIO_TITLE,
 ) -> Figure:
     """Every value as a dot: one axes per panel (its key the x label), one row per label (the
     panels' shared labels, in dict order, the first on top), and each label's runs x scenarios
-    array drawn as dots at (value, row), one hollow shape per scenario, named in a key.
+    array drawn as dots at (value, row), one hollow shape per scenario, named in a key: beside the
+    title up to KEY_BESIDE_TITLE scenarios, else in its own band under it.
 
     The x limits fit every label but a FAR baseline, and 0; a FAR baseline's values outside them
     are a triangle on the row's edge with their true range. A panel with other labels than the
@@ -321,7 +332,7 @@ def per_scenario(
                     f"panel {key!r}: {label}'s array is {np.shape(values)}, not runs x"
                     f" {len(scenario_labels)} scenarios"
                 )
-    fig = _ground((4.8 * len(panels), 1.6 + 0.3 * len(rows)), "Every run on every season", footer)
+    fig = _ground((4.8 * len(panels), 1.6 + 0.3 * len(rows)), title, footer)
     axes = fig.subplots(1, len(panels), sharey=True, squeeze=False)[0]
     for ax, (key, arrays) in zip(axes, panels.items(), strict=True):
         _instrument(ax)
@@ -358,14 +369,30 @@ def per_scenario(
     axes[0].set_yticks(range(len(rows)), rows)
     axes[0].set_ylim(len(rows) - 0.5, -0.5)  # inverted: the first label on top
     axes[0].tick_params(axis="y", labelcolor=INK)
-    fig.legend(
-        *axes[0].get_legend_handles_labels(),
-        loc="outside upper right",
-        ncols=len(scenario_labels),
-        frameon=False,
-        prop={"family": MONO, "size": 7.5},
-        labelcolor=MUTED,
-    )
+    if len(scenario_labels) <= KEY_BESIDE_TITLE:
+        fig.legend(
+            *axes[0].get_legend_handles_labels(),
+            loc="outside upper right",
+            ncols=len(scenario_labels),
+            frameon=False,
+            prop={"family": MONO, "size": 7.5},
+            labelcolor=MUTED,
+        )
+    else:  # on the panels' top edge, left under the title; the layout's top lowered by its height
+        key = fig.legend(
+            *axes[0].get_legend_handles_labels(),
+            loc="lower left",
+            bbox_to_anchor=(0.01, 1),
+            bbox_transform=transforms.blended_transform_factory(fig.transFigure, axes[0].transAxes),
+            borderaxespad=0,
+            ncols=4,
+            frameon=False,
+            prop={"family": MONO, "size": 7.5},
+            labelcolor=MUTED,
+        )
+        layout = fig.get_layout_engine()
+        x, y, w, h = layout.get()["rect"]
+        layout.set(rect=(x, y, w, h - key.get_window_extent().height / fig.bbox.height))
     fig.savefig(out)
     return fig
 
@@ -376,6 +403,7 @@ def profiles(
     *,
     highlight=(),
     footer: str | None = None,
+    title: str = PROFILES_TITLE,
 ) -> Figure:
     """Performance profiles: one axes per panel (its key the x label), and per label one
     complementary ECDF of its runs x scenarios values, `ax.ecdf(values.ravel(),
@@ -389,7 +417,7 @@ def profiles(
     """
     if not panels:
         raise ValueError("profiles needs at least one panel")
-    fig = _ground((5.4 * len(panels), 4.8), "Performance profiles", footer, PROFILES_KEY)
+    fig = _ground((5.4 * len(panels), 4.8), title, footer, PROFILES_KEY)
     axes = fig.subplots(1, len(panels), sharey=True, squeeze=False)[0]
     for ax, (key, arrays) in zip(axes, panels.items(), strict=True):
         _instrument(ax)

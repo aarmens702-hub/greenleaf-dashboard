@@ -433,11 +433,13 @@ Paths are relative to `control/`. Scenario dicts are `{"location": str, "growth_
       other containers' manifests are visible).
   - volume `greenleaf-runs` (`create_if_missing=True`) mounted at `/runs`.
 
-## `greenleaf_control.report` (A1a; plays no season, writes no ledger row)
+## `greenleaf_control.report` (A1a, A1c; plays no season, writes no ledger row)
 - `ANALYSIS` = `control/results/analysis`; `BASELINE` = `"rb_tuned"`; `METRICS` = `(profit_eur_m2, viol_hours_total,
-  viol_hours_co2, viol_hours_temp, viol_hours_rh, yield_kg_m2, paper_return)`.
-- **VALIDATION only.** Any other split is refused (a ValueError naming it from `load_scores`, an argparse error from the
-  CLI) before a file is opened. The three 2012 splits come after F1's `final-result` row.
+  viol_hours_co2, viol_hours_temp, viol_hours_rh, yield_kg_m2, paper_return)`; `SCORED_ONCE` = `"2012 test weather,
+  scored once"`.
+- **Splits:** validation, and the three TEST splits (A1c) once the ledger holds the `final-result` row. Until then a
+  test split is refused (a ValueError naming it and the seal, PROTOCOL §8) before a file is opened. `train_eval` and
+  `paper` are always refused (a ValueError naming the split from `load_scores`, an argparse error from the CLI).
 - `load_scores(split, *, ledger_path=ledger.LEDGER) -> pd.DataFrame`: one row per label × run × scenario.
   - **Columns:** `label, arm, issue, registered, result, decision, protocol, run, seed, crashed, split, location,
     growth_year, start_day`, every `ledger.RESULT_KEYS` key, `valid`, `viol_hours_total` (co2 + temp + rh). `issue`,
@@ -459,6 +461,14 @@ Paths are relative to `control/`. Scenario dicts are `{"location": str, "growth_
   - **E1:** an arm of method `rb_tuned` is no row of its own; its arm name, `registered`, `result`, `decision` and
     `protocol` go on the `rb_tuned` baseline rows. Refused: a second such arm, one with no run that didn't crash, one
     with no `rb_tuned` parquet.
+  - **A TEST split** reads only `evaluate.FINAL_RESULTS/<the final-registered row the final-result names>/
+    seasons.parquet`, that split's rows; no selected.json and no evaluate parquet. The same columns: `label` = `arm` =
+    the learning arm's or baseline's name; a learning arm's `issue, registered, result, decision, protocol` as above
+    (from the registration its runs name), `run` and `seed` from its run rows; `crashed` null; a baseline's ids null.
+    Order: the final's baselines in `envs.BASELINES` order, then its arms (`ledger.final_arms`) by registration in
+    ledger order and arm in registration order, runs by seed, scenarios in `scenarios.SPLITS` order. Refused (a
+    ValueError naming it): no seasons.parquet; a registered run or baseline without each of the split's scenarios
+    exactly once.
 - `summarize(scores) -> pd.DataFrame`: one row per label (a `label` column), in the scores' first-appearance order.
   Each statistic is on the label's runs (by seed) × scenarios (split order) array, whatever the input's row order.
   - `label, decision, protocol, n_runs, crashed, invalid_episodes` (the count of `valid` False; PROTOCOL §4).
@@ -476,9 +486,14 @@ Paths are relative to `control/`. Scenario dicts are `{"location": str, "growth_
 - `check_ledger(scores, *, ledger_path) -> int`: for every `result` row of a registration in the scores, each arm's
   primary and every guard (`iqm, ci_low, ci_high`) must equal `stats.iqm_ci` on the scores within 1e-12, else
   ValueError naming the result row, arm and key. Returns the number of (arm, key) pairs checked.
+  - **A TEST split's scores** are checked against the `final-result` row instead: every arm in its
+    `per_split[split]`, `evaluate.FINAL_PRIMARY` and each of its guards, within 1e-12 of `stats.iqm_ci` on that
+    arm's scores, else ValueError naming the final-result row, split, arm and key (an arm with no score rows too).
 - `figures(scores, summary, out_dir) -> None` (A1b): three PNGs drawn by `viz`, derived from the scores and the
   summary, each with the footer `source: python -m greenleaf_control.report --split <split>; derived from
-  summary.csv / scores.parquet`:
+  summary.csv / scores.parquet`. On a TEST split the footer adds `SCORED_ONCE` on a second line, and each figure
+  gets `viz`'s `title=` = `<viz's default title> · <split>, 2012 test weather, scored once`. Validation passes no
+  `title=`, so `viz` draws its default (`viz.PER_SCENARIO_TITLE`, `PROFILES_TITLE`, `TRADEOFF_TITLE`).
   - **Status** of a label: its decision's word (`adopted` or `dropped`), unless a decision note calls its arm otherwise:
     `report.NOTE_CALLS[(decision row id, arm)]` (E4's `decision-b159ac9a` drops `residual_w4`) overrides the row's
     word. None for a baseline (rb_tuned's E1 fold included) or an undecided arm.
@@ -490,11 +505,13 @@ Paths are relative to `control/`. Scenario dicts are `{"location": str, "growth_
   - `tradeoff.png`: `viz.tradeoff`, one point per summary row at (`viol_saved_*`, `profit_gain_*`) with its status and
     `n` = `n_runs` (a learning label under 5 runs reads `(n=<k>, no claim)`), so rb_tuned is the origin; x label
     `violation hours saved vs rb_tuned [h]`, y label `profit gain over rb_tuned [€/m²]`.
-- `main(argv=None, *, ledger_path=ledger.LEDGER) -> int`; CLI `python -m greenleaf_control.report --split validation
-  [--out DIR]`, `--out` defaulting to `ANALYSIS`.
+- `main(argv=None, *, ledger_path=ledger.LEDGER) -> int`; CLI `python -m greenleaf_control.report --split
+  {validation,amsterdam_2012,london_2012,abbotsford_2012} [--out DIR]`, `--out` defaulting to `ANALYSIS`.
   - Loads, checks and summarizes before a dir is made or a file is written; a refusal writes nothing.
   - Writes `<out>/<split>/scores.parquet` (load_scores' frame), `summary.csv` (summarize's, full precision) and
     `summary.md`, then `figures`' `per_scenario.png`, `profiles.png` and `tradeoff.png`, replacing any previous
-    version. `summary.md`: line 1 names the command and `summary.csv`, a legend, then a pipe table with one row per
-    label (3 decimals, hours 2). Neither text file carries a timestamp or the out path.
+    version. `summary.md`: line 1 names the command and `summary.csv` (on a TEST split also
+    `control/results/final/<final-registered row>/seasons.parquet`, the final-result row and `SCORED_ONCE`), a
+    legend, then a pipe table with one row per label (3 decimals, hours 2). Neither text file carries a timestamp or
+    the out path.
   - Prints `matches the ledger: <k> (arm, key) pairs`, then one line per label.
