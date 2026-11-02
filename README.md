@@ -1,88 +1,97 @@
-# GreenLeaf 2.0
+# GreenLeaf 2.0: teaching agents to grow tomatoes
 
-A reinforcement-learning co-pilot that adjusts a grower's tuned climate rules in a simulated tomato greenhouse
-([GreenLight-Gym](https://github.com/BartvLaatum/GreenLight-Gym2)), scored once on held-out 2012 weather under a
-protocol registered before each run.
-
-[![Hourly air temperature over one validation season: the tuned rules above, the rules plus the co-pilot below](docs/media/hero.png)](docs/media/duel_replay.gif)
-
-*A VALIDATION season (Amsterdam 2010, start day 59), not the final result. Each cell is one hour of air temperature
-over 60 days: the tuned rules (`rb_tuned`) above, the rules plus the fixed-penalty co-pilot below (`residual_w05` seed
-107, run-66b245e3, checkpoint 1750000, the lower-median seed of E6 by day-59 profit, not the best seed). A replay of a
-recorded validation result (result-d1f0b8e7). Click the image for the day-by-day replay.*
+Residual reinforcement-learning agents run a simulated tomato greenhouse on top of the grower's rule-based controller,
+in Wageningen University's [GreenLight-Gym](https://github.com/BartvLaatum/GreenLight-Gym2) simulator. On held-out
+2012 weather in Amsterdam, London and Abbotsford, the residual agent beat a tuned rule-based controller on profit and on
+hours outside the climate bounds, and grew more fruit.
 
 Live demo: https://aarmens702-hub.github.io/greenleaf-dashboard/ (simulated seasons, replayed in the browser)
 
-The write-up, with every experiment, drop and limitation, is [docs/REPORT.md](docs/REPORT.md).
+[![One simulated season replayed side by side: the tuned rules on the left, the residual agent on the right](docs/media/site/replay.gif)](https://aarmens702-hub.github.io/greenleaf-dashboard/)
+
+*Amsterdam 2012, start day 45: the tuned rules (left) and the residual agent with a fixed penalty, seed 100 (right),
+through one 60-day season. 2012 test weather, scored once; simulated.*
+
+The full write-up, with every experiment, drop and limitation, is [docs/REPORT.md](docs/REPORT.md).
+
+## How it works
+
+- Every 15 minutes the grower's rule-based controller proposes settings for 6 controls: boiler, CO₂ dosing, thermal
+  screen, roof vents, lamps and blackout screen.
+- A Stable-Baselines3 PPO policy adds a residual to each control, clipped to ±15% of its range, so a zero residual runs
+  the greenhouse on the rules alone.
+- The reward is scaled profit minus a weighted penalty for leaving the CO₂, temperature and humidity bounds
+  (300 to 1600 ppm, 15 to 34 °C, 50 to 85% relative humidity); the residual agent uses a fixed weight of 0.5.
+- The constrained variant learns PID-Lagrangian multipliers on temperature and humidity instead, each held to a budget
+  equal to the tuned rules' own mean violation cost on training weather; CO₂ keeps a fixed weight of 1.
+- The baseline is the same rule-based controller with its 12 setpoints tuned by 200 trials of Optuna's TPE sampler.
+  Each residual agent trains for 2,000,000 steps on Amsterdam 2008, 2009 and 2011 weather, and its checkpoint is
+  selected on Amsterdam 2010; London and Abbotsford are climates it never saw.
+
+![What the residual agent changed: right minus left, hour by hour, for each of the 6 controls](docs/media/site/what-changed.png)
+
+*What the residual agent changed in the replay above: right minus left, hour by hour, for each control, in percentage
+points, each strip on its own scale. Simulated.*
 
 ## Results (2012 test weather, scored once)
 
-The final scored 30 checkpoints, each selected on validation and registered in advance (final-registered-4d0a4ba9),
-and 4 baselines once on three test splits: a new year (Amsterdam 2012) and two new climates (London and Abbotsford BC,
-2012), each 8 seasons of 60 days from start days 45 to 73. Its record is final-result-aee23915. The table shows the two
-co-pilots, 10 seeds each, against the tuned rules on the same seasons. `residual_w05` has a fixed violation penalty
-(w = 0.5). `lag_b100` has PID-Lagrangian multipliers on temperature and RH, each with a budget of 100% of the tuned
-rules' mean per-step cost on TRAIN_EVAL; CO₂'s budget is 0, so under PROTOCOL v2 its multiplier is fixed at 1.
+| City | Profit gain over the tuned rules, €/m² [95% CI] | Hours outside the bounds: residual agent vs tuned rules | Fruit growth, kg/m²: residual agent vs tuned rules |
+|---|---|---|---|
+| Amsterdam | +0.30 [0.25, 0.35] | 292.6 vs 365.2 | 8.77 vs 8.59 |
+| London | +0.40 [0.35, 0.44] | 343.1 vs 456.9 | 9.15 vs 8.89 |
+| Abbotsford BC | +0.54 [0.47, 0.61] | 444.3 vs 559.8 | 8.42 vs 8.28 |
 
-| Test split | `residual_w05` gain, €/m² [95% CI] | Σ hours (`rb_tuned`) | Grade | `lag_b100` gain, €/m² [95% CI] | Σ hours (`rb_tuned`) | Grade |
-|---|---|---|---|---|---|---|
-| amsterdam_2012 | 0.30 [0.25, 0.35] | 292.6 (365.2) | verified | 0.38 [0.35, 0.42] | 399.9 (365.2) | fails (b) |
-| london_2012 | 0.40 [0.35, 0.44] | 343.1 (456.9) | verified | 0.46 [0.43, 0.49] | 444.2 (456.9) | verified |
-| abbotsford_2012 | 0.54 [0.47, 0.61] | 444.3 (559.8) | verified | 0.63 [0.59, 0.67] | 551.5 (559.8) | verified |
+The residual agent passed the decision rule registered before the final in all three cities: its profit CI lies above
+the tuned rules' profit, its hours are at or below theirs, and no episode failed. The constrained variant also earned
+more than the tuned rules in every city (+0.38, +0.46 and +0.63 €/m²) and passed the rule in London and Abbotsford, but
+in Amsterdam it spent more hours outside the bounds than the tuned rules (399.9 vs 365.2 h).
 
-*Gain: the IQM of each season's profit minus `rb_tuned`'s on the same season, over 10 seeds × 8 seasons, with a 95%
-stratified-bootstrap CI. Σ hours: the sum of the CO₂, temperature and humidity (RH) IQMs of season hours outside the
-safe range, with `rb_tuned`'s in parentheses. P(profit above `rb_tuned`'s same season) is 0.91 for `residual_w05` in
-Amsterdam and 1.00 in every other cell. Grade: #45's rule, fixed before the run; a claim is verified only if (a) the
-arm's profit IQM CI lies entirely above `rb_tuned`'s profit scored like for like, (b) its Σ hours are at or below
-`rb_tuned`'s, and (c) scoring had 0 invalid episodes and 0 solver failures. Source:
-`control/results/analysis/<split>/summary.csv`, checked against final-result-aee23915.*
+![Amsterdam 2012: each controller's profit against its hours outside the bounds](docs/media/site/results.png)
 
-What didn't hold:
-- **The registered headline.** The PRD's headline required the constrained co-pilot, `lag_b100`, to pass on all three
-  splits, and it fails rule (b) in Amsterdam, where its Σ of 399.9 h is above the tuned rules' 365.2 h; `residual_w05`
-  passes on every split.
-- **Plain PPO earned more, with fewer hours.** `ppo` and `ppo_paper` (5 seeds each), which ignore the rules, beat
-  either co-pilot on profit and on Σ hours on every split (gains of 2.08 to 3.36 €/m² at Σ 227.1 to 260.8 h) while
-  growing about 30% less fruit than the co-pilots (REPORT.md §5.2). Profit counts that fruit at €1.60/kg, but
-  the energy and CO₂ costs PPO saves, with the lamps and CO₂ dosing off in almost every hour of the seed-0 replays
-  (REPORT.md §5.2), are larger than the fruit revenue it loses; nothing in #45's rule guards fruit growth, and nothing values the crop's condition at day 60 (REPORT.md §6).
-- **Doing nothing earns the most.** `zero_controls`, every actuator off, has the highest profit on every split (3.10,
-  3.21 and 1.91 €/m²) at Σ 2977.5, 3058.7 and 3013.1 h, which is why profit is read only next to violation hours.
-- **The margins are small.** The co-pilots' gains are a few tenths of a euro per m² a season, on profits that stay
-  negative for the tuned rules and both co-pilots in Amsterdam and Abbotsford.
-- **The fixed-penalty gain shrank in Amsterdam.** `residual_w05`'s Amsterdam gain, 0.30 [0.25, 0.35] €/m², lies below
-  its validation gain of 0.49 [0.40, 0.57] without overlapping (validation summary.csv, residual_w05 #36/f2fd);
-  London's and Abbotsford's CIs overlap it (REPORT.md §5.2).
-- **Both co-pilots sometimes broke the CO₂ range, which the tuned rules never did.** `residual_w05` had CO₂ hours in 29
-  of its 240 test seasons (at most 12.2 h in one), `lag_b100` in 18 of 240 (at most 6.2 h), and `rb_tuned` in 0 of
-  24; the Σ column hides this (REPORT.md §5.2, from the final's `seasons.parquet`).
+*Amsterdam 2012, from the live demo's Results section: each controller's profit against its hours outside the bounds,
+IQMs with 95% CIs. Hollow diamond: the tuned rules. Default rules and Do nothing are off the scale, marked on its edge.
+The chart's hours are the IQM of each season's total, so they differ slightly from the table's sums.*
 
-Every arm and baseline per split, with per-constraint hours and fruit growth:
-[docs/REPORT.md §5](docs/REPORT.md#5-the-final).
+Gains are IQMs of each season's profit minus the tuned rules' on the same season, over 10 seeds × 8 seasons of 60 days
+per city, with 95% stratified bootstrap CIs. Hours are the sum of the CO₂, temperature and humidity IQMs of season hours
+outside the bounds. Fruit growth is the net change in standing fruit over the season, not harvest. In the code and the
+report the residual agent is `residual_w05` and the constrained variant `lag_b100`. Source:
+`control/results/analysis/<split>/summary.csv`, checked against the ledger's final-result-aee23915 row. The same
+chart for London and Abbotsford, interactive, is in the live demo's Results section; the full tables, with every
+controller and per-constraint hours, are in [docs/REPORT.md §5](docs/REPORT.md#5-the-final).
 
-![amsterdam_2012: each label's violation hours saved against its profit gain over rb_tuned's same season](control/results/analysis/amsterdam_2012/tradeoff.png)
+## What we learned
 
-*amsterdam_2012 (2012 test weather, scored once): each label at (violation hours saved, profit gain) against
-`rb_tuned`'s same season, IQM with 95% CIs; up and to the right beats the tuned rules on both. Hours saved is the IQM
-of each season's total hours outside the safe ranges subtracted from `rb_tuned`'s on the same season. `lag_b100` sits
-left of zero, at -33.1 [-39.1, -26.3] h saved. Baselines off the scale are marked at the edge with their true values.
-Drawn by `report --split amsterdam_2012` from summary.csv; London's and Abbotsford's are in REPORT.md §5.*
+- **End-to-end PPO earned more by growing less.** PPO without the rules (5 seeds) gained 2.74, 2.08 and 3.25 €/m² over
+  the tuned rules with fewer hours outside the bounds (260.8, 239.2 and 232.8 h) by growing 28% to 32% less fruit
+  (5.96, 6.41 and 5.65 kg/m²); the energy and CO₂ it saved outweighed the fruit it lost, no registered rule guarded
+  fruit growth, and profit does not value the crop's condition at day 60.
+- **Doing nothing earns the most.** With every actuator off, profit is the highest of any controller (3.10, 3.21 and
+  1.91 €/m²) at about 3,000 hours outside the bounds (2977.5, 3058.7 and 3013.1 h), so profit is only read next to
+  hours.
+- **The margins are small.** The residual variants gain a few tenths of a euro per m² a season (0.30 to 0.63 €/m²), and
+  profit stays negative for the tuned rules and both variants in Amsterdam and Abbotsford.
+- **Both residual variants sometimes left the CO₂ bounds, which the tuned rules never did:** the residual agent in 29
+  of its 240 test seasons and the constrained variant in 18 of 240, against 0 of 24 for the tuned rules.
+- **The Amsterdam gain shrank out of sample.** The residual agent's 0.30 [0.25, 0.35] €/m² lies below its validation
+  gain of 0.49 [0.40, 0.57] without overlapping.
+
+What held, what didn't and the limitations, in full: [docs/REPORT.md §5.2](docs/REPORT.md#52-what-held-and-what-didnt)
+and [§6](docs/REPORT.md#6-limitations).
 
 ## How the numbers are kept honest
 
 - **Registered experiments.** Each experiment's hypothesis, arms, seeds, metrics and decision rule were written on its
   GitHub issue and recorded in the ledger before the first run, and every result and decision, drops included, is
-  recorded against that registration ([docs/PROTOCOL.md](docs/PROTOCOL.md)).
+  recorded against it ([docs/PROTOCOL.md](docs/PROTOCOL.md)).
 - **The seal.** The 2012 test weather was scored once, on checkpoints already selected on validation; the
   `final-result` row spent the seal, and the ledger, `evaluate` and `scripts/check_locks.py` each refuse a second run.
 - **An append-only ledger.** `control/ledger/ledger.jsonl` is written only by its CLI, every row carries sha256
   fingerprints of the scoring code and the protocol, and `check_locks.py` proves from git history that rows were only
   appended.
-- **Like-for-like baselines.** The rule-based controller's 12 setpoints were tuned with Optuna TPE (200 trials) before
-  any RL arm was compared with it. From E5b on and in the final, each arm is compared with it on the same seasons,
-  through the same IQM at the arm's seed count; E2 to E5's rules used a baseline's plain mean, and REPORT.md §3.5
-  regrades them.
+- **Like-for-like baselines.** The tuned rules were fixed before any agent was compared with them. In the final, each
+  agent is compared with them on the same seasons, through the same IQM at the agent's seed count; REPORT.md §3.5
+  regrades the earlier experiments that used a plain mean.
 
 ## Reproduce
 
@@ -112,7 +121,7 @@ uv run python -m greenleaf_control.report --split amsterdam_2012
 grower's rules (rb_tuned): upstream's rule-based controller, 12 setpoints tuned with Optuna
    │  proposes u_rb, 6 controls in [0, 1], every 15 minutes
    ▼
-co-pilot (PPO residual): u = clip(u_rb + 0.15 · a, 0, 1), a in [-1, 1]⁶, so at most ±15% of each control's range
+residual agent (PPO): u = clip(u_rb + 0.15 · a, 0, 1), a in [-1, 1]⁶, so at most ±15% of each control's range
    │  residual_w05: a fixed violation penalty (w = 0.5)
    │  lag_b100: PID-Lagrangian multipliers on temperature and RH; CO₂'s multiplier fixed at 1 (its budget is 0)
    ▼
