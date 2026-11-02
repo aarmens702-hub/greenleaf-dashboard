@@ -19,8 +19,9 @@
     <div class="layout">
       <nav class="side" aria-label="Sections">
         <a href="#replay"><span>01</span>Replay</a>
-        <a href="#scoreboard"><span>02</span>Scoreboard</a>
-        <a href="#source"><span>03</span>Source</a>
+        <a href="#results"><span>02</span>Results</a>
+        <a href="#scoreboard"><span>03</span>Scoreboard</a>
+        <a href="#source"><span>04</span>Source</a>
       </nav>
       <main>
         <section id="replay" class="sec" aria-labelledby="replay-title">
@@ -61,8 +62,36 @@
             </div>
           </div>
         </section>
-        <section id="scoreboard" class="sec" aria-labelledby="score-title">
+        <section id="results" class="sec" aria-labelledby="results-title">
           <span class="num">02</span>
+          <div>
+            <h2 id="results-title">Results</h2>
+            <p class="hint">Every controller over all of a city's simulated seasons: profit against hours outside the safe range, or against fruit growth. Point at a controller, tap it or pick its name below the chart to read its numbers.</p>
+            <div id="results-city" class="seg" role="group" aria-label="City"></div>
+            <div id="results-axis" class="seg" role="group" aria-label="Vertical axis">
+              <span>Vertical axis</span>
+              <button type="button" data-m="viol_hours_total" aria-pressed="true">Hours outside the safe range</button>
+              <button type="button" data-m="yield_kg_m2" aria-pressed="false">Fruit growth</button>
+            </div>
+            <p class="legend">Dot: a controller's IQM over its runs × seasons; whiskers: its 95% stratified-bootstrap CI on both axes (none for one run). Hollow diamond: the tuned rules, dashed lines at their values. Triangle on an edge: off the scale, its values under the chart. Hours: each season's CO₂, temperature and humidity hours outside their bands, added up.</p>
+            <p id="results-y" class="axis"></p>
+            <div id="results-chart" class="chart"></div>
+            <p class="axis x">Profit (€/m² over the <span data-fill="days"></span>-day season)</p>
+            <p id="results-far" class="legend"></p>
+            <p id="results-note" class="legend"></p>
+            <div id="results-keys" class="seg keys" role="group" aria-label="Controllers"></div>
+            <div id="results-readout" class="readout" aria-live="polite"></div>
+            <div class="scroll">
+              <table>
+                <caption>IQMs over each controller's runs × seasons. Profit and its gain over the tuned rules in €/m², hours outside the safe range in h, fruit growth in kg/m².</caption>
+                <thead><tr><th scope="col">Controller</th><th scope="col">Profit</th><th scope="col">Gain</th><th scope="col">Hours</th><th scope="col">Fruit</th><th scope="col">Runs</th></tr></thead>
+                <tbody id="results-rows"></tbody>
+              </table>
+            </div>
+          </div>
+        </section>
+        <section id="scoreboard" class="sec" aria-labelledby="score-title">
+          <span class="num">03</span>
           <div>
             <h2 id="score-title">End of season (simulated)</h2>
             <p id="hint" class="hint">The scoreboard fills in when the replay reaches the last day.</p>
@@ -70,7 +99,7 @@
           </div>
         </section>
         <section id="source" class="sec" aria-labelledby="source-title">
-          <span class="num">03</span>
+          <span class="num">04</span>
           <div>
             <h2 id="source-title">Source</h2>
             <p>Simulated with GreenLight-Gym on <span data-fill="place"></span> weather; not real-world results. Tuned rules: experiment E1, ledger row <code>result-525a6e90</code>.</p>
@@ -83,5 +112,6 @@
     </div>
   </div>
   <script src="app.js"></script>
+  <script src="results.js"></script>
 </body>
 </html>

@@ -176,6 +176,55 @@ th, td { padding: 10px 12px; border-bottom: 1px solid var(--hair); text-align: r
 thead th { font: 500 13px/1.3 var(--sans); border-bottom-color: var(--ink); }
 th[scope="row"], thead th:first-child { padding-left: 0; text-align: left; font: 14px/1.4 var(--sans); color: var(--muted); }
 
+/* The Results section (#60): square buttons for the cities, the axis and the controllers (the
+   pressed one inked), the chart results.js draws as an inline SVG, its readout and table. */
+#results .hint { max-width: 40rem; margin-bottom: 16px; }
+.seg { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin: 0 0 12px; }
+.seg span { margin-right: 4px; font: 500 14px/1.3 var(--sans); color: var(--muted); }
+.seg button {
+  max-width: 100%;
+  min-height: 44px;
+  padding: 6px 12px;
+  font: 500 14px/1.2 var(--sans);
+  color: var(--ink);
+  background: var(--bg);
+  border: 1px solid var(--hair);
+  border-radius: 0;
+  cursor: pointer;
+}
+.seg button:hover { border-color: var(--ink); }
+.seg button[aria-pressed="true"] { color: var(--bg); background: var(--ink); border-color: var(--ink); }
+.keys { margin-top: 16px; }
+.keys button { font-size: 13px; }
+.axis { margin: 16px 0 4px; font: 12px/1.5 var(--mono); color: var(--muted); }
+.axis.x { margin: 4px 0 8px; text-align: right; }
+.chart svg { display: block; font-family: var(--mono); }
+.chart text { fill: var(--muted); }
+.chart .g { stroke: var(--hair); }
+.chart .z { stroke: var(--muted); }
+.chart .guide { stroke: var(--muted); stroke-dasharray: 4 3; }
+.chart .w { fill: none; stroke: var(--ink); }
+.chart .dot { fill: var(--ink); }
+.chart .ref { fill: var(--bg); stroke: var(--ink); stroke-width: 1.5; }
+.chart .far { fill: var(--muted); }
+.chart .lead { stroke: var(--muted); stroke-width: 0.5; }
+.chart .lbl { fill: var(--ink); paint-order: stroke; stroke: var(--bg); stroke-width: 3px; stroke-linejoin: round; }
+.chart .lbl.out { fill: var(--muted); }
+.chart .ring { display: none; fill: none; stroke: var(--ink); }
+.chart .on .ring { display: inline; }
+.chart .on .lbl { font-weight: 500; }
+.chart .hit { fill: transparent; cursor: pointer; }
+#results-far:empty { display: none; }
+.readout { margin: 20px 0 0; padding-top: 14px; border-top: 1px solid var(--ink); }
+.readout dl { display: grid; grid-template-columns: minmax(0, 14rem) minmax(0, 1fr); gap: 8px 16px; margin: 0; }
+.readout dt { font: 500 13px/1.4 var(--sans); color: var(--muted); }
+.readout dd { margin: 0; font: 13px/1.4 var(--mono); }
+.readout strong { font-weight: 500; }
+.readout small { font-size: 12px; color: var(--muted); }
+.readout dd span { display: block; margin-top: 2px; font: 12px/1.5 var(--sans); color: var(--muted); }
+.scroll { margin-top: 24px; overflow-x: auto; }
+caption { caption-side: bottom; padding-top: 8px; text-align: left; font: 12px/1.5 var(--mono); color: var(--muted); }
+
 #source p { max-width: 40rem; margin: 0 0 10px; }
 #source p:empty { display: none; } /* no final line on validation, no run line for two baselines */
 code { font: 0.85em var(--mono); white-space: nowrap; } /* a ledger id doesn't break at its hyphen */
@@ -197,4 +246,7 @@ a:hover { color: var(--muted); }
   .act { grid-template-columns: minmax(0, 9rem) 1fr 2.6rem; }
   .diff .act { grid-template-columns: minmax(0, 8rem) 1fr 4.5rem; }
   th, td { padding: 8px 6px; }
+  .readout dl { grid-template-columns: minmax(0, 1fr); gap: 2px; }
+  .readout dd { margin-bottom: 8px; }
+  #results table { font-size: 12px; }
 }

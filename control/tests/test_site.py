@@ -1,5 +1,5 @@
-"""Tests for the demo site (issue #28, D3a; #52, D3b-2a; #49, D3b-2b; #59, S2): site/, a static
-page that replays one simulated 60-day season, the grower's tuned rules (rb_tuned, E1, adopted) on
+"""Tests for the demo site (issue #28, D3a; #52, D3b-2a; #49, D3b-2b; #59, S2; #60, S3): site/, a
+static page that replays one simulated 60-day season, the grower's tuned rules (rb_tuned, E1, adopted) on
 the left against the same rules with the AI co-pilot on top on the right (residual_w05_seed100:
 E6's arm residual_w05, seed 100, at its selected checkpoint) by default, from JSON written by
 greenleaf_control.export_replay. Since #59 the page picks the season and both sides from
@@ -52,11 +52,23 @@ The conventions pinned here.
   block (id diff); and the final-result row id is read from index.json's final_result, never
   typed. site/data/ still holds exactly the six validation files: site_build adds the 2012 replays
   in its output dir, never in site/.
+- Issue #60 (S3, the Results section; the same yes from Aarmen): a new section.sec, id results,
+  "02 Results", sits between Replay and Scoreboard, which become 03 and 04 with Source, in the
+  gutter and in nav.side alike. It charts each split's results.json rows (profit against hours
+  outside the safe range, or fruit growth: IQM and 95% CI) from a new site/results.js, loaded after
+  app.js, which reads results.json's fields by name, never types a result number (a 2-decimal
+  literal equal to a summary.csv number; the scanner below) and never reads `decision` (numbers,
+  not verdicts). The readout (id results-readout) and the split's note (id results-note) sit inside
+  the section, and site/ stays under 1 MB with results.js among the page's files. The four
+  control/results/analysis/<split>/summary.csv files are committed and only read here. The chart's
+  positions against tradeoff.png, the axis switch, the readouts (hover, tap, keyboard) and 390 px
+  are checked in Chrome (the issue's QA item).
 
 Every check reads files inside its test body, so while site/ is missing each test FAILS on an
 assertion rather than ERRORs. Nothing here builds an env, reads weather or trains.
 """
 
+import csv
 import json
 import re
 from html.parser import HTMLParser
@@ -87,7 +99,7 @@ N_HOURS = SEASON_DAYS * 24  # 1,440 hourly points
 MAX_FILE_BYTES = 250_000  # 250 KB, decimal
 MAX_SITE_BYTES = 1_000_000  # 1 MB, decimal
 TOLERANCE = 1e-9
-PAGE_FILES = ("index.html", "style.css", "app.js")
+PAGE_FILES = ("index.html", "style.css", "app.js", "results.js")  # results.js since #60
 FONTS_CSS2 = "https://fonts.googleapis.com/css2?"  # Google Fonts' css2 API (#52)
 FONT_FAMILIES = ("Geist Mono", "Schibsted Grotesk", "Source Serif 4")  # decoded family= names
 DEFAULTS = {"left": "rb_tuned", "right": "residual_w05"}  # index.json controller ids (#59)
@@ -96,6 +108,37 @@ DIFF_TITLE = "what the right side changed"  # the difference block's heading (#5
 FINAL_RESULT_ID = re.compile(r"final-result-[0-9a-f]{8}")  # a ledger final-result row id
 # "Right − left": U+2212, its JS or HTML escape, a hyphen or "minus", on lowercased text (#59).
 RIGHT_MINUS_LEFT = re.compile(r"right\s*(?:−|\\u2212|&minus;|-|minus)\s*left")
+SECTIONS = ("replay", "results", "scoreboard", "source")  # section.sec ids, in page order (#60)
+SCRIPTS = ("app.js", "results.js")  # index.html's scripts, in load order (#60)
+RESULTS_IDS = {"results-readout", "results-note"}  # inside <section id="results"> (#60)
+ANALYSIS = Path(__file__).resolve().parents[1] / "results" / "analysis"
+RESULT_SPLITS = ("amsterdam_2012", "london_2012", "abbotsford_2012", "validation")  # its dirs
+# summary.csv's metrics whose _iqm, _lo and _hi results.json carries (site_build's, #58).
+RESULT_METRICS = (
+    "profit_eur_m2",
+    "profit_gain",
+    "viol_hours_total",
+    "viol_hours_co2",
+    "viol_hours_temp",
+    "viol_hours_rh",
+    "yield_kg_m2",
+)
+# The results.json fields results.js must name, each as a whole word (#60 steps 2 and 3).
+READ_NAMES = (
+    "profit_eur_m2",
+    "profit_gain",
+    "viol_hours_total",
+    "yield_kg_m2",
+    "n_runs",
+    "invalid_episodes",
+    "controller",
+    "note",
+    "iqm",
+    "lo",
+    "hi",
+)
+# A number literal with 2 or more decimals, not part of a name, a longer number or a member access.
+TYPED = re.compile(r"(?<![\w$.])\d+\.\d{2,}(?![\w$])")
 HOURLY_KEYS = [
     "t_hour",
     "co2",
@@ -279,6 +322,104 @@ def _catch_handlers(js: str) -> list[str]:
     catch (err) { ... } / catch { ... } block, each matched to its closing bracket."""
     found = re.finditer(r"\.catch\s*\(|\bcatch\s*(?:\(\s*\w*\s*\)\s*)?\{", js)
     return [js[m.end() - 1 : _close(js, m.end() - 1)] for m in found]
+
+
+class _Nav(HTMLParser):
+    """index.html's order: the id of each <section class="sec"> in page order (None if it has
+    none), and for each <a> inside <nav class="side">, (its href, the stripped text of its
+    <span>)."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.sections: list[str | None] = []
+        self.links: list[tuple[str, str]] = []
+        self._in_nav = False
+        self._href: str | None = None  # the open nav link's href
+        self._in_span = False
+        self._span = ""
+
+    def handle_starttag(self, tag, attrs):
+        a = dict(attrs)
+        classes = (a.get("class") or "").split()
+        if tag == "section" and "sec" in classes:
+            self.sections.append(a.get("id"))
+        if tag == "nav" and "side" in classes:
+            self._in_nav = True
+        if self._in_nav and tag == "a":
+            self._href, self._span = (a.get("href") or "").strip(), ""
+        if self._href is not None and tag == "span":
+            self._in_span = True
+
+    def handle_endtag(self, tag):
+        if tag == "nav":
+            self._in_nav = False
+        if tag == "span":
+            self._in_span = False
+        if tag == "a" and self._href is not None:
+            self.links.append((self._href, self._span.strip()))
+            self._href = None
+
+    def handle_data(self, data):
+        if self._in_span:
+            self._span += data
+
+
+class _ResultsIds(HTMLParser):
+    """Whether index.html has a <section id="results">, and the ids of the elements inside it (its
+    own excluded; nested <section>s are counted, so its own </section> ends it)."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.found = False
+        self.ids: set[str] = set()
+        self._depth = 0  # <section>s open since #results opened, itself included
+
+    def handle_starttag(self, tag, attrs):
+        a = dict(attrs)
+        if self._depth:
+            if a.get("id") is not None:
+                self.ids.add(a["id"].strip())
+            if tag == "section":
+                self._depth += 1
+        elif tag == "section" and (a.get("id") or "").strip() == "results":
+            self.found = True
+            self._depth = 1
+
+    def handle_endtag(self, tag):
+        if tag == "section" and self._depth:
+            self._depth -= 1
+
+
+def _strip_comments(js: str) -> str:
+    """js without its /* ... */ blocks and its // comments, a // that starts a line or follows
+    whitespace or ";" (so a URL's "://" in a string stays)."""
+    js = re.sub(r"/\*.*?\*/", "", js, flags=re.S)
+    return re.sub(r"(^|[\s;])//[^\n]*", r"\1", js, flags=re.M)
+
+
+def _summary_values() -> set[float]:
+    """The result numbers results.json carries, from the four committed summary.csv files (only
+    read; random's row included though site_build drops it): every <metric>_{iqm,lo,hi},
+    viol_hours_sum_iqm and rb_tuned_* cell, each as round(abs(x), 2), dropping those that round
+    below 0.10 (so a small layout constant such as a 6% pad, 0.06, can't collide)."""
+    columns = {f"{m}_{s}" for m in RESULT_METRICS for s in ("iqm", "lo", "hi")}
+    columns.add("viol_hours_sum_iqm")
+    values = set()
+    for split in RESULT_SPLITS:
+        path = ANALYSIS / split / "summary.csv"
+        assert path.is_file(), f"{path} is missing"
+        with path.open(newline="", encoding="utf-8") as f:
+            for row in csv.DictReader(f):
+                cells = [v for k, v in row.items() if k in columns or k.startswith("rb_tuned_")]
+                values |= {round(abs(float(v)), 2) for v in cells}
+    return {v for v in values if v >= 0.10}
+
+
+def _typed_values(js: str, values: set[float]) -> list[str]:
+    """The number literals in js, comments stripped, with 2 or more decimals whose absolute value
+    rounded to 2 decimals is one of values: a result typed by hand."""
+    found = TYPED.findall(_strip_comments(js))
+    return [lit for lit in found if round(abs(float(lit)), 2) in values]
 
 
 # --- site/data/: the six files (Done when) ------------------------------------------------------
@@ -480,7 +621,8 @@ def test_site_index_has_the_instrument_layout_hooks():
     """Done when (#52 step 1, the Instrument layout from Aarmen's design comment on #49):
     site/index.html, parsed with html.parser, has
     - a <nav class="side"> (the sidebar nav);
-    - at least three <section class="sec"> blocks (Replay, Scoreboard, Source);
+    - at least three <section class="sec"> blocks (Replay, Scoreboard, Source; #60 adds Results
+      second, so four, whose order the Results-section tests pin);
     - in each, a <span class="num"> gutter number; the first one in each section, in page order,
       reads 01, 02, 03, ... (two digits, consecutive from 01).
     The grid's <canvas data-g> isn't required here: app.js builds it."""
@@ -710,13 +852,108 @@ def test_site_final_result_row_is_read_from_index_json_not_typed():
     assert not typed, f"site/ types the final-result row id(s) {typed} by hand"
 
 
+# --- the Results section: site/index.html and site/results.js (#60, Done when) ------------------
+
+
+def test_site_results_section_is_second_in_page_and_nav_order():
+    """Done when (#60 step 1): site/index.html, parsed with html.parser, has its
+    <section class="sec"> blocks in page order with exactly the ids replay, results, scoreboard,
+    source, and its <nav class="side"> links them in the same order, each <a>'s href "#<id>" and its
+    <span> reading 01, 02, 03, 04: "02 Results" is new, Scoreboard and Source move to 03 and 04.
+    (The gutter's span.num numbering is the Instrument hooks test's.) #59's page has replay,
+    scoreboard and source, linked 01 to 03."""
+    index = SITE / "index.html"
+    assert index.is_file(), f"{index} is missing"
+    nav = _Nav()
+    nav.feed(index.read_text(encoding="utf-8"))
+    nav.close()
+
+    assert nav.sections == list(SECTIONS), f"the section.sec ids, in page order, are {nav.sections}"
+    want = [(f"#{s}", f"{i:02d}") for i, s in enumerate(SECTIONS, 1)]
+    assert nav.links == want, f"nav.side's (href, span) links are {nav.links}"
+
+
+def test_site_index_loads_app_js_then_results_js():
+    """Done when (#60 step 2, the map's file plan): index.html's <script src> values, any ?query
+    or #fragment dropped, are exactly app.js then results.js: the chart lives in its own file,
+    loaded after app.js, whose loads it reuses. #59's page loads app.js alone."""
+    index = SITE / "index.html"
+    assert index.is_file(), f"{index} is missing"
+    page = _Page()
+    page.feed(index.read_text(encoding="utf-8"))
+    page.close()
+
+    scripts = [s.strip().split("#")[0].split("?")[0] for s in page.scripts]
+    assert scripts == list(SCRIPTS), f"index.html loads the scripts {scripts}"
+
+
+def test_site_results_section_holds_the_readout_and_the_split_note():
+    """Done when (#60 steps 3 and 5): index.html has a <section id="results">, and inside it an
+    element with id="results-readout" (the fixed readout below the chart that hover, tap and focus
+    fill) and one with id="results-note" (where the split's results.json note is shown under the
+    chart). That the readout follows the pointer and keyboard focus and the note switches with the
+    city is checked in Chrome (the issue's QA item). #59's page has neither."""
+    index = SITE / "index.html"
+    assert index.is_file(), f"{index} is missing"
+    inside = _ResultsIds()
+    inside.feed(index.read_text(encoding="utf-8"))
+    inside.close()
+
+    assert inside.found, 'index.html has no <section id="results">'
+    missing = sorted(RESULTS_IDS - inside.ids)
+    assert not missing, f"<section id=results> holds no element with the id(s) {missing}"
+
+
+def test_site_results_js_reads_the_summary_fields_and_never_decision():
+    """Done when (#60 steps 2, 3 and 5; Out of scope: verdicts): site/results.js, comments
+    stripped, names each results.json field the chart, readout and note read as a whole word:
+    profit_eur_m2, profit_gain, viol_hours_total, yield_kg_m2 (the metrics), iqm, lo and hi (their
+    statistics; so a metric's keys are built from the metric and the statistic, e.g.
+    `${m}_${s}`), n_runs, invalid_episodes, controller (the page id that picks a row) and note
+    (the split's note). And it never names `decision`, the rows' adopt-or-drop verdict: the section
+    shows numbers, not verdicts, and colours no controller pass or fail. How it reads them is free.
+    #59 has no results.js."""
+    path = SITE / "results.js"
+    assert path.is_file(), f"{path} is missing"
+    js = _strip_comments(path.read_text(encoding="utf-8"))
+
+    unread = [k for k in READ_NAMES if not re.search(rf"\b{k}\b", js)]
+    assert not unread, f"site/results.js never names {unread} as a whole word"
+    assert not re.search(r"\bdecision\b", js), "site/results.js names `decision`: a verdict"
+
+
+def test_site_results_js_types_no_result_number():
+    """Done when (#60 step 5): the chart draws from results.json's values, never from numbers typed
+    in JS. Every number literal in site/results.js with 2 or more decimals, comments stripped
+    (TYPED: not part of a name, a longer number or a member access), is compared, as
+    round(abs(x), 2), with every result number results.json carries from the four committed
+    summary.csv files: each <metric>_{iqm,lo,hi}, viol_hours_sum_iqm and rb_tuned_* cell (random's
+    row too), as round(abs(x), 2), those below 0.10 dropped. A literal in that set fails. app.js
+    isn't scanned: it draws no result, and its replay constants 0.25 and 0.75 equal result values.
+
+    Non-vacuous, both guards checked first:
+    - the set holds over 200 numbers (517 in the committed files on 2026-11-02);
+    - the scanner flags a planted "x = -1.92;": the tuned rules' Amsterdam 2012 profit IQM,
+      -1.9175741968487416 €/m², is -1.92 to 2 decimals (abs 1.92), the obvious number to type."""
+    values = _summary_values()
+    assert len(values) > 200, f"only {len(values)} result numbers: the scanner would test nothing"
+    planted = _typed_values("x = -1.92;", values)
+    assert planted == ["1.92"], f"the scanner finds {planted} in a planted -1.92, not ['1.92']"
+
+    path = SITE / "results.js"
+    assert path.is_file(), f"{path} is missing"
+    typed = _typed_values(path.read_text(encoding="utf-8"), values)
+    assert not typed, f"site/results.js types result numbers by hand: {typed}"
+
+
 # --- site/: the whole page (Done when) ----------------------------------------------------------
 
 
 def test_site_totals_under_1_mb():
     """Done when: every file under site/, recursively (the page and its data), totals under
-    1,000,000 bytes (1 MB, decimal). The page's three files and the six data files must be among
-    them, so a missing or empty site/ doesn't pass."""
+    1,000,000 bytes (1 MB, decimal). The page's files (four since #60: results.js joins
+    index.html, style.css and app.js) and the six data files must be among them, so a missing or
+    empty site/ doesn't pass."""
     assert SITE.is_dir(), f"{SITE} is missing"
     files = [p for p in SITE.rglob("*") if p.is_file()]
     present = {p.relative_to(SITE).as_posix() for p in files}

@@ -401,7 +401,9 @@ ui.diff.insertAdjacentHTML(
       `<strong data-d="${k}"></strong></div>`,
   ).join(""),
 );
-Promise.all(["data/index.json", "data/results.json"].map((url) => fetchJson(url)))
+// Named so results.js (the Results section, #60) reads the same two files.
+const loaded = Promise.all(["data/index.json", "data/results.json"].map((url) => fetchJson(url)));
+loaded
   .then(([i, r]) => {
     index = i;
     results = r;
