@@ -22,6 +22,13 @@ match, since the Mac's filesystem ignores case; protect_secrets.py judges a syml
 well as its own name, blocks a Grep of the home folder with no filter, and calls the brace cap's
 block what it is, not a crash; stop_tests.py blocks the stop when control/.venv or uv is missing or
 uv can't run; and the Stop hook's settings timeout covers its own worst case.
+
+Issue #40 opens a checkout's control/results/final/ to Read, Grep and Glob, in every mode, once the
+ledger beside it (that checkout's control/ledger/ledger.jsonl) holds a final-result row: the seal is
+spent, so reading the results can't steer anything. No ledger, an unreadable one, or any line that
+isn't a JSON object keeps it sealed. Writes there and the 2012 weather stay blocked for good. These
+tests use fake checkouts under tmp_path, so the real ledger's seal decides none of them: the day F1's
+final-result lands on dev, a test that read the real repo's results/final would turn red.
 """
 
 import ast
@@ -185,15 +192,13 @@ BLOCKED_BASH = [
     ),
 ]
 
+# The 2012 weather only: control/results/final/ opens with the ledger beside it (#40), so its cases
+# use fake checkouts under tmp_path (below), never this repo's.
 SEALED_READS = [
-    pytest.param(_file_call("Read", CONTROL / "results/final/x.parquet"), id="read results/final"),
     pytest.param(
         _file_call("Read", CONTROL / "data/weather/Amsterdam/2012.csv"), id="read 2012 weather"
     ),
     pytest.param(_file_call("Read", GL_GYM_2012), id="read gl_gym's 2012 weather"),
-    pytest.param(
-        _call("Grep", ROOT, pattern="iqm", path="control/results/final"), id="grep results/final"
-    ),
     pytest.param(
         _call("Glob", ROOT, pattern="control/data/weather/*/2012.csv"), id="glob 2012 weather"
     ),
@@ -262,9 +267,9 @@ def test_guard_runs_blocks_bash_that_writes_results_or_runs_for_real(command, cw
 
 @pytest.mark.parametrize("mode", MODES)
 @pytest.mark.parametrize("payload", SEALED_READS)
-def test_guard_runs_blocks_reads_of_the_sealed_results_and_test_weather(payload, mode):
-    """Read, Grep and Glob can't reach control/results/final/ or any weather/<dir>/2012.csv,
-    gl_gym's copy in the venv included.
+def test_guard_runs_blocks_reads_of_the_test_weather(payload, mode):
+    """Read, Grep and Glob can't reach any weather/<dir>/2012.csv, gl_gym's copy in the venv
+    included. control/results/final/'s reads are tested on fake checkouts (#40, below).
     """
     _assert_blocked(_hook("guard_runs.py", payload, mode))
 
@@ -1317,3 +1322,232 @@ def test_stop_tests_worst_case_fits_its_settings_timeout():
     assert timeouts == ["GIT_TIMEOUT", "PYTEST_TIMEOUT"], timeouts
     worst_case = len(git_calls) * git_timeout + pytest_timeout + 20
     assert worst_case <= _stop_hook_timeout(), (worst_case, _stop_hook_timeout())
+
+
+# ---------------------------------------------------------------------------------------------
+# guard_runs.py (#40): control/results/final/ opens once the ledger beside it has a final-result
+# ---------------------------------------------------------------------------------------------
+
+LEDGER = "control/ledger/ledger.jsonl"
+
+
+def _row(kind: str, **fields) -> str:
+    """One ledger line of kind, with the base fields the ledger CLI stamps on every row."""
+    return json.dumps(
+        {
+            "schema_version": 1,
+            "row_id": f"{kind}-0000abcd",
+            "kind": kind,
+            "at": "2026-11-01T00:00:00+00:00",
+            "issue": 40,
+            "fingerprints": {},
+            **fields,
+        }
+    )
+
+
+# A ledger up to an approved final that hasn't run yet, then the same ledger with the final's row.
+UNSPENT = [
+    _row("registered", hypothesis="h"),
+    _row("result", registered="registered-0000abcd"),
+    _row("final-registered", approved_by="Aarmen"),
+]
+FINAL_RESULT = _row(
+    "final-result", **{"final-registered": "final-registered-0000abcd", "per_split": {}}
+)
+SPENT = [*UNSPENT, FINAL_RESULT]
+
+# Ledgers that keep the seal: no final-result row, or a line that isn't a JSON object anywhere in
+# the file (fail closed), or bytes that aren't text.
+SEALED_LEDGERS = [
+    pytest.param(None, id="no ledger"),
+    pytest.param([], id="an empty ledger"),
+    pytest.param(UNSPENT, id="registered, result and final-registered rows only"),
+    pytest.param([*SPENT, "not json"], id="a final-result row, then a line that isn't JSON"),
+    pytest.param(["not json", *SPENT], id="a line that isn't JSON, then a final-result row"),
+    pytest.param(
+        [*UNSPENT, json.dumps({"kind": "result", "note": "final-result"})],
+        id="final-result as a value, not the kind",
+    ),
+    pytest.param([*UNSPENT, json.dumps("final-result")], id="a JSON string, not an object"),
+    pytest.param(
+        [*UNSPENT, json.dumps([json.loads(FINAL_RESULT)])], id="a final-result row inside a list"
+    ),
+    pytest.param(
+        "".join(f"{line}\n" for line in SPENT).encode() + b"\xff\n",
+        id="a final-result row, then bytes that aren't UTF-8",
+    ),
+]
+
+# How Read, Grep and Glob name a checkout's sealed results: by absolute path ({checkout} is filled
+# in), relative to the call's cwd (the checkout), and in mixed case past the checkout. Only
+# Control/Results/Final changes case, never the tmp_path part: Linux CI's filesystem is
+# case-sensitive, so a re-cased tmp_path would be another folder there.
+FINAL_READS_ABSOLUTE = [
+    pytest.param("Read", {"file_path": "{checkout}/control/results/final/x.json"}, id="Read"),
+    pytest.param("Grep", {"pattern": "iqm", "path": "{checkout}/control/results/final"}, id="Grep"),
+    pytest.param(
+        "Glob", {"pattern": "*.json", "path": "{checkout}/control/results/final"}, id="Glob"
+    ),
+]
+FINAL_READS = [
+    *FINAL_READS_ABSOLUTE,
+    pytest.param("Read", {"file_path": "control/results/final/x.json"}, id="Read relative"),
+    pytest.param("Grep", {"pattern": "iqm", "path": "control/results/final"}, id="Grep relative"),
+    pytest.param("Glob", {"pattern": "control/results/final/*.json"}, id="Glob relative, no path"),
+    pytest.param(
+        "Read", {"file_path": "{checkout}/Control/Results/Final/x.json"}, id="Read mixed case"
+    ),
+    pytest.param(
+        "Grep", {"pattern": "iqm", "path": "{checkout}/Control/Results/Final"}, id="Grep mixed case"
+    ),
+    pytest.param(
+        "Glob",
+        {"pattern": "*.json", "path": "{checkout}/Control/Results/Final"},
+        id="Glob mixed case",
+    ),
+]
+
+# Read, Grep and Glob of the checkout's 2012 weather, which no ledger row opens.
+WEATHER_READS = [
+    pytest.param(
+        "Read", {"file_path": "{checkout}/control/data/weather/Amsterdam/2012.csv"}, id="Read"
+    ),
+    pytest.param(
+        "Grep",
+        {"pattern": "x", "path": "{checkout}/control/data/weather/Amsterdam/2012.csv"},
+        id="Grep",
+    ),
+    pytest.param(
+        "Glob", {"pattern": "*/2012.csv", "path": "{checkout}/control/data/weather"}, id="Glob"
+    ),
+]
+
+
+def _checkout(root: Path, ledger: list[str] | bytes | None) -> Path:
+    """A fake checkout at root, inside tmp_path: control/results/final/x.json and
+    control/data/weather/Amsterdam/2012.csv (dummies), and, unless ledger is None, LEDGER holding
+    ledger's lines, or its bytes as they are. Never this repo, so the real seal decides nothing.
+
+    Callers name root with capitals (Repo, A): a hook that opened the case-folded ledger path would
+    miss it on Linux CI, where case matters, and keep the seal it should open.
+    """
+    for rel in ("control/results/final/x.json", "control/data/weather/Amsterdam/2012.csv"):
+        (root / rel).parent.mkdir(parents=True)
+        (root / rel).write_text("x\n")
+    if ledger is not None:
+        if not isinstance(ledger, bytes):
+            ledger = "".join(f"{line}\n" for line in ledger).encode()
+        (root / LEDGER).parent.mkdir(parents=True)
+        (root / LEDGER).write_bytes(ledger)
+    return root
+
+
+def _in_checkout(tool: str, tool_input: dict, checkout: Path, cwd: Path | None = None) -> dict:
+    """tool's call with {checkout} filled in, from cwd (the checkout itself by default)."""
+    filled = {key: value.format(checkout=checkout) for key, value in tool_input.items()}
+    return _call(tool, cwd or checkout, **filled)
+
+
+def _assert_blocked_not_crashed(proc: subprocess.CompletedProcess) -> None:
+    """Blocked by a rule. A crash blocks too, since the hook fails closed, so exit 2 alone can't
+    tell a seal kept on purpose from a ledger check that raised.
+    """
+    _assert_blocked(proc)
+    assert "crashed" not in proc.stderr, proc.stderr
+
+
+@pytest.mark.parametrize("mode", MODES)
+@pytest.mark.parametrize(("tool", "tool_input"), FINAL_READS_ABSOLUTE)
+@pytest.mark.parametrize("ledger", SEALED_LEDGERS)
+def test_guard_runs_keeps_results_final_sealed_without_a_final_result_row(
+    tmp_path, ledger, tool, tool_input, mode
+):
+    """Read, Grep and Glob of control/results/final/ stay blocked, by the hook's rule and not its
+    crash handler, while the ledger beside it has no final-result row, or has one plus any line
+    that isn't a JSON object (fail closed): no ledger, an empty one, registered, result and
+    final-registered rows only, a line that isn't JSON before or after the row, "final-result" as
+    a value rather than the kind, a JSON string or list where an object should be, and bytes that
+    aren't UTF-8.
+    """
+    checkout = _checkout(tmp_path / "Repo", ledger)
+    _assert_blocked_not_crashed(
+        _hook("guard_runs.py", _in_checkout(tool, tool_input, checkout), mode)
+    )
+
+
+@pytest.mark.parametrize("mode", MODES)
+@pytest.mark.parametrize(("tool", "tool_input"), FINAL_READS_ABSOLUTE)
+def test_guard_runs_keeps_results_final_sealed_when_the_ledger_cant_be_opened(
+    tmp_path, tool, tool_input, mode
+):
+    """A ledger.jsonl that is a folder raises an OSError when opened: still sealed, by the hook's
+    rule and not its crash handler.
+    """
+    checkout = _checkout(tmp_path / "Repo", None)
+    (checkout / LEDGER).mkdir(parents=True)
+    _assert_blocked_not_crashed(
+        _hook("guard_runs.py", _in_checkout(tool, tool_input, checkout), mode)
+    )
+
+
+@pytest.mark.parametrize("mode", MODES)
+@pytest.mark.parametrize(("tool", "tool_input"), FINAL_READS)
+def test_guard_runs_opens_results_final_once_the_seal_is_spent(tmp_path, tool, tool_input, mode):
+    """The same Read, Grep or Glob of control/results/final/ is blocked while the checkout's
+    ledger holds registered, result and final-registered rows, and passes in every mode once a
+    final-result row is appended: by absolute path, relative to the cwd (the checkout), and with
+    Control/Results/Final in mixed case. The block first shows the pass comes from the row, not
+    from the hook missing the path.
+    """
+    checkout = _checkout(tmp_path / "Repo", UNSPENT)
+    payload = _in_checkout(tool, tool_input, checkout)
+    _assert_blocked_not_crashed(_hook("guard_runs.py", payload, mode))
+    with (checkout / LEDGER).open("a") as ledger:
+        ledger.write(FINAL_RESULT + "\n")
+    _assert_allowed(_hook("guard_runs.py", payload, mode))
+
+
+@pytest.mark.parametrize("mode", MODES)
+@pytest.mark.parametrize(("tool", "tool_input"), FINAL_READS_ABSOLUTE)
+def test_guard_runs_asks_the_ledger_beside_the_results(tmp_path, tool, tool_input, mode):
+    """Checkout A's seal is spent. Checkout B sits inside it, as .worktrees/<n> sits inside the
+    main checkout, and has no ledger. B's results/final stays blocked with the cwd in A, and A's
+    opens with the cwd in B: the ledger beside the results decides, not the cwd's, not this repo's,
+    and not the nearest one found by climbing above B.
+    """
+    spent = _checkout(tmp_path / "A", SPENT)
+    sealed = _checkout(spent / ".worktrees/9", None)
+    _assert_blocked_not_crashed(
+        _hook("guard_runs.py", _in_checkout(tool, tool_input, sealed, cwd=spent), mode)
+    )
+    _assert_allowed(_hook("guard_runs.py", _in_checkout(tool, tool_input, spent, cwd=sealed), mode))
+
+
+@pytest.mark.parametrize("mode", MODES)
+@pytest.mark.parametrize("tool", [*WRITE_TOOLS, "Bash"])
+def test_guard_runs_keeps_results_final_unwritable_after_the_seal_is_spent(tmp_path, tool, mode):
+    """A spent seal opens reads only: Write, Edit, MultiEdit and NotebookEdit of
+    control/results/final/x.json, and `echo x > control/results/final/x.json` from the checkout,
+    stay blocked.
+    """
+    checkout = _checkout(tmp_path / "Repo", SPENT)
+    if tool == "Bash":
+        payload = _bash("echo x > control/results/final/x.json", checkout)
+    else:
+        payload = _file_call(tool, checkout / "control/results/final/x.json", checkout)
+    _assert_blocked_not_crashed(_hook("guard_runs.py", payload, mode))
+
+
+@pytest.mark.parametrize("mode", MODES)
+@pytest.mark.parametrize(("tool", "tool_input"), WEATHER_READS)
+def test_guard_runs_keeps_the_2012_weather_sealed_after_the_seal_is_spent(
+    tmp_path, tool, tool_input, mode
+):
+    """A final-result row opens control/results/final/ only: Read, Grep and Glob of the same
+    checkout's control/data/weather/Amsterdam/2012.csv stay blocked.
+    """
+    checkout = _checkout(tmp_path / "Repo", SPENT)
+    _assert_blocked_not_crashed(
+        _hook("guard_runs.py", _in_checkout(tool, tool_input, checkout), mode)
+    )
