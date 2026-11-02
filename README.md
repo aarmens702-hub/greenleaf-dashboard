@@ -18,9 +18,9 @@ The write-up, with every experiment, drop and limitation, is [docs/REPORT.md](do
 The final scored 30 checkpoints, each selected on validation and registered in advance (final-registered-4d0a4ba9),
 and 4 baselines once on three test splits: a new year (Amsterdam 2012) and two new climates (London and Abbotsford BC,
 2012), each 8 seasons of 60 days from start days 45 to 73. Its record is final-result-aee23915. The table shows the two
-co-pilots, 10 seeds each, against the tuned rules on the same seasons: `residual_w05` has a fixed violation penalty
-(w = 0.5), and `lag_b100` has a PID-Lagrangian multiplier per constraint with a budget of 100% of the tuned rules'
-violations.
+co-pilots, 10 seeds each, against the tuned rules on the same seasons. `residual_w05` has a fixed violation penalty
+(w = 0.5). `lag_b100` has PID-Lagrangian multipliers on temperature and RH, each with a budget of 100% of the tuned
+rules' mean per-step cost on TRAIN_EVAL; CO₂'s budget is 0, so under PROTOCOL v2 its multiplier is fixed at 1.
 
 | Test split | `residual_w05` gain, €/m² [95% CI] | Σ hours (`rb_tuned`) | Grade | `lag_b100` gain, €/m² [95% CI] | Σ hours (`rb_tuned`) | Grade |
 |---|---|---|---|---|---|---|
@@ -41,12 +41,21 @@ What didn't hold:
   splits, and it fails rule (b) in Amsterdam, where its Σ of 399.9 h is above the tuned rules' 365.2 h; `residual_w05`
   passes on every split.
 - **Plain PPO earned more, with fewer hours.** `ppo` and `ppo_paper` (5 seeds each), which ignore the rules, beat
-  either co-pilot on profit and on Σ hours on every split (gains of 2.08 to 3.36 €/m² at Σ 227.1 to 260.8 h) by
-  growing about 30% less fruit than the co-pilots (REPORT.md §5.2), which this 60-day profit does not penalize.
+  either co-pilot on profit and on Σ hours on every split (gains of 2.08 to 3.36 €/m² at Σ 227.1 to 260.8 h) while
+  growing about 30% less fruit than the co-pilots (REPORT.md §5.2). Profit charges for that fruit at €1.60/kg, but
+  the energy and CO₂ costs PPO saves, with the lamps and CO₂ dosing off in almost every hour of the seed-0 replays
+  (REPORT.md §5.2), are larger than the fruit revenue it loses; nothing in #45's rule guards fruit growth, and nothing
+  values the crop still on the plants at day 60 (REPORT.md §6).
 - **Doing nothing earns the most.** `zero_controls`, every actuator off, has the highest profit on every split (3.10,
   3.21 and 1.91 €/m²) at Σ 2977.5, 3058.7 and 3013.1 h, which is why profit is read only next to violation hours.
 - **The margins are small.** The co-pilots' gains are a few tenths of a euro per m² a season, on profits that stay
   negative for the tuned rules and both co-pilots in Amsterdam and Abbotsford.
+- **The fixed-penalty gain shrank in Amsterdam.** `residual_w05`'s Amsterdam gain, 0.30 [0.25, 0.35] €/m², lies below
+  its validation gain of 0.49 [0.40, 0.57] without overlapping (validation summary.csv, residual_w05 #36/f2fd);
+  London's and Abbotsford's CIs overlap it (REPORT.md §5.2).
+- **Both co-pilots sometimes broke the CO₂ range, which the tuned rules never did.** `residual_w05` had CO₂ hours in 29
+  of its 240 test seasons (at most 12.2 h in one), `lag_b100` in 18 of 240 (at most 6.2 h), and `rb_tuned` in 0 of
+  24; the Σ column hides this (REPORT.md §5.2, from the final's `seasons.parquet`).
 
 Every arm and baseline per split, with per-constraint hours and fruit growth:
 [docs/REPORT.md §5](docs/REPORT.md#5-the-final).
@@ -70,8 +79,9 @@ Drawn by `report --split amsterdam_2012` from summary.csv; London's and Abbotsfo
   fingerprints of the scoring code and the protocol, and `check_locks.py` proves from git history that rows were only
   appended.
 - **Like-for-like baselines.** The rule-based controller's 12 setpoints were tuned with Optuna TPE (200 trials) before
-  any RL arm was compared with it, and each arm is compared with it on the same seasons, through the same IQM at the
-  arm's seed count.
+  any RL arm was compared with it. From E5b on and in the final, each arm is compared with it on the same seasons,
+  through the same IQM at the arm's seed count; E2 to E5's rules used a baseline's plain mean, and REPORT.md §3.5
+  regrades them.
 
 ## Reproduce
 
@@ -102,7 +112,8 @@ grower's rules (rb_tuned): upstream's rule-based controller, 12 setpoints tuned 
    │  proposes u_rb, 6 controls in [0, 1], every 15 minutes
    ▼
 co-pilot (PPO residual): u = clip(u_rb + 0.15 · a, 0, 1), a in [-1, 1]⁶, so at most ±15% of each control's range
-   │  residual_w05: a fixed violation penalty; lag_b100: a PID-Lagrangian multiplier per constraint
+   │  residual_w05: a fixed violation penalty (w = 0.5)
+   │  lag_b100: PID-Lagrangian multipliers on temperature and RH; CO₂'s multiplier fixed at 1 (its budget is 0)
    ▼
 GreenLight-Gym tomato simulator (pinned at 2d3febb), 60-day seasons
    │  raw states and controls
