@@ -12,16 +12,21 @@ media plays the baselines on PAPER and draws them:
   first k steps (states[:k + 1], controls[:k]).
 - season_replay(frame, counters, out_gif, out_mp4=None, *, title, subtitle=None, footer, fps=15)
   -> Figure: a FuncAnimation on a plain Figure (no pyplot), saved as a GIF (and an MP4 when
-  out_mp4 is given), returned in its final frame's state. Its climate lines are frame.iloc[::4]
-  (hourly) co2, temp and rh against t, each over its metrics.BOUNDS band (axhspan); its actuator
-  heat strip is the same hourly rows' six u_* columns as a 6-row array (row j = U_COLS[j], column
-  i = hourly row i); its counters are counters' rows as text, the final frame showing the last
-  row; the title, the subtitle (when given) and the footer are each one text, as given.
+  out_mp4 is given), returned in its final frame's state. Its climate lines are _hourly(frame)'s
+  co2, temp and rh against t, each over its metrics.BOUNDS band (axhspan); its actuator heat
+  strip is _hourly(frame)'s six u_* columns as a 6-row array (row j = U_COLS[j], column i = hour
+  i); after a counters row's k steps it shows the k // 4 complete hours; its counters are
+  counters' rows as text, the final frame showing the last row; the title, the subtitle (when
+  given) and the footer are each one text, as given.
 - baselines_card(seasons, out, *, footer) -> Figure: seasons maps rb_default, zero_controls and
   random to play()'s dicts; three columns left to right in that order, each with its own strip
-  (the same 6-row hourly array), its result's numbers, and each day's share of steps outside each
+  (the same 6-row _hourly array), its result's numbers, and each day's share of steps outside each
   safe range (a 3 x days array, rows in metrics.CONSTRAINTS order). One text says what profit
   counts: fruit value minus heating, power and CO₂.
+- _hourly(frame) (issue #51) is export_replay's hourly convention, so the README and the site draw
+  the same series: hour h's t, co2, temp and rh are frame row 4h + 3 (the end of the hour), and
+  each u_* is the mean of rows 4h..4h+3. Before #51 media drew frame.iloc[::4] (15 min into the
+  hour, actuators as instants); the tests pinning that changed with it, deliberately.
 - footer(source, stamp, *, place=PAPER_NAME, note="A simulator run, not a registered result")
   -> str, and main(argv=None) -> int, the CLI. main refuses an invalid season (a solver failure,
   or the wrong length) before writing anything, and titles the replay as simulated, with the
@@ -69,13 +74,53 @@ twice), says "yield" (yield_kg_m2 is the net change in standing fruit, not a har
 dash.
 
 Known answers: one day is 96 steps (86,400 s / 900 s), so a 1-day season has 96 frame rows and 24
-hourly rows (t = 0, 4, ..., 92). A violating step is 900 s = 0.25 h, so a prefix's viol_hours_<c>
-is its out-of-band frame rows (a value on a bound is in bounds) x 0.25.
+hourly rows (t = 3, 7, ..., 95, each hour's last row). A violating step is 900 s = 0.25 h, so a
+prefix's viol_hours_<c> is its out-of-band frame rows (a value on a bound is in bounds) x 0.25.
 
-The fast tests play 1-day PAPER seasons and write a GIF only. The slow one runs the CLI at its
-defaults (three 60-day seasons, GIF and MP4 through ffmpeg) and is skipped without ffmpeg and
-ffprobe. The 2012 weather is sealed (PROTOCOL §8): every test runs under a tripwire on
-pandas.read_csv that fails before any *2012.csv is read.
+The climate stripes (issue #51; Aarmen's scope update replaced the side-by-side line replay) replay
+one recorded VALIDATION result: rb_tuned above one E6 residual_w05 run at its selected checkpoint,
+on SEASON = scenarios.VALIDATION[1] (Amsterdam 2010 from day 59, upstream's PAPER season), in the
+site's "Instrument" style (SITE_BG #F2F3F0, SITE_INK #111311, SITE_MUTED #6A6F68; a GROTESK title,
+MONO captions and totals, each set per text with fontfamily=, never in rcParams).
+- replay_pick(result_id, path=ledger.LEDGER, parquet=selection.RESULTS / RB_PARQUET) -> dict: the
+  run to replay by PROTOCOL §6's rule (no best seed): the result row's scored runs sorted by
+  (recorded SEASON profit, seed), index (n - 1) // 2, the lower median, ties to the lower seed. A
+  run's record is per_scenario[1] of its selected.json candidate at its selected checkpoint. It
+  returns export_replay._registered_run's keys (id, registered, result, arm, seed, checkpoint from
+  the result row, commit from the run's manifest) plus run_dir, decision (the decision row's id),
+  record and rb_record (the parquet's SEASON row). ValueError naming the row, before any season:
+  a row that isn't a result; a registration not on exactly ["validation"]; no decision row, two,
+  or one that isn't adopted; more than one arm; a scored run's run_dir missing; any run's
+  selected.json not on VALIDATION in 60-day seasons, or its checkpoint not the result row's; a
+  parquet with no SEASON row.
+- _stripes(panels, figsize, *, title, caption, footer) -> (Figure, draw): panels are
+  [{heading, frame, result, counters}], "Tuned rules" (rb_tuned) above "Rules + co-pilot" (the
+  run). Each panel is one image: the 24 x n_days grid _hourly(frame)["temp"] reshaped (n_days, 24)
+  and transposed (row = hour 00..23 from the top, column = day), on TEMP_CMAP with clim
+  TEMP_SCALE = (10, 36) °C in both panels. TEMP_CMAP has 26 colours, one per 1 °C, none of them
+  the page colour. draw(d) shows days 1..d (later columns masked), "day d / n", and each panel's
+  totals from its counters' row d - 1 (counters are running() at the end of each day): profit
+  with "€/m²" and each constraint's hours with its label, at 2 decimals. The figure is figsize on
+  SITE_BG; title, caption and footer are each one text, as given.
+- duel_replay(panels, out_gif, out_mp4, out_png, *, title, caption, footer, fps=REPLAY_FPS) ->
+  Figure: each day d = 1..n drawn DAY_FRAMES times, then a 2 s hold; the GIF at 12.8 x 7.2 in and
+  100 dpi (1280 x 720), the MP4 (none when out_mp4 is None) at 150 dpi (1920 x 1080), and the
+  still at 12 x 6.27 in and 100 dpi to out_png (hero.png, 1200 x 627).
+- main --replay RESULT_ROW also writes hero.png, duel_replay.gif and duel_replay.mp4: rb_tuned
+  through export_replay._season("rb_tuned", SEASON, None), the run through evaluate.run_policy at
+  its selected checkpoint, each checked against its record on every ledger.RESULT_KEYS key (hours
+  and steps exactly, the rest to rel 1e-9) before --out is created; a mismatch refuses. Each new
+  media.json entry has today's keys plus split, ledger [run row, result, decision, E1], run {seed,
+  checkpoint, run_dir, manifest_commit} and metrics {"rb_tuned", <arm>}. Without --replay main is
+  as it was, so it still runs on a fresh clone (E6's run dirs aren't in git).
+The replay's tests build an E6-shaped tmp ledger (10 seeds, fake run dirs holding manifest.json
+and selected.json) and a tmp parquet, and replace evaluate.run_policy with a spy returning a real
+season, so no checkpoint loads; the fast ones patch export_replay.SEASON_LENGTH to 1 day.
+
+The fast tests play 1- or 2-day seasons and write a GIF only. The slow ones run the CLI (60-day
+seasons, GIF and MP4 through ffmpeg) and are skipped without ffmpeg and ffprobe. The 2012 weather
+is sealed (PROTOCOL §8): every test runs under a tripwire on pandas.read_csv that fails before any
+*2012.csv is read.
 """
 
 import ast
@@ -90,13 +135,14 @@ import sys
 from datetime import datetime
 from pathlib import Path
 
+import matplotlib
 import numpy as np
 import pandas as pd
 import pytest
 from matplotlib.animation import FFMpegWriter
 from matplotlib.backends.backend_agg import FigureCanvasAgg
 from matplotlib.collections import QuadMesh
-from matplotlib.colors import to_hex, to_rgba
+from matplotlib.colors import Normalize, to_hex, to_rgb, to_rgba
 from matplotlib.container import ErrorbarContainer
 from matplotlib.figure import Figure
 from matplotlib.image import AxesImage
@@ -282,6 +328,128 @@ REFUSALS = (
     "no_yield_guard",
 )
 
+# --- The climate stripes (issue #51) ---
+SEASON = VALIDATION[1]  # Amsterdam 2010 from day 59, upstream's PAPER season
+REPLAY_NAMES = (
+    "SEASON",
+    "SITE_BG",
+    "SITE_INK",
+    "SITE_MUTED",
+    "TEMP_SCALE",
+    "TEMP_CMAP",
+    "REPLAY_FPS",
+    "DAY_FRAMES",
+    "GROTESK",
+    "MONO",
+    "_hourly",
+    "replay_pick",
+    "_stripes",
+    "duel_replay",
+)
+REPLAY_FILES = ("duel_replay.gif", "duel_replay.mp4", "hero.png")
+TOP, BOTTOM = "Tuned rules", "Rules + co-pilot"  # the panels' headings, top to bottom
+STRIPES_TITLE = "2 days of greenhouse air, hour by hour"
+# A caption and footer the renderer tests pass in: no decimal number, so none is mistaken for a
+# total.
+CAPTION = (
+    "air temperature, 10 to 36 °C; safe range 15 to 34 °C. VALIDATION season, Amsterdam 2010"
+    " from day 59, not the final. run-0000abcd, seed 107, checkpoint 1750000"
+)
+REPLAY_FOOTER = "source: run-0000abcd, VALIDATION, Amsterdam 2010 day 59, commit 0123456"
+REPLAY_PLACE = (
+    "VALIDATION, Amsterdam 2010 day 59"  # the replay's footer place, as the issue words it
+)
+REPLAY_NOTE = "A replay of a recorded VALIDATION result; the 2012 test weather is still sealed"
+ARM = "residual_w05"
+RUN_COMMIT = "fedcba9876543210fedcba9876543210fedcba98"  # the fake runs' training commit, made up
+REPLAY_SEEDS = list(range(100, 110))  # E6's ten seeds
+# Each seed's recorded SEASON profit as an offset from the record's [€/m²]. Sorted by (profit,
+# seed): 100, 104, 102, 106, 107, 103, 108, 101, 105, 109. The lower median of 10 is index
+# (10 - 1) // 2 = 4, seed 107; the upper median (index 5) is 103 and the best is 109.
+OFFSETS = {
+    100: -0.4,
+    101: 0.3,
+    102: -0.2,
+    103: 0.1,
+    104: -0.3,
+    105: 0.4,
+    106: -0.1,
+    107: 0.0,
+    108: 0.2,
+    109: 0.5,
+}
+# Seeds 103 and 107 tie at the median: sorted by (profit, seed) 100, 104, 102, 106, 103, 107, ...;
+# index 4 is 103, the lower seed of the tie (ties to the higher seed, or the upper median, give 107).
+TIED = {**OFFSETS, 103: 0.0}
+# Each run's selected checkpoint (the result row's, and its selected.json's).
+CHECKPOINTS = {
+    100: "1500000",
+    101: "final",
+    102: "1250000",
+    103: "500000",
+    104: "2000000",
+    105: "1000000",
+    106: "1500000",
+    107: "1750000",
+    108: "final",
+    109: "1250000",
+}
+# A recorded 60-day season with every ledger.RESULT_KEYS key: made-up numbers, hours multiples of
+# 0.25 h, steps 60 x 96 = 5,760. RB_RECORD is rb_tuned's SEASON row.
+RECORD = {
+    "profit_eur_m2": 1.5,
+    "viol_hours_co2": 0.25,
+    "viol_hours_temp": 50.0,
+    "viol_hours_rh": 180.0,
+    "pct_in_bounds_co2": 99.75,
+    "pct_in_bounds_temp": 96.5,
+    "pct_in_bounds_rh": 87.5,
+    "yield_kg_m2": 9.5,
+    "heat_cost": 1.25,
+    "elec_cost": 3.5,
+    "co2_cost": 0.5,
+    "paper_return": 3500.0,
+    "solver_failures": 0,
+    "steps": 5760,
+    "paper_reward_sum": 3400.0,
+}
+RB_RECORD = {
+    **RECORD,
+    "profit_eur_m2": 1.25,
+    "viol_hours_co2": 0.0,
+    "viol_hours_temp": 98.0,
+    "viol_hours_rh": 251.0,
+}
+PER_ARM = {
+    "iqm": 0.8,
+    "ci_low": 0.7,
+    "ci_high": 0.9,
+    "guards": {key: {"iqm": 1.0, "ci_low": 0.5, "ci_high": 1.5} for key in HOUR_KEYS},
+    "invalid_episodes": 0,
+}
+# The flaws replay_pick refuses; _replay_sources builds each.
+PICK_REFUSALS = (
+    "not_a_result",
+    "not_validation",
+    "undecided",
+    "dropped",
+    "two_decisions",
+    "two_arms",
+    "run_dir_missing",
+    "selected_not_validation",
+    "selected_not_60_days",
+    "checkpoint_disagrees",
+    "no_season_row",
+)
+# A replayed season that differs from its record: (side, key). One 900 s step more outside the temp
+# band is 0.25 h; a profit rel 1e-6 off is far above the rel 1e-9 the check allows.
+RECORD_MISMATCHES = [
+    ("rb_tuned", "viol_hours_temp"),
+    ("rb_tuned", "profit_eur_m2"),
+    ("run", "viol_hours_temp"),
+    ("run", "profit_eur_m2"),
+]
+
 
 @pytest.fixture(autouse=True)
 def no_2012_reads(monkeypatch) -> None:
@@ -401,7 +569,13 @@ def _card(out_dir: Path) -> tuple[Figure, Path]:
 
 
 def _hourly(frame: pd.DataFrame) -> pd.DataFrame:
-    return frame.iloc[::4]
+    """export_replay's hourly convention (issue #51), computed here as export_replay computes it:
+    hour h's t, co2, temp and rh are frame row 4h + 3 (the end of the hour), each u_* the mean of
+    rows 4h..4h+3."""
+    n_hours = len(frame) // 4
+    u = frame[U_COLS].to_numpy(dtype=np.float64).reshape(n_hours, 4, len(U_COLS)).mean(axis=1)
+    end = frame.iloc[3::4].reset_index(drop=True)
+    return end.assign(**{col: u[:, j] for j, col in enumerate(U_COLS)})
 
 
 def _xy(line) -> tuple[list[float], list[float]]:
@@ -826,6 +1000,381 @@ def _legend_texts(fig: Figure) -> tuple[list, list[str]]:
     return legends, [" ".join(t.get_text().split()) for lg in legends for t in lg.get_texts()]
 
 
+# --- The climate stripes' helpers (issue #51) ---------------------------------------------------
+
+
+def _media_has(*names: str):
+    """media, asserting the climate stripes' names (all of REPLAY_NAMES, or those given) exist
+    first, so until they do a test FAILS on this assertion rather than an AttributeError."""
+    import greenleaf_control.media as media
+
+    missing = [name for name in names or REPLAY_NAMES if not hasattr(media, name)]
+    assert not missing, f"media has no {', '.join(missing)} yet (issue #51)"
+    return media
+
+
+@functools.cache
+def _graded(controller: str, days: int) -> dict:
+    """A baseline's days-long SEASON as export_replay._season grades it, built here without media:
+    run_baseline's infos, evaluate._grade with the model's params and N (so every
+    ledger.RESULT_KEYS key, paper_reward_sum too), evaluate's frame and trace_from_infos. Cached:
+    the seasons are deterministic."""
+    infos = envs.run_baseline(controller, SEASON, days)
+    env = envs.make_raw_env(scenario=SEASON, season_length=days, normalize_actions=False)
+    result = evaluate._grade(infos, env.unwrapped)
+    params = np.asarray(env.unwrapped.p, dtype=np.float64)
+    env.close()
+    states, controls = metrics.trace_from_infos(infos)
+    return {
+        "frame": evaluate._frame(infos),
+        "result": result,
+        "states": states,
+        "controls": controls,
+        "params": params,
+    }
+
+
+def _plain(v):
+    """A number as JSON and a ledger hold it: an int stays an int, anything else a float."""
+    return int(v) if isinstance(v, (int, np.integer)) and not isinstance(v, bool) else float(v)
+
+
+def _record(result: dict) -> dict:
+    """A result's ledger.RESULT_KEYS numbers, as a selected.json or the parquet records them."""
+    return {key: _plain(result[key]) for key in ledger.RESULT_KEYS}
+
+
+def _keys(numbers, keys=ledger.RESULT_KEYS) -> dict:
+    """numbers' keys (a dict or a pandas row), each as a plain number."""
+    return {key: _plain(numbers[key]) for key in keys}
+
+
+def _stripe_panels(days: int) -> list[dict]:
+    """Two SEASON panels as main builds them, rb_tuned ("Tuned rules") above rb_default standing
+    in for the run ("Rules + co-pilot"; a checkpoint can't load here), each with its frame, result
+    and counters at the end of each day (96, 192, ... steps)."""
+    panels = []
+    for heading, controller in ((TOP, "rb_tuned"), (BOTTOM, "rb_default")):
+        s = _graded(controller, days)
+        panels.append(
+            {
+                "heading": heading,
+                "frame": s["frame"],
+                "result": s["result"],
+                "counters": _counters(s, [N_DAY * d for d in range(1, days + 1)]),
+            }
+        )
+    return panels
+
+
+def _grid(frame: pd.DataFrame) -> np.ndarray:
+    """The panel's 24 x n_days grid: _hourly(frame)["temp"], row = hour 00..23, column = day."""
+    temp = _hourly(frame)["temp"].to_numpy(dtype=np.float64)
+    return temp.reshape(len(frame) // N_DAY, 24).T
+
+
+def _temp_images(fig: Figure, n_days: int) -> list:
+    """Every image or mesh on fig holding a 24 x n_days array, top to bottom."""
+    found = fig.findobj(lambda a: isinstance(a, (AxesImage, QuadMesh)))
+    images = [a for a in found if np.shape(a.get_array()) == (24, n_days)]
+    return sorted(images, key=lambda a: -a.axes.get_position().y0)
+
+
+def _rendered(fig: Figure):
+    """fig drawn once on an Agg canvas; returns its renderer, for the texts' rendered places."""
+    FigureCanvasAgg(fig)
+    fig.canvas.draw()
+    return fig.canvas.get_renderer()
+
+
+def _y(text: Text, renderer) -> float:
+    box = text.get_window_extent(renderer)
+    return (box.y0 + box.y1) / 2
+
+
+def _printing(fig: Figure, label: str, v: float) -> list[Text]:
+    """fig's texts with a line holding label and v at 2 decimals."""
+    return [
+        t
+        for t in _texts(fig)
+        if any(label in ln and _has(ln, v) for ln in t.get_text().splitlines())
+    ]
+
+
+def _family(text: Text) -> list[str]:
+    return list(text.get_fontfamily())
+
+
+def _selected_json(
+    record: dict, seed: int, offset: float, *, checkpoint: str, scenarios_=None, days=60
+) -> dict:
+    """A run's selected.json as selection.select_checkpoint writes it, two candidates:
+    - its checkpoint's per_scenario: days 45 and 75 at the record's profit - offset, day 59
+      (SEASON) at + offset, so ranking on another season or on the mean gives another seed;
+    - another checkpoint's, every season at the record's profit + 0.05 x (seed - 100), so ranking
+      on it gives seed 104."""
+    p = record["profit_eur_m2"]
+
+    def candidate(profits: list[float]) -> dict:
+        return {
+            "per_scenario": [{**record, "profit_eur_m2": v, "valid": True} for v in profits],
+            "mean_paper_return": record["paper_return"],
+            "mean_profit_eur_m2": sum(profits) / 3,
+            "mean_cost": None,
+            "qualifies": None,
+        }
+
+    other = "1000000" if checkpoint == "final" else "final"
+    alt = p + 0.05 * (seed - 100)
+    return {
+        "checkpoint": checkpoint,
+        "method": "residual",
+        "rule": "max_mean_paper_return",
+        "scenarios": VALIDATION if scenarios_ is None else scenarios_,
+        "season_length": days,
+        "budgets": None,
+        "tolerance": None,
+        "candidates": {
+            checkpoint: candidate([p - offset, p + offset, p - offset]),
+            other: candidate([alt, alt, alt]),
+        },
+    }
+
+
+def _write_rb_parquet(path: Path, season: dict, days=(45, 59, 75)) -> None:
+    """rb_tuned's VALIDATION parquet as evaluate's CLI writes it, one row per season of days: day
+    59's (SEASON's) holds season's numbers, day 45's and 75's its profit 0.5 €/m² higher and lower,
+    so reading another season's row shows."""
+    shift = {45: 0.5, 59: 0.0, 75: -0.5}
+    rows = [
+        {
+            "controller": "rb_tuned",
+            "checkpoint": None,
+            "split": "validation",
+            **s,
+            "season_length": 60,
+            **season,
+            "profit_eur_m2": season["profit_eur_m2"] + shift[s["start_day"]],
+            "valid": True,
+        }
+        for s in VALIDATION
+        if s["start_day"] in days
+    ]
+    pd.DataFrame(rows).to_parquet(path)
+
+
+def _replay_sources(
+    root: Path,
+    case: str | None = None,
+    *,
+    offsets: dict = OFFSETS,
+    record: dict = RECORD,
+    rb_record: dict = RB_RECORD,
+) -> dict:
+    """An E6-shaped tmp ledger and parquet, built with the ledger's own API: one registration
+    (issue 36) of residual_w05 over seeds 100-109 on ["validation"]; per seed a fake run dir
+    root/runs/<registered>/residual_w05/seed<S> holding manifest.json (commit RUN_COMMIT) and
+    selected.json (_selected_json at CHECKPOINTS[S], its SEASON profit record's + offsets[S]); a
+    run row naming the dir and a finished run-end; one result row selecting every run at
+    CHECKPOINTS; one adopted decision; and rb_tuned's parquet with rb_record as SEASON's row.
+    case adds one of PICK_REFUSALS' flaws (on seed 100, never the pick, for a run's flaw). Returns
+    the ledger and parquet paths, the row ids, {seed: (run row, run dir)}, the id to pass
+    (replay) and the names a refusal may give (named)."""
+    root.mkdir(parents=True, exist_ok=True)
+    path = root / "ledger.jsonl"
+    arms = [ARM, "residual_w1"] if case == "two_arms" else [ARM]
+    reg = ledger.register(
+        issue=36,
+        hypothesis="synthetic rows for the climate stripes' tests",
+        arms=[{"name": arm, "method": "residual", "config": {}} for arm in arms],
+        seeds=REPLAY_SEEDS,
+        timesteps=2_000_000,
+        scenarios=["train_eval"] if case == "not_validation" else ["validation"],
+        primary="profit_eur_m2",
+        guards=HOUR_KEYS,
+        rule="synthetic",
+        budget={"cpu_hours": 0.0, "usd": 0.0, "backend": "local"},
+        path=path,
+    )
+    runs, selected = {}, {}
+    for arm in arms:
+        for seed in REPLAY_SEEDS:
+            run_dir = root / "runs" / reg["row_id"] / arm / f"seed{seed}"
+            run_dir.mkdir(parents=True)
+            manifest_json = {"commit": RUN_COMMIT, "config": {"method": "residual"}}
+            (run_dir / "manifest.json").write_text(json.dumps(manifest_json))
+            chosen = _selected_json(record, seed, offsets[seed], checkpoint=CHECKPOINTS[seed])
+            (run_dir / "selected.json").write_text(json.dumps(chosen))
+            run = ledger.run_start(
+                registered=reg["row_id"], arm=arm, seed=seed, run_dir=str(run_dir), path=path
+            )
+            ledger.run_end(
+                run=run["row_id"],
+                status="finished",
+                wall_s=1.0,
+                timesteps=2_000_000,
+                solver_failures=0,
+                cost_usd=None,
+                diagnostics=DIAGNOSTICS,
+                path=path,
+            )
+            selected[run["row_id"]] = CHECKPOINTS[seed]
+            if arm == ARM:
+                runs[seed] = (run, run_dir)
+    res = ledger.record_result(
+        registered=reg["row_id"],
+        per_arm={arm: PER_ARM for arm in arms},
+        selected=selected,
+        path=path,
+    )
+    calls = {"undecided": [], "dropped": ["dropped"], "two_decisions": ["adopted", "dropped"]}
+    decisions = [
+        ledger.decide(result=res["row_id"], decision=d, note="synthetic", path=path)["row_id"]
+        for d in calls.get(case, ["adopted"])
+    ]
+    parquet = root / PARQUET
+    _write_rb_parquet(parquet, rb_record, (45, 75) if case == "no_season_row" else (45, 59, 75))
+
+    run100, dir100 = runs[100]
+    flawed = json.loads((dir100 / "selected.json").read_text())
+    if case == "run_dir_missing":
+        shutil.rmtree(dir100)
+    elif case == "selected_not_validation":
+        flawed["scenarios"] = [PAPER]  # selected on PAPER alone, as ppo_paper's runs were
+    elif case == "selected_not_60_days":
+        flawed["season_length"] = 30
+    elif case == "checkpoint_disagrees":
+        flawed["checkpoint"] = "final"  # the result row selected "1500000"
+    if case in ("selected_not_validation", "selected_not_60_days", "checkpoint_disagrees"):
+        (dir100 / "selected.json").write_text(json.dumps(flawed))
+
+    named = {
+        "not_a_result": set(decisions),
+        "not_validation": {res["row_id"], reg["row_id"]},
+        "undecided": {res["row_id"]},
+        "dropped": {res["row_id"], *decisions},
+        "two_decisions": {res["row_id"], *decisions},
+        "two_arms": {res["row_id"], reg["row_id"]},
+        "no_season_row": {PARQUET},
+    }.get(case, {run100["row_id"], str(dir100), str(dir100.resolve())})
+    return {
+        "ledger": path,
+        "parquet": parquet,
+        "registered": reg["row_id"],
+        "result": res["row_id"],
+        "decision": decisions[0] if decisions else None,
+        "runs": runs,
+        "replay": decisions[0] if case == "not_a_result" else res["row_id"],
+        "named": named,
+    }
+
+
+def _replay_reads(monkeypatch, media, src: dict) -> None:
+    """main's replay_pick reads src's tmp ledger and parquet (its defaults bind the committed files
+    at import). Before #51 media has no replay_pick, so there is nothing to bind."""
+    real = getattr(media, "replay_pick", None)
+    if real is not None:
+        bound = functools.partial(real, path=src["ledger"], parquet=src["parquet"])
+        monkeypatch.setattr(media, "replay_pick", bound)
+
+
+def _no_replay_played(monkeypatch, media) -> None:
+    """_no_season_played, and evaluate.run_policy and export_replay's routes (run_policy, _season)
+    too, so no replay can play either."""
+    import greenleaf_control.export_replay as export_replay
+
+    def trip(name: str):
+        def refuse(*args, **kwargs):
+            raise AssertionError(f"{name} was called: the refusal must come before any season")
+
+        return refuse
+
+    _no_season_played(monkeypatch, media)
+    monkeypatch.setattr(evaluate, "run_policy", trip("evaluate.run_policy"))
+    for module in (export_replay, media):
+        for name in ("run_policy", "_season"):
+            if hasattr(module, name):
+                monkeypatch.setattr(module, name, trip(f"{module.__name__}.{name}"))
+
+
+def _replay_world(
+    monkeypatch, media, sources: dict, src: dict, run: dict, *, days: int = 1, drawing="record"
+) -> dict:
+    """main --replay on fake data: play returns the cached 1-day PAPER seasons, ffmpeg is reported
+    available, the card reads the synthetic rows and replay_pick src's, export_replay plays
+    days-long seasons (rb_tuned for real), and evaluate.run_policy is a spy that records its
+    arguments and returns run's season as run_policy(..., return_trace=True) does, so no
+    checkpoint loads. drawing: "record" records every drawing (_drawing_recorded); "today" records
+    today's three and leaves duel_replay real; "trip" fails on any drawing. Returns the calls."""
+    import greenleaf_control.export_replay as export_replay
+
+    monkeypatch.setattr(media, "play", lambda controller, season_length=60: _baseline(controller))
+    monkeypatch.setattr(FFMpegWriter, "isAvailable", classmethod(lambda cls: True))
+    monkeypatch.setattr(export_replay, "SEASON_LENGTH", days)
+    _card_reads(monkeypatch, media, sources)
+    _replay_reads(monkeypatch, media, src)
+    if drawing == "trip":
+        calls = {}
+
+        def trip(name: str):
+            def refuse(*args, **kwargs):
+                raise AssertionError(f"media.{name} was called: the refusal must come first")
+
+            return refuse
+
+        for name in ("season_replay", "baselines_card", "tradeoff_card", "duel_replay"):
+            monkeypatch.setattr(media, name, trip(name))
+    else:
+        calls = _drawing_recorded(monkeypatch, media, duel=drawing == "record")
+
+    signature = inspect.signature(evaluate.run_policy)
+    calls["run_policy"] = []
+
+    def run_policy(*args, **kwargs):
+        bound = signature.bind(*args, **kwargs)
+        bound.apply_defaults()
+        calls["run_policy"].append(dict(bound.arguments))
+        trace = (run["states"], run["controls"], run["params"])
+        return dict(run["result"]), run["frame"].copy(), trace
+
+    monkeypatch.setattr(evaluate, "run_policy", run_policy)
+    for module in (export_replay, media):
+        if hasattr(module, "run_policy"):
+            monkeypatch.setattr(module, "run_policy", run_policy)
+    return calls
+
+
+def _refused(media, argv: list[str], capsys) -> tuple[object, str]:
+    """main(argv)'s exit code and its refusal's text (a ValueError's message, or stderr)."""
+    raised = ""
+    try:
+        code = media.main(argv)
+    except SystemExit as e:
+        code = e.code
+    except ValueError as e:
+        code, raised = 1, str(e)
+    return code, f"{code} {raised} {capsys.readouterr().err}"
+
+
+@functools.cache
+def _duel(out_dir: Path) -> tuple[Figure, Path]:
+    """duel_replay of the 2-day panels with out_mp4=None (no ffmpeg here) at its default fps;
+    cached so it renders once. Returns the Figure and the dir it wrote into."""
+    media = _media_has()
+    out = out_dir / "duel"
+    out.mkdir(exist_ok=True)
+    fig = media.duel_replay(
+        _stripe_panels(2),
+        out / "duel_replay.gif",
+        None,
+        out / "hero.png",
+        title=STRIPES_TITLE,
+        caption=CAPTION,
+        footer=REPLAY_FOOTER,
+    )
+    return fig, out
+
+
 # --- play: the season the pictures draw --------------------------------------------------------
 
 
@@ -912,18 +1461,22 @@ def test_running_counts_each_prefix_and_ends_on_the_seasons_metrics(controller):
 def test_replay_draws_the_hourly_climate_over_the_bounds_bands(controller, media_dir):
     """Done when: the animation's series equal the run's frame and the bands equal metrics.BOUNDS.
 
-    In the final frame, for each of co2, temp and rh, a line holds frame.iloc[::4]'s values against
-    its t (24 hourly points for one day, t = 0, 4, ..., 92) exactly, on axes whose only patch is
-    one band (axhspan) from metrics.BOUNDS[c]: co2 300-1600 ppm, temp 15-34 °C, rh 50-85 %."""
+    In the final frame, for each of co2, temp and rh, a line holds _hourly(frame)'s values against
+    its t (24 hourly points for one day, each hour's last row, t = 3, 7, ..., 95) exactly, on axes
+    whose only patch is one band (axhspan) from metrics.BOUNDS[c]: co2 300-1600 ppm, temp
+    15-34 °C, rh 50-85 %. Issue #51 moved this from frame.iloc[::4] (t = 0, 4, ..., 92) to
+    export_replay's convention; non-vacuous: the two differ."""
     fig, _ = _replay(controller, media_dir)
 
     assert isinstance(fig, Figure)
-    hourly = _hourly(_baseline(controller)["frame"])
+    frame = _baseline(controller)["frame"]
+    hourly = _hourly(frame)
     lines = fig.findobj(Line2D)
     for c in metrics.CONSTRAINTS:
+        assert hourly[c].tolist() != frame.iloc[::4][c].tolist(), c
         want = (hourly["t"].astype(float).tolist(), hourly[c].tolist())
         matches = [line for line in lines if _xy(line) == want]
-        assert matches, f"no line draws frame.iloc[::4][{c!r}] against t"
+        assert matches, f"no line draws frame row 4h + 3's {c!r} against its t"
         for line in matches:
             patches = line.axes.patches
             assert all(isinstance(p, Rectangle) for p in patches), c  # axhspan's patch
@@ -932,16 +1485,49 @@ def test_replay_draws_the_hourly_climate_over_the_bounds_bands(controller, media
 
 
 def test_replay_strip_is_the_hourly_actuators(media_dir):
-    """rb_default's final frame has one 6-row heat strip: an image or mesh whose array is
-    frame.iloc[::4]'s u_boil, u_co2, u_thscr, u_vent, u_lamp, u_blscr as rows (6 x 24 for one
-    day), every value shown (nothing masked or NaN), exactly. (zero_controls' strip is all 0, so
-    it couldn't show a row-order slip; rb_default's rows read differently upside down.)"""
+    """rb_default's final frame has one 6-row heat strip: an image or mesh whose array is each
+    hour's mean of u_boil, u_co2, u_thscr, u_vent, u_lamp, u_blscr (frame rows 4h..4h+3, as
+    _hourly) as rows (6 x 24 for one day), every value shown (nothing masked or NaN), exactly.
+    (zero_controls' strip is all 0, so it couldn't show a row-order slip; rb_default's rows read
+    differently upside down, and its hourly means differ from frame.iloc[::4]'s instants.)"""
     fig, _ = _replay("rb_default", media_dir)
 
-    u = _hourly(_baseline("rb_default")["frame"])[U_COLS].to_numpy(dtype=np.float64).T
+    frame = _baseline("rb_default")["frame"]
+    u = _hourly(frame)[U_COLS].to_numpy(dtype=np.float64).T
     assert not np.array_equal(u, u[::-1])  # non-vacuous: a flipped strip would differ
+    assert not np.array_equal(u, frame.iloc[::4][U_COLS].to_numpy(dtype=np.float64).T)
     [strip] = _strips(fig, u.shape[1])
     np.testing.assert_array_equal(_strip_array(strip), u)
+
+
+def test_replay_shows_only_the_hours_complete_after_k_steps(tmp_path):
+    """Issue #51: after k steps the replay shows k // 4 complete hours. With counters of one row at
+    k = 26 steps (6.5 hours of steps), the final frame's climate lines hold hours 0-5 only
+    (t = 3, 7, ..., 23, as _hourly) and the strip shows its first 6 columns, the rest masked.
+    ceil(26 / 4) = 7 would draw hour 6, whose end (row 27) comes after step 26. fps=1 keeps the
+    GIF to 3 frames."""
+    import greenleaf_control.media as media
+
+    b = _baseline("rb_default")
+    hourly = _hourly(b["frame"])
+
+    fig = media.season_replay(
+        b["frame"],
+        _counters(b, [26]),
+        tmp_path / "season_replay.gif",
+        title=TITLE,
+        footer=FOOTER,
+        fps=1,
+    )
+
+    lines = fig.findobj(Line2D)
+    for c in metrics.CONSTRAINTS:
+        want = (hourly["t"].astype(float).tolist()[:6], hourly[c].tolist()[:6])
+        assert [line for line in lines if _xy(line) == want], f"{c}: not hours 0-5 of _hourly"
+    [strip] = _strips(fig, 24)
+    shown = _strip_array(strip)
+    np.testing.assert_array_equal(shown[:, :6], hourly[U_COLS].to_numpy(dtype=np.float64).T[:, :6])
+    assert np.isnan(shown[:, 6:]).all(), "hours 6-23 are shown after 26 steps"
 
 
 @pytest.mark.parametrize("controller", ["rb_default", "zero_controls"])
@@ -1006,10 +1592,11 @@ def test_replay_draws_its_subtitle(tmp_path):
 
 def test_card_has_one_column_per_baseline_with_its_own_numbers_and_strip(media_dir):
     """Three strips side by side, left to right rb_default, zero_controls, random: each the
-    controller's own frame.iloc[::4] actuators (6 x 24 for one day). The texts in each strip's
-    column print that controller's result: profit on a line with "€/m²", each constraint's hours
-    on a line with its label, fruit growth (yield_kg_m2, kg/m²) on a line with "fruit growth", all
-    at 2 decimals. Non-vacuous: the three profits differ at 2 decimals."""
+    controller's own hourly mean actuators, as _hourly (6 x 24 for one day; issue #51 moved them
+    from frame.iloc[::4]'s instants, which differ for rb_default and random). The texts in each
+    strip's column print that controller's result: profit on a line with "€/m²", each
+    constraint's hours on a line with its label, fruit growth (yield_kg_m2, kg/m²) on a line with
+    "fruit growth", all at 2 decimals. Non-vacuous: the three profits differ at 2 decimals."""
     fig, out = _card(media_dir)
 
     assert isinstance(fig, Figure)
@@ -1451,6 +2038,362 @@ def test_card_keeps_medias_text_rules(media_dir, sources):
         assert not [ln for ln in lines if _has(ln, total)], f"a total of the hours, {_fmt(total)}"
 
 
+# --- _hourly: export_replay's hourly convention (issue #51) -------------------------------------
+
+
+@pytest.mark.parametrize("controller", ["rb_default", "random"])
+def test_hourly_is_the_end_of_hour_climate_and_the_hours_mean_actuators(controller):
+    """Done when: each column draws the frame's row 4h + 3 climate, and its strip is the hourly
+    means.
+
+    media._hourly(frame) of a 1-day PAPER season has 24 rows: t, co2, temp and rh are the frame's
+    rows 3, 7, ..., 95 (frame.iloc[3::4]) exactly, and each u_* is the mean of rows 4h..4h+3
+    (reshape(24, 4, 6).mean(axis=1), as export_replay computes it) exactly. Non-vacuous: those rows
+    differ from frame.iloc[::4], and rb_default's and random's means from their instants."""
+    media = _media_has("_hourly")
+    frame = _baseline(controller)["frame"]
+    want = _hourly(frame)
+
+    got = media._hourly(frame)
+
+    assert len(got) == 24
+    for c in ("t", *metrics.CONSTRAINTS):
+        np.testing.assert_array_equal(
+            np.asarray(got[c], dtype=np.float64), frame[c].to_numpy(dtype=np.float64)[3::4], c
+        )
+    for col in U_COLS:
+        np.testing.assert_array_equal(
+            np.asarray(got[col], dtype=np.float64), want[col].to_numpy(), col
+        )
+    assert not np.array_equal(frame["temp"].to_numpy()[3::4], frame["temp"].to_numpy()[::4])
+    instants = frame.iloc[::4][U_COLS].to_numpy(dtype=np.float64)
+    assert not np.array_equal(want[U_COLS].to_numpy(), instants)
+
+
+def test_hourly_rounded_as_export_replay_rounds_is_its_hourly_json():
+    """Done when: those series, rounded as export_replay rounds, equal
+    export_replay.export(...)["hourly"] for the same season.
+
+    On rb_default's 1-day PAPER season, media._hourly's co2, temp and rh to 3 significant digits
+    (float(f"{v:.3g}")) and each u_* to 3 decimals equal export's hourly lists exactly, so the
+    README's pictures and the site draw the same series."""
+    import greenleaf_control.export_replay as export_replay
+
+    media = _media_has("_hourly")
+    b = _baseline("rb_default")
+    stamp = {"commit": SHA, "dirty": False, "gl_gym": manifest._versions()["gl-gym"]}
+    payload = export_replay.export(
+        b["frame"],
+        b["result"],
+        b["states"],
+        b["controls"],
+        b["params"],
+        controller="rb_default",
+        scenario=PAPER,
+        stamp=stamp,
+        split="paper",
+        run=None,
+    )
+
+    got = media._hourly(b["frame"])
+
+    for c in metrics.CONSTRAINTS:
+        rounded = [float(f"{v:.3g}") for v in np.asarray(got[c], dtype=np.float64)]
+        assert rounded == payload["hourly"][c], c
+    for col in U_COLS:
+        rounded = [round(float(v), 3) for v in np.asarray(got[col], dtype=np.float64)]
+        assert rounded == payload["hourly"][col], col
+
+
+# --- The climate stripes: constants and the colour scale (issue #51) ---------------------------
+
+
+def test_replay_constants_are_the_issues():
+    """SEASON is scenarios.VALIDATION[1] (Amsterdam 2010 from day 59, the same dict as PAPER: the
+    issue fixed it as the middle season, not by its outcome). The Instrument colours are Aarmen's:
+    SITE_BG #F2F3F0, SITE_INK #111311, SITE_MUTED #6A6F68. TEMP_SCALE is (10, 36) °C. GROTESK and
+    MONO end on matplotlib's bundled DejaVu Sans and DejaVu Sans Mono, so they render anywhere
+    (which font loads is the machine's; only the requested list is checked)."""
+    media = _media_has()
+
+    assert media.SEASON == VALIDATION[1] == PAPER
+    assert media.SEASON == {"location": "Amsterdam", "growth_year": 2010, "start_day": 59}
+    colours = (media.SITE_BG, media.SITE_INK, media.SITE_MUTED)
+    assert tuple(to_hex(c) for c in colours) == ("#f2f3f0", "#111311", "#6a6f68")
+    assert tuple(media.TEMP_SCALE) == (10.0, 36.0)
+    assert list(media.GROTESK)[-1] == "DejaVu Sans"
+    assert list(media.MONO)[-1] == "DejaVu Sans Mono"
+
+
+def test_temp_cmap_is_26_one_degree_steps_from_blue_to_rust_and_never_the_page():
+    """TEMP_CMAP is quantised to 1 °C steps so the GIF's palette doesn't shimmer: N = 26 over
+    TEMP_SCALE's 10-36 °C (26 °C / 26 = 1 °C a colour), 1,000 samples across it give exactly 26
+    colours, and on Normalize(10, 36) every T + 0.25 °C shares T + 0.75 °C's colour while
+    T + 0.5 and T + 1.5 differ (integer bin edges). It runs blue at 10 °C (blue > red) to rust at
+    36 °C (red > blue). No colour in it is within 8/255 of SITE_BG in every channel: its neutral
+    middle is a distinct light grey, not the page (a cell at 23 °C must not vanish)."""
+    media = _media_has()
+    cmap = media.TEMP_CMAP
+    norm = Normalize(*media.TEMP_SCALE)
+
+    assert cmap.N == 26
+    assert len({to_hex(cmap(x)) for x in np.linspace(0.0, 1.0, 1000)}) == 26
+    for t in range(10, 36):
+        assert to_hex(cmap(norm(t + 0.25))) == to_hex(cmap(norm(t + 0.75))), t
+        if t < 35:
+            assert to_hex(cmap(norm(t + 0.5))) != to_hex(cmap(norm(t + 1.5))), t
+    low, high = to_rgb(cmap(0.0)), to_rgb(cmap(1.0))
+    assert low[2] > low[0], f"10 °C isn't blue: {to_hex(low)}"
+    assert high[0] > high[2], f"36 °C isn't rust: {to_hex(high)}"
+    page = np.array(to_rgb(media.SITE_BG))
+    for i in range(cmap.N):
+        colour = np.array(to_rgb(cmap(i)))
+        assert np.abs(colour - page).max() >= 8 / 255, f"colour {i} {to_hex(colour)} is the page"
+
+
+# --- replay_pick: the run the replay plays (issue #51) ------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("offsets", "seed"), [(OFFSETS, 107), (TIED, 103)], ids=["lower_median", "tie_to_lower_seed"]
+)
+def test_replay_pick_is_the_lower_median_seed_at_its_selected_checkpoint(
+    offsets, seed, tmp_path, monkeypatch
+):
+    """Done when: main plays the lower-median seed, ties going to the lower seed, at the ledger's
+    selected checkpoint (not final).
+
+    On the E6-shaped tmp ledger (10 seeds), replay_pick(result, path, parquet) sorts the scored
+    runs by (recorded SEASON profit, seed) and takes index (10 - 1) // 2 = 4:
+    - lower_median: seed 107 (OFFSETS; the upper median is 103, the best 109; ranking on day 45 or
+      75, on the mean, or on the other checkpoint's candidate gives 103 or 104);
+    - tie_to_lower_seed: seeds 103 and 107 tie at index 4 and 5, so 103.
+    It returns the run's row id, registration, result, arm, seed, checkpoint (CHECKPOINTS: 1750000
+    for 107, 500000 for 103, not "final"), commit (its manifest's RUN_COMMIT), run_dir, the
+    decision row's id, record (per_scenario[1] of its selected checkpoint: RECORD at its offset)
+    and rb_record (the parquet's day-59 row, RB_RECORD), and plays no season."""
+    media = _media_has()
+    src = _replay_sources(tmp_path / "replay", offsets=offsets)
+    _no_replay_played(monkeypatch, media)
+    run, run_dir = src["runs"][seed]
+
+    pick = media.replay_pick(src["result"], src["ledger"], src["parquet"])
+
+    assert (pick["id"], pick["seed"], pick["checkpoint"]) == (
+        run["row_id"],
+        seed,
+        CHECKPOINTS[seed],
+    )
+    assert pick["checkpoint"] != "final"
+    assert (pick["registered"], pick["result"]) == (src["registered"], src["result"])
+    assert (pick["arm"], pick["commit"]) == (ARM, RUN_COMMIT)
+    assert pick["decision"] == src["decision"]
+    assert Path(pick["run_dir"]).resolve() == run_dir.resolve()
+    want = {**RECORD, "profit_eur_m2": RECORD["profit_eur_m2"] + offsets[seed]}
+    assert _keys(pick["record"]) == want
+    assert _keys(pick["rb_record"]) == RB_RECORD
+
+
+@pytest.mark.parametrize("case", PICK_REFUSALS)
+def test_replay_pick_refuses_a_row_it_cant_replay_before_any_season(case, tmp_path, monkeypatch):
+    """Done when: every refusal in step 3 happens before any season plays.
+
+    replay_pick raises ValueError naming the row when: the id isn't a result row (not_a_result: a
+    decision id); the registration isn't on exactly ["validation"] (not_validation:
+    ["train_eval"]); there is no decision row (undecided), it dropped the result (dropped), or
+    there are two (two_decisions); the registration has two arms (two_arms); a scored run's dir is
+    gone (run_dir_missing); or a run's selected.json was made on [PAPER] (selected_not_validation)
+    or in 30-day seasons (selected_not_60_days), or names "final" where the result row selected
+    "1500000" (checkpoint_disagrees); or the parquet has no day-59 row (no_season_row). A run's
+    flaw is seed 100's, never the pick's (107), so every run is checked. The error names the row
+    (or the run's dir, or the parquet); every way to play a season fails if called."""
+    media = _media_has()
+    src = _replay_sources(tmp_path / "replay", case)
+    _no_replay_played(monkeypatch, media)
+
+    with pytest.raises(ValueError) as excinfo:
+        media.replay_pick(src["replay"], src["ledger"], src["parquet"])
+
+    assert any(name in str(excinfo.value) for name in src["named"]), (src["named"], excinfo.value)
+
+
+# --- _stripes and duel_replay: the climate stripes (issue #51) -----------------------------------
+
+
+def test_stripes_draw_each_panels_hourly_temperature_grid_day_by_day():
+    """Done when: each panel is the season's hourly air temperature as a colour grid, filling in
+    day by day.
+
+    _stripes(panels, (12.8, 7.2), ...) of two 2-day SEASON panels returns (Figure, draw). The
+    Figure is 12.8 x 7.2 in on SITE_BG. After draw(1), the two 24 x 2 images, top to bottom, are
+    rb_tuned's ("Tuned rules") and the other's grids (_grid: _hourly temp, row = hour, column =
+    day) with day 1 shown and day 2 masked; after draw(2), both grids exactly, nothing masked. Both
+    are on TEMP_CMAP with clim (10, 36) °C (the same scale in both) and nearest-neighbour cells.
+    Non-vacuous: the two grids differ, each varies over the day, and it isn't frame.iloc[::4]'s."""
+    media = _media_has()
+    panels = _stripe_panels(2)
+    grids = [_grid(p["frame"]) for p in panels]
+    assert not np.array_equal(grids[0], grids[1])
+    assert all(np.ptp(g[:, 0]) > 1.0 for g in grids)  # the day's swing, over 1 °C
+    start = panels[0]["frame"]["temp"].to_numpy(dtype=np.float64)[::4].reshape(2, 24).T
+    assert not np.array_equal(grids[0], start)
+
+    fig, draw = media._stripes(
+        panels, (12.8, 7.2), title=STRIPES_TITLE, caption=CAPTION, footer=REPLAY_FOOTER
+    )
+
+    assert isinstance(fig, Figure)
+    assert tuple(fig.get_size_inches()) == pytest.approx((12.8, 7.2))
+    assert to_hex(fig.get_facecolor()) == to_hex(media.SITE_BG)
+    draw(1)
+    images = _temp_images(fig, 2)
+    assert len(images) == 2, f"{len(images)} images hold a 24 x 2 grid"
+    for image, grid, p in zip(images, grids, panels, strict=True):
+        shown = _strip_array(image)
+        np.testing.assert_array_equal(shown[:, 0], grid[:, 0], err_msg=p["heading"])
+        assert np.isnan(shown[:, 1]).all(), f"{p['heading']}: day 2 shows after draw(1)"
+    draw(2)
+    for image, grid, p in zip(_temp_images(fig, 2), grids, panels, strict=True):
+        np.testing.assert_array_equal(_strip_array(image), grid, err_msg=p["heading"])
+        assert tuple(image.get_clim()) == (10.0, 36.0), p["heading"]
+        assert image.get_cmap().name == media.TEMP_CMAP.name, p["heading"]
+        assert image.get_cmap().N == 26, p["heading"]
+        assert image.get_interpolation() in ("nearest", "none"), p["heading"]
+
+
+@pytest.mark.parametrize("day", [1, 2])
+def test_stripes_totals_and_day_counter_tick_with_the_days(day):
+    """Done when: each panel's counters end on its season's metrics, and the day and counters
+    advance together.
+
+    After draw(d), each panel prints its counters' row d - 1 (the first d days): profit on a line
+    with "€/m²" and each constraint's hours on a line with its label, at 2 decimals; and one text
+    says "day d / 2". Each total sits under its own panel: where the two panels' values differ at
+    2 decimals, every text printing the top panel's is above every text printing the bottom
+    one's, and "Tuned rules" is above "Rules + co-pilot". After draw(1) neither season's final
+    profit shows. No line prints a panel's three hours summed (e.g. rb_tuned day 2:
+    0 + 3.25 + 3.50 = 6.75 h). Day 1: rb_tuned -0.12 €/m² (temp 2.50 h, RH 1.50 h), rb_default
+    -0.44 €/m² (temp 2.00 h, RH 12.25 h); day 2: -0.17 and -0.73 €/m² (the counters' rows,
+    computed by metrics)."""
+    media = _media_has()
+    panels = _stripe_panels(2)
+    fig, draw = media._stripes(
+        panels, (12.8, 7.2), title=STRIPES_TITLE, caption=CAPTION, footer=REPLAY_FOOTER
+    )
+
+    draw(day)
+
+    lines = _lines_of(_texts(fig))
+    rows = [p["counters"].iloc[day - 1].to_dict() for p in panels]
+    for p, row in zip(panels, rows, strict=True):
+        _assert_numbers(lines, row, p["heading"])
+        hours = [row[f"viol_hours_{c}"] for c in metrics.CONSTRAINTS]
+        assert sum(h > 0 for h in hours) >= 2 and sum(hours) not in hours
+        assert not [ln for ln in lines if _has(ln, sum(hours))], f"a total, {_fmt(sum(hours))}"
+    assert [ln for ln in lines if re.search(rf"day\s*{day}\s*/\s*2(?!\d)", ln)], lines
+    if day == 1:
+        for p in panels:
+            final = p["counters"].iloc[-1]["profit_eur_m2"]
+            assert not [ln for ln in lines if _has(ln, final)], (p["heading"], _fmt(final))
+
+    renderer = _rendered(fig)
+    labels = {"profit_eur_m2": "€/m²", **{f"viol_hours_{c}": LABELS[c] for c in LABELS}}
+    for key, label in labels.items():
+        top, bottom = rows[0][key], rows[1][key]
+        if _fmt(top) == _fmt(bottom):
+            continue
+        ys = [[_y(t, renderer) for t in _printing(fig, label, v)] for v in (top, bottom)]
+        assert ys[0] and ys[1], (key, ys)
+        assert min(ys[0]) > max(ys[1]), f"{key}: the top panel's total isn't above the bottom's"
+    heads = [
+        [_y(t, renderer) for t in _texts(fig) if p["heading"].lower() in t.get_text().lower()]
+        for p in panels
+    ]
+    assert heads[0] and heads[1] and min(heads[0]) > max(heads[1]), heads
+
+
+def test_stripes_texts_their_fonts_and_the_hours_down_the_side():
+    """The title, caption and footer passed in are each one text, as given. The title is in
+    GROTESK; the caption, each total (the texts with "€/m²") and the hour labels in MONO, each set
+    on its own text (Text.get_fontfamily() is the requested list). Each panel's y axis is labelled
+    by hour, "00" (the top row, drawn above) to "23". No text has an em dash or says "yield".
+    Fonts are never set globally: drawing leaves every rcParams value as it was, and media.py
+    names no rcParams, rc, rc_context or rcdefaults."""
+    media = _media_has()
+    before = dict(matplotlib.rcParams)
+    fig, draw = media._stripes(
+        _stripe_panels(2), (12.8, 7.2), title=STRIPES_TITLE, caption=CAPTION, footer=REPLAY_FOOTER
+    )
+    draw(2)
+    renderer = _rendered(fig)
+    changed = [k for k, v in matplotlib.rcParams.items() if before.get(k) != v]
+    assert not changed, f"drawing changed rcParams {changed}"
+    tree = ast.parse((Path(greenleaf_control.__file__).parent / "media.py").read_text())
+    global_rc = {"rcParams", "rc", "rc_context", "rcdefaults"}
+    named = {n.id for n in ast.walk(tree) if isinstance(n, ast.Name)}
+    named |= {n.attr for n in ast.walk(tree) if isinstance(n, ast.Attribute)}
+    named |= {a.name for n in ast.walk(tree) if isinstance(n, ast.ImportFrom) for a in n.names}
+    assert not named & global_rc, f"media.py names {sorted(named & global_rc)}"
+
+    texts = _texts(fig)
+    by_text = {t.get_text(): t for t in texts}
+    for given in (STRIPES_TITLE, CAPTION, REPLAY_FOOTER):
+        assert given in by_text, given
+    assert _family(by_text[STRIPES_TITLE]) == list(media.GROTESK)
+    assert _family(by_text[CAPTION]) == list(media.MONO)
+    totals = [t for t in texts if "€/m²" in t.get_text()]
+    assert totals and all(_family(t) == list(media.MONO) for t in totals), totals
+    images = _temp_images(fig, 2)
+    assert len(images) == 2
+    for image in images:
+        ticks = {t.get_text(): t for t in image.axes.get_yticklabels() if t.get_text()}
+        assert {"00", "23"} <= set(ticks), sorted(ticks)
+        assert all(_family(t) == list(media.MONO) for t in ticks.values()), sorted(ticks)
+        assert _y(ticks["00"], renderer) > _y(ticks["23"], renderer)
+    assert not [t.get_text() for t in texts if "—" in t.get_text()]
+    assert not [t.get_text() for t in texts if "yield" in t.get_text().lower()]
+
+
+def test_duel_replay_writes_a_1280x720_gif_and_a_1200x627_hero(media_dir):
+    """Done when: hero.png is 1200 x 627 (LinkedIn's size; Aarmen's scope update) and the GIF
+    1280 x 720.
+
+    duel_replay(panels, out_gif, None, out_png, ...) writes the GIF (GIF8 header) at 12.8 x 7.2 in
+    and 100 dpi, 1280 x 720 px, and the still to out_png, a PNG of exactly 1200 x 627 px (12 x
+    6.27 in at 100 dpi; no bbox_inches="tight", which would change it). With out_mp4 None, no
+    MP4: the dir holds the GIF and hero.png only."""
+    _, out = _duel(media_dir)
+
+    gif, png = out / "duel_replay.gif", out / "hero.png"
+    assert gif.read_bytes()[:4] == b"GIF8"
+    with Image.open(gif) as im:
+        assert im.size == (1280, 720)
+    assert png.read_bytes()[:8] == b"\x89PNG\r\n\x1a\n"
+    with Image.open(png) as im:
+        assert im.size == (1200, 627)
+    assert sorted(p.name for p in out.iterdir()) == ["duel_replay.gif", "hero.png"]
+
+
+def test_duel_replay_fills_in_day_by_day_then_holds_2_s(media_dir):
+    """The GIF draws each day d = 1..n DAY_FRAMES times, then holds the last frame 2 s, at
+    REPLAY_FPS: its frame durations sum to (n x DAY_FRAMES + 2 x fps) / fps seconds; for the 2-day
+    panels at 2 frames a day and 12 fps, (4 + 24) / 12 = 2.33 s. GIF delays are whole centiseconds
+    (Pillow may also merge identical frames, summing their delays), so the sum may be off by up to
+    10 ms a frame. duel_replay returns a Figure in its final state: both grids whole, nothing
+    masked."""
+    media = _media_has()
+    fig, out = _duel(media_dir)
+
+    fps, n_frames = media.REPLAY_FPS, 2 * media.DAY_FRAMES + 2 * media.REPLAY_FPS
+    want = n_frames / fps
+    assert _gif_seconds(out / "duel_replay.gif") == pytest.approx(want, abs=0.01 * n_frames)
+    assert isinstance(fig, Figure)
+    images = _temp_images(fig, 2)
+    assert len(images) == 2
+    for image, p in zip(images, _stripe_panels(2), strict=True):
+        np.testing.assert_array_equal(_strip_array(image), _grid(p["frame"]), err_msg=p["heading"])
+
+
 # --- the CLI -----------------------------------------------------------------------------------
 
 
@@ -1484,10 +2427,11 @@ def _whole(text: str, n: int) -> bool:
     return re.search(rf"(?<!\d){n}(?!\d)", text) is not None
 
 
-def _drawing_recorded(monkeypatch, media) -> dict:
+def _drawing_recorded(monkeypatch, media, *, duel: bool = True) -> dict:
     """season_replay, baselines_card and tradeoff_card (once it exists) replaced by recorders of
     their arguments that draw and write nothing, so main's own choices (its title, subtitle and
-    footers) are read fast."""
+    footers) are read fast. With duel, duel_replay (issue #51, once it exists) too, its arguments
+    bound to its real signature by name (panels, out_gif, out_mp4, out_png, title, ...)."""
     calls = {}
 
     def record(name: str):
@@ -1500,6 +2444,14 @@ def _drawing_recorded(monkeypatch, media) -> dict:
     monkeypatch.setattr(media, "season_replay", record("replay"))
     monkeypatch.setattr(media, "baselines_card", record("card"))
     monkeypatch.setattr(media, "tradeoff_card", record("tradeoff"), raising=False)
+    real_duel = getattr(media, "duel_replay", None)
+    if duel and real_duel is not None:
+
+        def duel_drawn(*args, **kwargs):
+            calls["duel"] = inspect.signature(real_duel).bind(*args, **kwargs).arguments
+            return Figure()
+
+        monkeypatch.setattr(media, "duel_replay", duel_drawn)
     return calls
 
 
@@ -1697,9 +2649,245 @@ def test_main_writes_the_tradeoff_card_and_its_media_json_entry(sources, tmp_pat
     )
 
 
+def test_main_replay_plays_the_picked_run_and_names_it_everywhere(sources, tmp_path, monkeypatch):
+    """Done when: main plays the lower-median seed at the ledger's selected checkpoint on
+    VALIDATION[1], its counters end on each season's metrics, and the footer and media.json name
+    the run row, its manifest commit, the result and decision rows, E1, VALIDATION and the commit
+    the image was made from.
+
+    main --out OUT --replay <result> on fake data (_replay_world: 1-day seasons, rb_tuned played
+    for real, run_policy a spy returning rb_default's 1-day SEASON; every drawing recorded). The
+    tmp E6-shaped ledger records seed 107's SEASON as that season and the parquet's day-59 row as
+    rb_tuned's 1-day SEASON, so the records match. main returns 0, and:
+    - run_policy is called once: seed 107's dir, checkpoint "1750000" (not "final"), SEASON,
+      record_steps and return_trace True, allow_test False;
+    - duel_replay gets OUT/duel_replay.gif, OUT/duel_replay.mp4 and OUT/hero.png, and two panels:
+      "Tuned rules" with rb_tuned's frame and result, then the "co-pilot" one with the spy's; each
+      panel's counters are running() at the end of each day (step 96) and end on its result;
+    - the title counts the season's days from the run (1, never 60); the title or the caption
+      says VALIDATION, Amsterdam 2010, day 59 and "not the final" (how large it is drawn is the
+      next test's); the caption names the run row, seed 107, checkpoint 1750000, the scale
+      (10, 36) and the safe range (15, 34);
+    - the footer names the run row, RUN_COMMIT[:7], the result and decision rows, E1's row,
+      "VALIDATION, Amsterdam 2010 day 59", "commit <sha7>" (this checkout's) and the note "A
+      replay of a recorded VALIDATION result; the 2012 test weather is still sealed";
+    - media.json holds today's 4 entries plus one per REPLAY_FILES file, each with today's keys and
+      split "validation", scenario SEASON, ledger {run row, result, decision, E1}, run {seed 107,
+      checkpoint "1750000", run_dir, manifest_commit RUN_COMMIT} and metrics {"rb_tuned": its
+      result, "residual_w05": the run's}, every RESULT_KEYS number as replayed."""
+    media = _media_has()
+    rb, run = _graded("rb_tuned", 1), _graded("rb_default", 1)
+    src = _replay_sources(
+        tmp_path / "replay", record=_record(run["result"]), rb_record=_record(rb["result"])
+    )
+    calls = _replay_world(monkeypatch, media, sources, src, run)
+    stamp = manifest.code_stamp(smoke=True)
+    out = tmp_path / "media"
+    run_row, run_dir = src["runs"][107]
+    rid, e1 = run_row["row_id"], media.E1_RESULT
+
+    assert media.main(["--out", str(out), "--replay", src["result"]]) == 0
+
+    [call] = calls["run_policy"]
+    assert Path(call["run_dir"]).resolve() == run_dir.resolve()
+    assert (call["checkpoint"], call["scenario"]) == ("1750000", VALIDATION[1])
+    assert (call["record_steps"], call["return_trace"], call["allow_test"]) == (True, True, False)
+
+    duel = calls["duel"]
+    assert [Path(duel[k]) for k in ("out_gif", "out_mp4", "out_png")] == [
+        out / name for name in REPLAY_FILES
+    ]
+    top, bottom = duel["panels"]
+    assert "tuned rules" in top["heading"].lower() and "co-pilot" in bottom["heading"].lower()
+    for panel, season in ((top, rb), (bottom, run)):
+        pd.testing.assert_frame_equal(panel["frame"], season["frame"], check_exact=True)
+        assert _keys(panel["result"]) == _record(season["result"]), panel["heading"]
+        counters = panel["counters"]
+        assert counters["step"].tolist() == [N_DAY], panel["heading"]
+        last = counters.iloc[-1]
+        assert {k: last[k] for k in RUNNING_COLS[1:]} == {
+            k: season["result"][k] for k in RUNNING_COLS[1:]
+        }, panel["heading"]
+    title, caption = duel["title"], " ".join(duel["caption"].split())
+    assert _whole(title, 1) and not _whole(title, 60), title
+    said = " ".join(f"{title} {caption}".split())  # the split may sit in the title or the caption
+    for part in ("VALIDATION", "Amsterdam 2010", "not the final"):
+        assert part in said, (part, said)
+    assert _whole(said, 59), said
+    for part in (rid, "1750000"):
+        assert part in caption, (part, caption)
+    for n in (107, 10, 36, 15, 34):
+        assert _whole(caption, n), (n, caption)
+    foot = " ".join(duel["footer"].split())
+    for part in (
+        rid,
+        RUN_COMMIT[:7],
+        src["result"],
+        src["decision"],
+        e1,
+        REPLAY_PLACE,
+        f"commit {stamp['commit'][:7]}",
+        REPLAY_NOTE,
+    ):
+        assert part in foot, (part, foot)
+    assert not [t for t in (title, caption, foot) if "—" in t]
+
+    by_file = {e["file"]: e for e in json.loads((out / "media.json").read_text())}
+    today = ["baselines.png", "season_replay.gif", "season_replay.mp4", "tradeoff.png"]
+    assert sorted(by_file) == sorted([*today, *REPLAY_FILES])
+    for name in REPLAY_FILES:
+        e = by_file[name]
+        assert ENTRY_KEYS | {"split", "ledger", "run"} <= set(e), (name, sorted(e))
+        assert (e["split"], e["scenario"]) == ("validation", SEASON), name
+        assert e["commit"] == stamp["commit"] and e["dirty"] is stamp["dirty"], name
+        assert sorted(e["ledger"]) == sorted([rid, src["result"], src["decision"], e1]), name
+        assert {k: e["run"][k] for k in ("seed", "checkpoint", "manifest_commit")} == {
+            "seed": 107,
+            "checkpoint": "1750000",
+            "manifest_commit": RUN_COMMIT,
+        }, name
+        assert Path(e["run"]["run_dir"]).resolve() == run_dir.resolve(), name
+        assert sorted(e["metrics"]) == ["rb_tuned", ARM], name
+        assert _keys(e["metrics"]["rb_tuned"]) == _record(rb["result"]), name
+        assert _keys(e["metrics"][ARM]) == _record(run["result"]), name
+
+
+def test_main_replay_says_validation_not_the_final_as_large_as_the_totals(
+    sources, tmp_path, monkeypatch
+):
+    """Review fix: the split is said at title level, not only in the caption and footer. At
+    LinkedIn's 50% size a 9 pt caption is unreadable while the 13 pt totals are not, so the
+    numbers would outlast their label.
+
+    main --replay on fake data (as above), with duel_replay drawing for real (out_mp4 None: no
+    ffmpeg here) and _stripes spied on, so both figures it draws are read: the GIF's (12.8 x 7.2
+    in) and the still's (hero.png, 12 x 6.27 in), each in its final state (the season's last day).
+    On each, some one text contains both "VALIDATION" and "not the final", and its fontsize is at
+    least the largest fontsize of the per-panel totals, read from the same figure: the texts
+    printing rb_tuned's and the run's profit with "€/m²". Before the fix the phrase is only in the
+    9 pt caption, under the 13 pt totals."""
+    media = _media_has()
+    rb, run = _graded("rb_tuned", 1), _graded("rb_default", 1)
+    src = _replay_sources(
+        tmp_path / "replay", record=_record(run["result"]), rb_record=_record(rb["result"])
+    )
+    _replay_world(monkeypatch, media, sources, src, run, drawing="today")
+    real_stripes, real_duel = media._stripes, media.duel_replay
+    figures = []
+
+    def stripes(*args, **kwargs):
+        fig, draw = real_stripes(*args, **kwargs)
+        figures.append(fig)
+        return fig, draw
+
+    def duel(panels, out_gif, out_mp4, out_png, **kwargs):
+        return real_duel(panels, out_gif, None, out_png, **kwargs)
+
+    monkeypatch.setattr(media, "_stripes", stripes)
+    monkeypatch.setattr(media, "duel_replay", duel)
+
+    assert media.main(["--out", str(tmp_path / "media"), "--replay", src["result"]]) == 0
+
+    sizes = sorted(tuple(np.round(fig.get_size_inches(), 2)) for fig in figures)
+    assert sizes == [(12.0, 6.27), (12.8, 7.2)], sizes
+    profits = [rb["result"]["profit_eur_m2"], run["result"]["profit_eur_m2"]]
+    for fig in figures:
+        where = tuple(np.round(fig.get_size_inches(), 2))
+        totals = [t for v in profits for t in _printing(fig, "€/m²", v)]
+        assert totals, (where, "no per-panel profit total")
+        floor = max(t.get_fontsize() for t in totals)
+        said = [
+            (t.get_fontsize(), t.get_text())
+            for t in _texts(fig)
+            if "VALIDATION" in t.get_text() and "not the final" in " ".join(t.get_text().split())
+        ]
+        assert said, (where, "no text says VALIDATION and not the final")
+        assert max(size for size, _ in said) >= floor, (
+            where,
+            f"VALIDATION, not the final is at most {max(s for s, _ in said)} pt, under the"
+            f" {floor} pt totals",
+            said,
+        )
+
+
+@pytest.mark.parametrize("case", PICK_REFUSALS)
+def test_main_replay_refuses_a_bad_pick_before_any_season_or_file(
+    case, sources, tmp_path, monkeypatch, capsys
+):
+    """Done when: every refusal in step 3 happens before any file is written.
+
+    main --replay on each of PICK_REFUSALS' flawed tmp ledgers (as in replay_pick's test) exits
+    nonzero or raises ValueError, naming the row (or the run's dir, or the parquet), before any
+    season is played (every way to play one, a replay included, fails if called) and before
+    anything is written: --out isn't created. The card reads the synthetic rows; ffmpeg is
+    reported available."""
+    media = _media_has()
+    src = _replay_sources(tmp_path / "replay", case)
+    _no_replay_played(monkeypatch, media)
+    monkeypatch.setattr(FFMpegWriter, "isAvailable", classmethod(lambda cls: True))
+    _card_reads(monkeypatch, media, sources)
+    _replay_reads(monkeypatch, media, src)
+    out = tmp_path / "media"
+
+    code, text = _refused(media, ["--out", str(out), "--replay", src["replay"]], capsys)
+
+    assert code not in (0, None), text
+    assert any(name in text for name in src["named"]), (src["named"], text)
+    assert not out.exists()
+
+
+@pytest.mark.parametrize(("side", "key"), RECORD_MISMATCHES)
+def test_main_replay_refuses_a_season_that_differs_from_its_record(
+    side, key, sources, tmp_path, monkeypatch, capsys
+):
+    """Done when: a replayed result that differs from its record is refused before any file is
+    written.
+
+    Each replay must equal its record on every ledger.RESULT_KEYS key, hours and steps exactly and
+    the rest to rel 1e-9: rb_tuned against the parquet's day-59 row, the run against its
+    selected.json's per_scenario[1]. With one record off (viol_hours_temp 0.25 h high: rb_tuned's
+    1-day 3.25 h recorded as 3.50, the run's 2.00 as 2.25; or profit_eur_m2 rel 1e-6 high), main
+    exits nonzero or raises ValueError, naming the key and the side ("rb_tuned", or the run's arm
+    or row), and nothing is drawn or written: every drawing fails if called and --out isn't
+    created. The other side's record matches."""
+    media = _media_has()
+    rb, run = _graded("rb_tuned", 1), _graded("rb_default", 1)
+    rb_record, run_record = _record(rb["result"]), _record(run["result"])
+    record = rb_record if side == "rb_tuned" else run_record
+    record[key] = record[key] + 0.25 if key.startswith("viol_hours") else record[key] * (1 + 1e-6)
+    src = _replay_sources(tmp_path / "replay", record=run_record, rb_record=rb_record)
+    _replay_world(monkeypatch, media, sources, src, run, drawing="trip")
+    out = tmp_path / "media"
+    names = {"rb_tuned"} if side == "rb_tuned" else {ARM, src["runs"][107][0]["row_id"]}
+
+    code, text = _refused(media, ["--out", str(out), "--replay", src["result"]], capsys)
+
+    assert code not in (0, None), text
+    assert key in text, text
+    assert any(name in text for name in names), (names, text)
+    assert not out.exists()
+
+
+def test_main_replay_takes_profit_within_rel_1e9(sources, tmp_path, monkeypatch):
+    """Float noise is not a mismatch: with both records' profit_eur_m2 rel 1e-11 high (as a
+    different summation order gives), main --replay still returns 0 and draws the replay."""
+    media = _media_has()
+    rb, run = _graded("rb_tuned", 1), _graded("rb_default", 1)
+    rb_record, run_record = _record(rb["result"]), _record(run["result"])
+    for record in (rb_record, run_record):
+        record["profit_eur_m2"] *= 1 + 1e-11
+    src = _replay_sources(tmp_path / "replay", record=run_record, rb_record=rb_record)
+    calls = _replay_world(monkeypatch, media, sources, src, run)
+
+    assert media.main(["--out", str(tmp_path / "media"), "--replay", src["result"]]) == 0
+
+    assert "duel" in calls
+
+
 def test_cli_runs_as_a_module_and_lists_out(tmp_path):
     """python -m greenleaf_control.media --help exits 0 and lists --out (the issue's one command
-    is python -m greenleaf_control.media --out docs/media)."""
+    is python -m greenleaf_control.media --out docs/media) and --replay (issue #51's opt-in
+    replay of a result row)."""
     result = subprocess.run(
         [sys.executable, "-m", "greenleaf_control.media", "--help"],
         capture_output=True,
@@ -1709,6 +2897,7 @@ def test_cli_runs_as_a_module_and_lists_out(tmp_path):
     )
     assert result.returncode == 0, result.stderr
     assert "--out" in result.stdout
+    assert "--replay" in result.stdout, result.stdout
 
 
 @pytest.mark.parametrize("module", ["matplotlib.pyplot"])
@@ -1727,10 +2916,13 @@ def test_signatures():
     play(controller, season_length=60), running(states, controls, params, ends),
     season_replay(frame, counters, out_gif, out_mp4=None, *, title, subtitle=None, footer, fps=15),
     baselines_card(seasons, out, *, footer), footer(source, stamp, *, place=PAPER_NAME, note="A
-    simulator run, not a registered result"), main(argv=None), and issue #50's
+    simulator run, not a registered result"), main(argv=None), issue #50's
     tradeoff_points(path=ledger.LEDGER), rb_tuned_reference(n_seeds, path=ledger.LEDGER,
     parquet=selection.RESULTS / "rb_tuned_validation.parquet") and tradeoff_card(points,
-    references, out, *, footer)."""
+    references, out, *, footer), and issue #51's _hourly(frame), replay_pick(result_id,
+    path=ledger.LEDGER, parquet=selection.RESULTS / "rb_tuned_validation.parquet"),
+    _stripes(panels, figsize, *, title, caption, footer) and duel_replay(panels, out_gif, out_mp4,
+    out_png, *, title, caption, footer, fps=REPLAY_FPS)."""
     import greenleaf_control.media as media
 
     def shape(fn) -> list[tuple[str, str, object]]:
@@ -1777,6 +2969,30 @@ def test_signatures():
         ("out", pos, empty),
         ("footer", kw, empty),
     ]
+    _media_has()
+    assert shape(media._hourly) == [("frame", pos, empty)]
+    assert shape(media.replay_pick) == [
+        ("result_id", pos, empty),
+        ("path", pos, ledger.LEDGER),
+        ("parquet", pos, selection.RESULTS / PARQUET),
+    ]
+    assert shape(media._stripes) == [
+        ("panels", pos, empty),
+        ("figsize", pos, empty),
+        ("title", kw, empty),
+        ("caption", kw, empty),
+        ("footer", kw, empty),
+    ]
+    assert shape(media.duel_replay) == [
+        ("panels", pos, empty),
+        ("out_gif", pos, empty),
+        ("out_mp4", pos, empty),
+        ("out_png", pos, empty),
+        ("title", kw, empty),
+        ("caption", kw, empty),
+        ("footer", kw, empty),
+        ("fps", kw, media.REPLAY_FPS),
+    ]
 
 
 # --- The one command, end to end ---------------------------------------------------------------
@@ -1786,7 +3002,7 @@ def _ffprobe(path: Path) -> dict:
     out = subprocess.run(
         [
             *("ffprobe", "-v", "error", "-select_streams", "v:0"),
-            *("-show_entries", "stream=codec_name,width:format=duration"),
+            *("-show_entries", "stream=codec_name,width,height:format=duration"),
             *("-of", "json", str(path)),
         ],
         capture_output=True,
@@ -1919,3 +3135,44 @@ def test_one_command_writes_every_file_labelled_with_its_source_and_commit(
     for c in CONTROLLERS:
         _assert_golden(card_entry["metrics"][c], GOLDEN[c], c)
     assert by_file["tradeoff.png"]["split"] == "validation"
+
+
+@pytest.mark.slow  # two 60-day seasons here, rb_tuned's again in main, then the GIF and the MP4
+@pytest.mark.skipif(
+    shutil.which("ffmpeg") is None or shutil.which("ffprobe") is None,
+    reason="needs ffmpeg and ffprobe",
+)
+def test_replay_command_writes_the_gif_mp4_and_hero(sources, tmp_path, monkeypatch):
+    """Done when: --replay on fake run dirs writes a GIF under 8 MB and 8 to 20 s long, and an MP4
+    that is h264, 1920 wide and 8 to 20 s long (ffprobe).
+
+    main --out OUT --replay <result> on the E6-shaped tmp ledger with real 60-day seasons: rb_tuned
+    played by main through export_replay at its 60 days, and run_policy a spy returning
+    rb_default's 60-day SEASON, each recorded as itself, so the records match. Today's three
+    pictures are recorded (the other slow test draws them); duel_replay draws for real. It returns
+    0 and writes:
+    - duel_replay.gif: GIF8, 1280 x 720, under 8 MB, 8-20 s (60 days x DAY_FRAMES + a 2 s hold);
+    - duel_replay.mp4: h264, 1920 x 1080, 8-20 s (ffprobe);
+    - hero.png: 1200 x 627 (PIL)."""
+    media = _media_has()
+    rb, run = _graded("rb_tuned", 60), _graded("rb_default", 60)
+    src = _replay_sources(
+        tmp_path / "replay", record=_record(run["result"]), rb_record=_record(rb["result"])
+    )
+    _replay_world(monkeypatch, media, sources, src, run, days=60, drawing="today")
+    out = tmp_path / "media"
+
+    assert media.main(["--out", str(out), "--replay", src["result"]]) == 0
+
+    gif, mp4, png = (out / name for name in REPLAY_FILES)
+    assert gif.read_bytes()[:4] == b"GIF8"
+    with Image.open(gif) as im:
+        assert im.size == (1280, 720)
+    assert gif.stat().st_size < 8_000_000
+    assert 8 <= _gif_seconds(gif) <= 20
+    probe = _ffprobe(mp4)
+    [stream] = probe["streams"]
+    assert (stream["codec_name"], stream["width"], stream["height"]) == ("h264", 1920, 1080)
+    assert 8 <= float(probe["format"]["duration"]) <= 20
+    with Image.open(png) as im:
+        assert im.size == (1200, 627)
