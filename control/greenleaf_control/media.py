@@ -54,6 +54,7 @@ TRADEOFF = [
     ("result-06364fa1", "ppo", "adopted"),  # E3
     ("result-d1f0b8e7", "residual_w05", "adopted"),  # E6, seeds 100 to 109
     ("result-2a890455", "residual_w1", "adopted"),  # E4
+    ("result-1dd39e3a", "lag_b100", "adopted"),  # E7, seeds 200 to 209
     ("result-2a890455", "residual_w4", "dropped"),  # E4
 ]
 E1_RESULT = "result-525a6e90"  # rb_tuned on VALIDATION; its profit is only in RB_PARQUET
@@ -515,18 +516,18 @@ def tradeoff_card(points, references, out, *, footer) -> Figure:
     ]
     labels.append(
         f"rb_tuned (tuned rules), {E1_RESULT}\n{seasons} seasons scored as {top['n_seeds']}"
-        f" seeds, no bars\nprofit {top['profit_eur_m2']:.2f} €/m²\nfruit growth"
+        f" seeds, no bars\nprofit {top['profit_eur_m2']:.2f} €/m², fruit growth"
         f" {top['yield_kg_m2']:.2f} kg/m²"
     )
     fig.legend(
         [*handles, rb],
         labels,
         loc="upper left",
-        bbox_to_anchor=(0.695, 0.8),
+        bbox_to_anchor=(0.695, 0.81),
         frameon=False,
-        fontsize=10,
+        fontsize=9.5,
         labelcolor=INK,
-        labelspacing=0.7,
+        labelspacing=0.5,
     )
     fig.savefig(out, dpi=100)
     return fig
