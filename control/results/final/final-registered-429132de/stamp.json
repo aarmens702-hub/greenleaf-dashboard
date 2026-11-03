@@ -1,0 +1,24 @@
+{
+  "commit": "5cc82c58d68481f42914615a68c2992b08e819b6",
+  "dirty": false,
+  "fingerprints": {
+    "control/configs/ppo.yml": "f4cecbe425a2ec4174ee8918e905fedbcf3fdb0f5f408e5feaeff944f16be21e",
+    "control/greenleaf_control/envs.py": "2fa93cae242eef955a0acc24185c0373ab106a5e45592049851dfbff587ec9c2",
+    "control/greenleaf_control/metrics.py": "5f1b85a8cdbd70f624e6c9caa41c44c7cde38ce858e50447edf6c72eaa867cfa",
+    "control/greenleaf_control/rewards.py": "da106c46ca83fa90edde21dd62880978b0f065686cf00272e3124f0e7260f940",
+    "control/greenleaf_control/scenarios.py": "01d02c39573451b1c4ad33959d312592eb3e2f6506ffbb916dd95d19cbf494c2",
+    "docs/PROTOCOL.md": "b1cd8ec1e943f73131ac85f4e7d966dc914ec064737bcf4abe6bbf8c5034c3e4"
+  },
+  "weather_hashes": {
+    "Abbotsford/2012.csv": "46e99fcf079d5e3a61922e6af27d93f5eb0aeb2f1ff963fd7cb39bb830b3dade",
+    "Abbotsford/2013.csv": "a8ff975b5a5c9baca3e777ec474a928bafc5f1970b5dba6dbfe317a264e226aa",
+    "Amsterdam/2008.csv": "180cca9085713e40e7c95bad0a976c54607bc9fe34fb1113404aa42a05a7a743",
+    "Amsterdam/2009.csv": "e4777c9df11b8cbaa991aace281585a7922d9fb0d1bf3f298a30822533973af2",
+    "Amsterdam/2010.csv": "83d0cb77cb2c4b10765f269aa372477202ddc852a9f8d985c3159b790cd995dd",
+    "Amsterdam/2011.csv": "1197290ea761661dd9b1bef1398054f5a139d621d34086f810d40470ae61d716",
+    "Amsterdam/2012.csv": "bf9bdef17f3d52c86f62d53bf0fc7b3c7dd4fabb3cd6bab2e851b69abcb95938",
+    "Amsterdam/2013.csv": "4908f27ec091c417611c24d2e99107c4b9370cde8d04a116a933dc403d97f97a",
+    "London/2012.csv": "b9a85f859a00adf87b7a4d6595681a00d8f4dea2d069881b2c531cb64e3e8231",
+    "London/2013.csv": "ef8c6536864a8dc57e99d1351a8c5332d7c9557b2af6f4b14cdd988f27268a83"
+  }
+}
