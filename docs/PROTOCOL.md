@@ -1,6 +1,6 @@
 # Evaluation protocol (core)
 
-**Version 3, 2026-11-02.** Prices are a setting, the price regime (§1): `sim`, the regime of every result before v3, or `agc2020`. A season's profit and `paper_return` are graded at one regime and no comparison mixes regimes; a recorded season may be re-graded at another regime, labelled 're-priced' and exploratory unless registered before it was graded (§4). The rules may be tuned per regime (§3). Version 2 (2026-10-30): after E5's pinned λ_co2, a zero-budget constraint in `residual_lag` keeps a fixed multiplier of 1 (§3), and §5 checks budgets only where nonzero. This file decides how every GreenLeaf 2.0 result is scored, so it is a scorer file:
+**Version 4, 2026-11-03.** Each test year is its own seal (§8): TEST (2012) stays spent and untouched, and TEST_2013 (§2), three NASA POWER 2013 sites, is sealed the same way and finalized once; spending one seal opens no other. A 2013 final grades as the 2012 final did. Version 3 (2026-11-02): prices are a setting, the price regime (§1): `sim`, the regime of every result before v3, or `agc2020`. A season's profit and `paper_return` are graded at one regime and no comparison mixes regimes; a recorded season may be re-graded at another regime, labelled 're-priced' and exploratory unless registered before it was graded (§4). The rules may be tuned per regime (§3). Version 2 (2026-10-30): after E5's pinned λ_co2, a zero-budget constraint in `residual_lag` keeps a fixed multiplier of 1 (§3), and §5 checks budgets only where nonzero. This file decides how every GreenLeaf 2.0 result is scored, so it is a scorer file:
 - changing it needs Aarmen's yes;
 - its hash stamps every ledger row, so results recorded under an older version stop being comparable.
 
@@ -36,6 +36,15 @@ A scenario is `(location, growth_year, start_day)`. Weather files are hashed (sh
 | VALIDATION | Amsterdam 2010 × start days {45, 59, 75} (3) | Checkpoint selection, every experiment's result |
 | PAPER | Amsterdam 2010, day 59 | The reproduction check only |
 | TEST (sealed) | 2012 × start days {45, 49, 53, 57, 61, 65, 69, 73}, at Amsterdam, London, and Abbotsford BC (8 each) | The `final` evaluation, once |
+| TEST_2013 (sealed) | 2013 × start days {45, 49, 53, 57, 61, 65, 69, 73}, at Amsterdam, London, and Abbotsford BC (8 each) | The 2013 seal's `final` evaluation, once |
+
+TEST_2013's weather is NASA POWER hourly data for all three sites (`scripts/fetch_weather.py`: community RE, local solar time, 2 m wind), fetched 2026-11-02, 105,109 rows each (300 s steps from 0 to the year's last hour, 31,532,400 s). Amsterdam's 2013 file is NASA POWER, unlike its 2008–2012 files, which are GreenLight-Gym's bundled copies. Their sha256:
+
+| File | Site | sha256 |
+|---|---|---|
+| `Amsterdam/2013.csv` | 52.37 N, 4.90 E | `4908f27ec091c417611c24d2e99107c4b9370cde8d04a116a933dc403d97f97a` |
+| `London/2013.csv` | 51.51 N, 0.13 W | `ef8c6536864a8dc57e99d1351a8c5332d7c9557b2af6f4b14cdd988f27268a83` |
+| `Abbotsford/2013.csv` | 49.05 N, 122.33 W | `a8ff975b5a5c9baca3e777ec474a928bafc5f1970b5dba6dbfe317a264e226aa` |
 
 VALIDATION contains PAPER's season. That is deliberate: PAPER is only a reproduction check, never a selection target.
 
@@ -140,11 +149,17 @@ Per episode:
 7. **Overfit a trivial case:** one scenario (PAPER), a 2-day season, no constraint terms. Within 200,000 steps, PPO must clearly beat `random` and `zero_controls` on return. The gap to `rb_default` is recorded, not gated: a hand-tuned controller can legitimately win a 2-day season, so beating it is not a plumbing test.
 
 ## 8. The seal
-- **What is sealed:** the TEST scenarios are scored only by `evaluate --final <row>`, where `<row>` is a
-  `final-registered` ledger row that lists the selected checkpoints and both RBs and carries Aarmen's approval.
-- **Once:** it runs once. The `final-result` row consumes the seal; the code and `check_locks.py` refuse a second.
-- **What is not sealed:** loading the 2012 weather to check an env resets is not scoring and is allowed in tests.
-  Nothing else may touch the TEST scenarios.
+- **Seal groups:** each test year is its own seal: 2012 (TEST) and 2013 (TEST_2013). Any scenario of a seal's year
+  is sealed, at every site and start day. A `final-registered` row names its seal (`seal: 2013`; a row without one,
+  as every row before v4, is 2012's).
+- **What is sealed:** a seal's scenarios are scored only by `evaluate --final <row>`, where `<row>` is a
+  `final-registered` ledger row of that seal that lists the selected checkpoints and both RBs and carries Aarmen's
+  approval.
+- **Once:** each seal's final runs once. A `final-result` row under one of the seal's rows consumes that seal; the
+  code and `check_locks.py` refuse a second for it. Spending one seal opens no other: 2012 stays spent whatever
+  2013 does, and spending 2013 leaves 2012 as it was.
+- **What is not sealed:** loading the 2012 or 2013 weather to check an env resets, and hashing or format-checking
+  those files, is not scoring and is allowed in tests. Nothing else may touch a seal's scenarios.
 
 ## 9. Experiment sequence (each an `experiment` issue, VALIDATION only)
 - **E1:** tune the RB (`rb_tuned`).

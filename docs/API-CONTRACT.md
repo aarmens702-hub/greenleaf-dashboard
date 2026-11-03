@@ -7,10 +7,13 @@ Paths are relative to `control/`. Scenario dicts are `{"location": str, "growth_
 - `WEATHER_DIR: Path` (`control/data/weather`)
 - `TRAIN_SAMPLER_KWARGS: dict`: `{"locations": ["Amsterdam"], "growth_years": [2008, 2009, 2011], "start_days": list(range(45, 76))}`
 - `TRAIN_EVAL: list[dict]` (9), `VALIDATION: list[dict]` (3), `PAPER: dict`, `TEST: dict[str, list[dict]]` with keys
-  `amsterdam_2012`, `london_2012`, `abbotsford_2012` (8 each). Values per `docs/PROTOCOL.md` §2.
-- `SPLITS: dict[str, list[dict]]`: every named split above (`train_eval`, `validation`, `paper`, plus the three test
+  `amsterdam_2012`, `london_2012`, `abbotsford_2012` (8 each), and `TEST_2013: dict[str, list[dict]]` with keys
+  `amsterdam_2013`, `london_2013`, `abbotsford_2013` (8 each). Values per `docs/PROTOCOL.md` §2.
+- `SEALS: dict[int, dict[str, list[dict]]]`: `{2012: TEST, 2013: TEST_2013}`, each test year's seal (PROTOCOL §8).
+- `SPLITS: dict[str, list[dict]]`: every named split above (`train_eval`, `validation`, `paper`, plus the six test
   keys).
-- `is_test(scenario: dict) -> bool`: True for any 2012 scenario.
+- `is_test(scenario: dict) -> bool`: True for any scenario whose `growth_year` is a `SEALS` key (an int: 2012 or
+  2013), read at call time.
 - `weather_hashes() -> dict[str, str]`: `"<location>/<year>.csv"` → sha256 for every weather file.
 - `require_weather(scenarios: list[dict]) -> None`: raises `FileNotFoundError` naming the missing
   `<WEATHER_DIR>/<location>/<year>.csv`.
@@ -138,27 +141,35 @@ Paths are relative to `control/`. Scenario dicts are `{"location": str, "growth_
   | `run-end` | `run`, `status`, `wall_s`, `timesteps`, `solver_failures`, `cost_usd`, `diagnostics` ({min_approx_kl, final_entropy, final_explained_variance}) |
   | `result` | `registered`, `per_arm` ({iqm, ci_low, ci_high (null when no run was scored), guards ({guard: {iqm, ci_low, ci_high}}), crashed, invalid_episodes, spend_usd (the arm's run-ends' cost_usd, null as 0)}), `selected` ({run row_id → `"<steps>"` \| `"final"`}, learning runs only) |
   | `decision` | `result`, `decision` (adopted or dropped), `note` |
-  | `final-registered` | `checkpoints` ({run row_id → `"<steps>"` \| `"final"`}; each pair is exactly a value of some `result` row's `selected`; a learning arm is named by its run rows' `arm` and comes from one registration; a learning arm's name is not one of the row's `baselines`), `baselines` (a list drawn from `FINAL_BASELINES`, no duplicates, with `rb_default` and `rb_tuned`), `approved_by`, `approved_at` |
-  | `final-result` | `final-registered`, `per_split` ({split: {arm: {iqm, ci_low, ci_high, guards ({g: {iqm, ci_low, ci_high}}, g in F1a-3's `FINAL_GUARDS`), invalid_episodes, prob_improvement, scored}}}). split is exactly `TEST_SPLITS`; arm is exactly `final_arms` plus `baselines`; iqm and ci_* are on the primary `profit_eur_m2`; prob_improvement is P(arm > rb_tuned) on the primary, null for rb_tuned; scored is {run row_id → checkpoint} as registered, `{}` for a baseline |
+  | `final-registered` | `checkpoints` ({run row_id → `"<steps>"` \| `"final"`}; each pair is exactly a value of some `result` row's `selected`; a learning arm is named by its run rows' `arm` and comes from one registration; a learning arm's name is not one of the row's `baselines`), `baselines` (a list drawn from `FINAL_BASELINES`, no duplicates, with `rb_default` and `rb_tuned`), `approved_by`, `approved_at`; optional `seal` (an int key of `SEALS`, written only when given; absent means 2012) |
+  | `final-result` | `final-registered`, `per_split` ({split: {arm: {iqm, ci_low, ci_high, guards ({g: {iqm, ci_low, ci_high}}, g in F1a-3's `FINAL_GUARDS`), invalid_episodes, prob_improvement, scored}}}). Never carries `seal`: its seal is its final-registered row's. split is exactly `SEALS[<that seal>]` (`TEST_SPLITS` for 2012); arm is exactly `final_arms` plus `baselines`; iqm and ci_* are on the primary `profit_eur_m2`; prob_improvement is P(arm > rb_tuned) on the primary, null for rb_tuned; scored is {run row_id → checkpoint} as registered, `{}` for a baseline |
 
 - **CLI** (`python -m greenleaf_control.ledger`):
   - `register ... [--dry]`
   - `result --registered <row> --numbers <file>`: `<file>` is `{per_arm, selected}` as `selection` writes it; the ledger adds `crashed` and `spend_usd` from the run-ends and refuses them in the file
   - `decide --result <row> --adopted|--dropped --note "..."`
   - `show [--issue N] [--spend]`
-  - `final-register --issue N --checkpoints JSON --baselines B... --approved-by Aarmen`
+  - `final-register --issue N --checkpoints JSON --baselines B... --approved-by Aarmen [--seal YEAR]`: `--seal` (an
+    int) passes `seal=` through the same checks; without it the row is 2012's
   - `final-result --final-registered <row> --numbers <file>`: `<file>` is exactly `{per_split}` as F1a-3's `evaluate --final` will write it; prints the row id
 - **Names:** `TEST_SPLITS` and `FINAL_BASELINES` (written out; tests pin them to `tuple(scenarios.TEST)` and
-  `envs.BASELINES`), `FINAL_ARM_KEYS`, and `final_arms(final_registered: dict, rows: list[dict]) -> dict[str, dict[str, str]]`
-  (arm → {run row_id → checkpoint}).
+  `envs.BASELINES`), `SEALS` (`{2012: TEST_SPLITS, 2013: ("amsterdam_2013", "london_2013", "abbotsford_2013")}`,
+  written out; a test pins it to `scenarios.SEALS`), `FINAL_ARM_KEYS`, `final_arms(final_registered: dict, rows:
+  list[dict]) -> dict[str, dict[str, str]]` (arm → {run row_id → checkpoint}), `seal_of(final_registered: dict) ->
+  int` (its `seal`, or 2012), `seal_spent(rows: list[dict], seal: int) -> bool` (a `final-result` under one of the
+  seal's rows), and `final_register(*, issue, checkpoints, baselines, approved_by, seal=None, path=LEDGER)`.
 - **Appends only.** `register` refuses a third registration on one issue without `--owner-ok`, and any `primary`
   or `guards` entry not in `ledger.RESULT_KEYS` (checked on every append). `result` refuses
-  unless every registered arm × seed has a `run-end` row. `final-register` refuses a missing `approved_by`, a spent
-  seal, empty `checkpoints`, a pair no result's `selected` holds, one arm from two registrations, bad `baselines`, and
-  a learning arm named like one of its baselines. `final-result` refuses a second final-result first, then a `per_split` whose
-  splits, arms or entry keys aren't the above, a `prob_improvement` that isn't null exactly for `rb_tuned`, and a
-  `scored` that differs from the registration (guard names are checked in F1a-3 via `FINAL_GUARDS`, not here).
-  `check_locks` holds a result's and a final-result's fingerprints to their parent's.
+  unless every registered arm × seed has a `run-end` row. `final-register` refuses a missing `approved_by`, a `seal`
+  that isn't an int key of `SEALS` (a ValueError naming seal; on every append), its seal spent, empty `checkpoints`,
+  a pair no result's `selected` holds, one arm from two registrations, bad `baselines`, and a learning arm named like
+  one of its baselines. `final-result` refuses a second final-result of its seal first, then a `per_split` whose
+  splits (its seal's), arms or entry keys aren't the above, a `prob_improvement` that isn't null exactly for
+  `rb_tuned`, and a `scored` that differs from the registration (guard names are checked in F1a-3 via `FINAL_GUARDS`,
+  not here). Seals are independent: spending one leaves the others as they were.
+  `check_locks` holds a result's and a final-result's fingerprints to their parent's, and counts final-results per
+  seal (the parent's; absent 2012): an unknown seal, a `per_split` not keyed by exactly that seal's splits, or a
+  second final-result of one seal is a violation.
 
 ## `greenleaf_control.train`
 - `python -m greenleaf_control.train --method M --seed S [--penalty-weight W] [--budget-frac B] [--timesteps N]
@@ -218,13 +229,13 @@ Paths are relative to `control/`. Scenario dicts are `{"location": str, "growth_
   `paper_reward_sum` = Σ `info["paper_reward"]` in step order with `+=` (a reproduction check, not a graded metric).
 - **`main(argv=None, *, ledger_path=ledger.LEDGER)`**; `ledger_path` is the ledger `--final` reads.
 - **CLI, scoring:** `--controller {zero_controls|random|rb_default|rb_tuned|rb_tuned_agc2020|<run_dir>}`
-  `--split {train_eval|validation|paper|<the three test splits>} --out <parquet>`, all three required (argparse's
+  `--split {train_eval|validation|paper|<the six test splits>} --out <parquet>`, all three required (argparse's
   message) when there is no `--final`; `[--price-regime {sim,agc2020}]`.
   - `BASELINES = (*envs.BASELINES, "rb_tuned_agc2020")`, the CLI's baselines; `rb_tuned_agc2020` plays
     `load_rb_params("tuned_agc2020")`.
   - `--price-regime` (default `sim`) plays and grades a baseline at that regime. With a run dir it is refused (the
     manifest's regime stands), and so it is with `--final`.
-  - The three test splits are refused as sealed (PROTOCOL §8) without `--final`.
+  - The six test splits (every `scenarios.SEALS` seal's) are refused as sealed (PROTOCOL §8) without `--final`.
   - `--out` must not exist (created exclusively). One row per scenario in split order, 60-day seasons. Identity
     columns `controller, checkpoint` (None for a baseline, `final` for a run dir), `split, location, growth_year,
     start_day, season_length, price_regime` (a baseline's `--price-regime`, `sim` when unflagged; a run dir's
@@ -233,13 +244,18 @@ Paths are relative to `control/`. Scenario dicts are `{"location": str, "growth_
     `random` go through `envs.run_baseline`, `rb_*` through `run_rb`.
 - **CLI, the final:** `--final <final-registered row>`, with no `--controller`, `--split`, `--out` or
   `--price-regime` (refused, naming the flag).
-  - **Refuses, in this order**, before any env is built, any weather is read or any file is written: (1) any
-    `final-result` in the ledger (the seal is spent); (2) a row that isn't a `final-registered` row, or isn't the
-    newest one (names the newer); (3) `manifest.fingerprints()` unequal to the row's (names the keys); (4) a
-    non-empty `FINAL_RESULTS`; (5) for any run in `ledger.final_arms(row)`: a run dir without `manifest.json`,
-    `ckpt_<c>.zip`, `vecnorm_<c>.pkl` or `selected.json`, or a `selected.json` whose `checkpoint` isn't `<c>`
-    (names the run's row id, arm, seed and dir); (6) a dirty tree (`manifest.code_stamp(smoke=False)` raises).
-  - **Scores**, for each TEST split in `ledger.TEST_SPLITS` order and each scenario in split order, 60-day seasons:
+  - **Refuses, in this order**, before any env is built, any weather is read or any file is written: (1) a row that
+    isn't a `final-registered` row; (2) its seal (`ledger.seal_of`) spent, a `final-result` under one of the seal's
+    rows ("the seal is spent"); (3) a row that isn't its seal's newest (names the newer); (4)
+    `manifest.fingerprints()` unequal to the row's (names the keys); (5) a `FINAL_RESULTS` holding anything but the
+    dirs of spent seals' final-registered rows ("`<FINAL_RESULTS>` is not empty"; an unspent seal's own dir is an
+    interrupted final); (6) a missing weather file of the seal's scenarios (`scenarios.require_weather`'s
+    `FileNotFoundError`, naming the path); (7) for any run in `ledger.final_arms(row)`: a run dir without
+    `manifest.json`, `ckpt_<c>.zip`, `vecnorm_<c>.pkl` or `selected.json`, or a `selected.json` whose `checkpoint`
+    isn't `<c>` (names the run's row id, arm, seed and dir); (8) a dirty tree (`manifest.code_stamp(smoke=False)`
+    raises). The seal's splits are `scenarios.SEALS[seal]`, read at call time.
+  - **Scores**, for each of the seal's splits in `scenarios.SEALS[seal]` order and each scenario in split order,
+    60-day seasons:
     each learning arm (by name), its runs by ascending seed, with `run_policy(run_dir, c, s, 60, allow_test=True)`;
     then each of the row's `baselines` in its order, as the scoring CLI scores it, with `allow_test=True`.
     Traced seasons, each arm's lowest registered seed and every baseline, are scored with `record_steps=True,
@@ -419,8 +435,8 @@ Paths are relative to `control/`. Scenario dicts are `{"location": str, "growth_
   (modal.com/pricing; one core = 2 vCPU).
   - `--registered <row> --backend {local,modal} [--parallel 2]`:
     - Before any launch, refuses an unknown row, a method not in `envs.METHODS`, a config key outside `CONFIG_KEYS`
-      (train's `penalty_weight, budget_frac, season_length, n_envs, rb, price_regime`) and any scenario in
-      `scenarios.TEST`.
+      (train's `penalty_weight, budget_frac, season_length, n_envs, rb, price_regime`) and any scenario that is a
+      split of a `scenarios.SEALS` seal.
     - Then runs `python -m greenleaf_control.train --method M [--<key> V ...] --seed S --timesteps T --registered
       <row>` once per arm × seed, `--parallel` at a time, and exits 1 naming the arm and seed of any failure.
     - Locally, run_grid writes no ledger row; each train run records its own.
@@ -454,7 +470,7 @@ Paths are relative to `control/`. Scenario dicts are `{"location": str, "growth_
   - `app = modal.App("greenleaf")`;
   - image: `debian_slim(python_version="3.12")` + `apt_install("git")` + `uv_sync(<absolute control/>, frozen=True)` +
     `add_local_python_source("greenleaf_control")` + `add_local_dir(control/configs, "/root/configs")` +
-    `add_local_dir(control/data/weather, "/root/data/weather")`. Every weather file ships, the sealed 2012 included:
+    `add_local_dir(control/data/weather, "/root/data/weather")`. Every weather file ships, the sealed 2012 and 2013 included:
     they're hashed against the stamp, never trained on.
   - `train_remote(argv: list[str], meta: dict, run_rel: str) -> dict`:
     - hard limits `cpu=(4.0, 4.0)`, `memory=(8192, 8192)` ((request, limit) pairs), `timeout=4*3600`, `retries=0`,

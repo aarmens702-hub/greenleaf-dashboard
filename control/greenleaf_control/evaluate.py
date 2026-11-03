@@ -10,9 +10,10 @@ Both grade the season with metrics (raw states and controls, never the reward) a
 paper_reward_sum, info["paper_reward"] summed in step order. With record_steps they also return
 one frame row per step t = 0..T-1, read from the state after the step.
 
-The TEST splits are sealed (PROTOCOL §8): only --final <final-registered row> may score them, once.
-It refuses anything that could break the seal before any env is built, then scores the row's runs
-at their registered checkpoints and its baselines on the TEST splits, and writes FINAL_RESULTS/<row>/
+Each seal's test splits (scenarios.SEALS: 2012's TEST, 2013's TEST_2013) are sealed (PROTOCOL §8):
+only --final <final-registered row> may score them, once per seal. It refuses anything that could
+break the seal before any env is built, then scores the row's runs at their registered checkpoints
+and its baselines on its seal's splits, and writes FINAL_RESULTS/<row>/
 (stamp.json, seasons.parquet, per_split.json) for `ledger final-result` to record, then replays/:
 export_replay's hourly JSON of every season of each arm's lowest registered seed and of every
 baseline, from the seasons it scored. make_raw_env
@@ -245,20 +246,25 @@ def _shown(ci: dict) -> str:
 
 def _final(row_id: str, ledger_path: Path, parser: argparse.ArgumentParser) -> int:
     """evaluate --final <row>: the refusals in order, before any env, weather read or write; then
-    every registered run at its checkpoint and every baseline on each TEST split, written once to
+    every registered run at its checkpoint and every baseline on each of its seal's splits, once to
     FINAL_RESULTS/<row>/, with replays/ of the traced seasons last. Writes no ledger row; prints the
     command that records per_split.json, or raises with it after the replays if a traced season
     ended early (it gets no replay)."""
     rows = ledger.rows(path=ledger_path)
-    if any(r["kind"] == "final-result" for r in rows):
-        parser.error(f"--final {row_id}: a final-result is in the ledger; the seal is spent")
     finals = [r for r in rows if r["kind"] == "final-registered"]
     row = next((r for r in finals if r["row_id"] == row_id), None)
     if row is None:
         parser.error(f"--final {row_id}: no final-registered row has that id in {ledger_path}")
-    if row is not finals[-1]:
+    seal = ledger.seal_of(row)
+    if ledger.seal_spent(rows, seal):
         parser.error(
-            f"--final {row_id}: a newer final-registered row, {finals[-1]['row_id']}, replaces it"
+            f"--final {row_id}: a final-result of the {seal} seal is in the ledger; the seal is spent"
+        )
+    newest = [r for r in finals if ledger.seal_of(r) == seal][-1]
+    if row is not newest:
+        parser.error(
+            f"--final {row_id}: a newer final-registered row of the {seal} seal,"
+            f" {newest['row_id']}, replaces it"
         )
     here, there = manifest.fingerprints(), row["fingerprints"]
     differ = sorted(k for k in here.keys() | there.keys() if here.get(k) != there.get(k))
@@ -267,11 +273,18 @@ def _final(row_id: str, ledger_path: Path, parser: argparse.ArgumentParser) -> i
             f"--final {row_id}: the scorer files differ from the row's fingerprints:"
             f" {', '.join(differ)}"
         )
-    if FINAL_RESULTS.exists() and any(FINAL_RESULTS.iterdir()):
+    # FINAL_RESULTS may hold only spent seals' finals: anything else is a final that opened its
+    # seal's test weather and was never recorded, or a dir no final-registered row names.
+    spent = {r["row_id"] for r in finals if ledger.seal_spent(rows, ledger.seal_of(r))}
+    held = sorted(p.name for p in FINAL_RESULTS.iterdir()) if FINAL_RESULTS.exists() else []
+    stray = [name for name in held if name not in spent]
+    if stray:
         parser.error(
-            f"--final {row_id}: {FINAL_RESULTS} is not empty; an earlier final already opened"
-            " the test weather in this checkout"
+            f"--final {row_id}: {FINAL_RESULTS} is not empty: it holds {', '.join(stray)}, no spent"
+            " seal's final; an earlier final already opened the test weather in this checkout"
         )
+    seal_splits = scenarios.SEALS[seal]
+    scenarios.require_weather([s for split in seal_splits.values() for s in split])
     arms = ledger.final_arms(row, rows)
     runs = {r["row_id"]: r for r in rows if r["kind"] == "run"}
     for arm, scored in arms.items():
@@ -328,8 +341,8 @@ def _final(row_id: str, ledger_path: Path, parser: argparse.ArgumentParser) -> i
     with (out / "stamp.json").open("x") as f:
         f.write(json.dumps(stamp, sort_keys=True, indent=2) + "\n")
     seasons, replays = [], []
-    for split in ledger.TEST_SPLITS:
-        for s in scenarios.TEST[split]:
+    for split, split_scenarios in seal_splits.items():
+        for s in split_scenarios:
             where = {"split": split, **s, "season_length": SEASON_LENGTH}
             for arm, run, c in learning:
                 trace = run["row_id"] == traced[arm]
@@ -355,7 +368,7 @@ def _final(row_id: str, ledger_path: Path, parser: argparse.ArgumentParser) -> i
         pd.DataFrame(seasons).to_parquet(f)
 
     per_split = {}
-    for split in ledger.TEST_SPLITS:
+    for split in seal_splits:
         rb_tuned = _by_run(seasons, split, "rb_tuned", FINAL_PRIMARY)
         per_split[split] = {}
         for arm in [*sorted(arms), *row["baselines"]]:
@@ -436,7 +449,8 @@ def _parser() -> argparse.ArgumentParser:
     p.add_argument(
         "--split",
         choices=list(scenarios.SPLITS),
-        help=f"the test splits ({', '.join(scenarios.TEST)}) need --final",
+        help=f"the test splits ({', '.join(n for t in scenarios.SEALS.values() for n in t)}) need"
+        " --final",
     )
     p.add_argument("--out", type=Path, help="the parquet to write; must not exist")
     p.add_argument(
@@ -447,9 +461,9 @@ def _parser() -> argparse.ArgumentParser:
     p.add_argument(
         "--final",
         metavar="ROW",
-        help="the newest final-registered row: score its runs and baselines once on the test"
-        " splits into control/results/final/<ROW>/ (takes no --controller, --split, --out or"
-        " --price-regime)",
+        help="its seal's newest final-registered row: score its runs and baselines once on its"
+        " seal's test splits into control/results/final/<ROW>/ (takes no --controller, --split,"
+        " --out or --price-regime)",
     )
     return p
 
@@ -470,7 +484,7 @@ def main(argv: list[str] | None = None, *, ledger_path: Path = ledger.LEDGER) ->
     missing = [flag for flag, value in flags.items() if value is None]
     if missing:
         parser.error(f"the following arguments are required: {', '.join(missing)}")
-    if args.split in scenarios.TEST:
+    if any(args.split in t for t in scenarios.SEALS.values()):
         parser.error(
             f"--split {args.split} is TEST weather, sealed (PROTOCOL §8): only --final"
             " <final-registered row> may score it"

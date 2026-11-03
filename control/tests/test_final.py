@@ -30,6 +30,14 @@ changes the ledger, a run dir or FINAL_RESULTS works on its own copies (_copy_wo
 evaluate.main runs in-process, since guard_runs blocks `evaluate --final` on the command line. No
 fixture calls the --final, so while it is missing every test FAILS in its own body rather than
 ERRORs.
+
+Issue #71, the second seal: scenarios.SEALS = {2012: TEST, 2013: TEST_2013}, each spent once. The
+module fixture cuts SEALS[2012] with TEST, and its tripwire fails on any real *2013.csv too (2013
+reads from tmp are listed apart, in .reads_2013). The 2013 tests build their world in their own
+body (_world_2013): a copied world where 2012 is spent (its files in FINAL_RESULTS, its
+final-result recorded), synthetic 2013.csv files in tmp that are byte copies of the real
+Amsterdam/2010.csv (never the real 2013 weather), SEALS[2013] cut to days 45 and 49, and a seal-2013
+final-registered row of seed 0 at "final" with rb_default and rb_tuned.
 """
 
 import ast
@@ -141,6 +149,7 @@ def world(tmp_path_factory):
         ledger=root / "ledger.jsonl",
         results=root / "final_out",
         reads=[],
+        reads_2013=[],
         trips=[],
         final_results_default=getattr(evaluate, "FINAL_RESULTS", None),
         stamp={
@@ -155,11 +164,11 @@ def world(tmp_path_factory):
 
     def read_csv(filepath_or_buffer, *args, **kwargs):
         path = Path(str(filepath_or_buffer)).resolve()
-        if path.name.endswith("2012.csv"):
+        if path.name.endswith(("2012.csv", "2013.csv")):  # 2013: the second seal (#71)
             if not path.is_relative_to(tmp_root):
                 w.trips.append(path)
-                raise AssertionError(f"the sealed 2012 test weather was read: {path}")
-            w.reads.append(path)
+                raise AssertionError(f"the sealed {path.stem} test weather was read: {path}")
+            (w.reads if path.name.endswith("2012.csv") else w.reads_2013).append(path)
         return real_read_csv(filepath_or_buffer, *args, **kwargs)
 
     with pytest.MonkeyPatch.context() as mp:
@@ -238,6 +247,10 @@ def world(tmp_path_factory):
             for split, site in SITES.items()
         }
         mp.setattr(scenarios, "TEST", test)
+        # #71: SEALS[2012] is TEST, so it is cut the same way. Set as a fresh dict (and created
+        # while scenarios has no SEALS) so the fixture never ERRORs before #71 lands.
+        seals = {**getattr(scenarios, "SEALS", {}), 2012: test}
+        mp.setattr(scenarios, "SEALS", seals, raising=False)
         mp.setattr(evaluate, "SEASON_LENGTH", 1)
         mp.setattr(evaluate, "FINAL_RESULTS", w.results, raising=False)
         yield w
@@ -1127,6 +1140,187 @@ def test_the_only_allow_test_true_in_evaluate_is_inside_final():
     outside = [n.lineno for n in allow_test_true(tree) if id(n) not in inside]
     assert outside == [], f"allow_test=True outside _final at evaluate.py lines {outside}"
     assert inside, "_final passes no allow_test=True, so it can't score the test splits"
+
+
+# --- #71: the 2013 seal, finalized once beside the spent 2012 seal ------------------------------
+
+SITES_2013 = {
+    "amsterdam_2013": "Amsterdam",
+    "london_2013": "London",
+    "abbotsford_2013": "Abbotsford",
+}
+REAL_2010 = CONTROL / "data" / "weather" / "Amsterdam" / "2010.csv"  # not test weather
+
+
+def _world_2013(world, final_run, tmp_path, monkeypatch) -> SimpleNamespace:
+    """A copied world (_copy_world) where the 2012 seal is spent (_spent_seal: a full --final's
+    files in FINAL_RESULTS/<2012 row>/, then ledger final-result on them), with:
+    - scenarios.WEATHER_DIR at tmp "synthetic_2013" (.synthetic13), where Amsterdam, London and
+      Abbotsford each have a 2013.csv that is a byte copy of the real Amsterdam/2010.csv;
+    - scenarios.SEALS[2013] (and TEST_2013) cut to start days 45 and 49 per 2013 split;
+    - a seal-2013 final-registered row (.freg13), issue 71, of seed 0 at "final" (.checkpoints13)
+      with baselines rb_default and rb_tuned.
+    Called from a test's body, so a missing seal= fails that test, not a fixture."""
+    w = _copy_world(world, tmp_path, monkeypatch)
+    _spent_seal(w, final_run, monkeypatch)
+    w.synthetic13 = tmp_path / "synthetic_2013"
+    for site in SITES_2013.values():
+        (w.synthetic13 / site).mkdir(parents=True)
+        shutil.copyfile(REAL_2010, w.synthetic13 / site / "2013.csv")
+    monkeypatch.setattr(scenarios, "WEATHER_DIR", w.synthetic13)
+    test_2013 = {
+        split: [{"location": site, "growth_year": 2013, "start_day": d} for d in DAYS]
+        for split, site in SITES_2013.items()
+    }
+    monkeypatch.setattr(scenarios, "TEST_2013", test_2013, raising=False)
+    monkeypatch.setitem(scenarios.SEALS, 2013, test_2013)
+    w.checkpoints13 = {w.run_ids[0]: "final"}
+    w.freg13 = ledger.final_register(
+        issue=71,
+        checkpoints=w.checkpoints13,
+        baselines=["rb_default", "rb_tuned"],
+        approved_by="Aarmen",
+        seal=2013,
+        path=w.ledger,
+    )["row_id"]
+    return w
+
+
+def _the_spent_2012_row(w):
+    """--final on the 2012 row, a 2013 row now newer: 2012's seal is spent, and that is the
+    refusal (not the newer row)."""
+    return ["--final", w.freg_id], "seal is spent", SystemExit
+
+
+def _a_stray_dir_in_final_results(w):
+    """FINAL_RESULTS holds the spent 2012 row's dir and one that no final-registered row names."""
+    stray = w.results / "final-registered-0badc0de"
+    stray.mkdir()
+    (stray / "stamp.json").write_text("{}\n")
+    return ["--final", w.freg13], f"{w.results} is not empty", SystemExit
+
+
+def _an_interrupted_2013_final(w):
+    """FINAL_RESULTS holds the 2013 row's own dir with only a stamp.json, as an interrupted 2013
+    --final leaves it: the 2013 seal isn't spent, so FINAL_RESULTS may not hold its dir."""
+    (w.results / w.freg13).mkdir()
+    (w.results / w.freg13 / "stamp.json").write_text("{}\n")
+    return ["--final", w.freg13], f"{w.results} is not empty", SystemExit
+
+
+def _a_missing_2013_weather_file(w):
+    """london_2013's weather file is gone; scenarios.require_weather names it."""
+    missing = w.synthetic13 / "London" / "2013.csv"
+    missing.unlink()
+    return ["--final", w.freg13], str(missing), (SystemExit, FileNotFoundError)
+
+
+SEAL_2013_CASES = [
+    pytest.param(_the_spent_2012_row, id="the-spent-2012-row"),
+    pytest.param(_a_stray_dir_in_final_results, id="a-stray-dir-in-final-results"),
+    pytest.param(_an_interrupted_2013_final, id="an-interrupted-2013-final"),
+    pytest.param(_a_missing_2013_weather_file, id="a-missing-2013-weather-file"),
+]
+
+
+@pytest.mark.parametrize("setup", SEAL_2013_CASES)
+def test_the_2013_world_refuses_what_could_break_a_seal_before_any_env(
+    setup, world, final_run, tmp_path, monkeypatch, capsys
+):
+    """Done when (#71): with 2012 spent and a seal-2013 row registered, each case is refused before
+    any env is built (_no_env_built), naming its cause, with FINAL_RESULTS and the ledger as they
+    were:
+    - --final on the 2012 row: "seal is spent" (2012 stays spent);
+    - a dir in FINAL_RESULTS that no spent seal's row names, or the unspent 2013 row's own (an
+      interrupted 2013 --final): "<FINAL_RESULTS> is not empty". FINAL_RESULTS may hold only spent
+      seals' dirs, so the 2012 row's dir alone doesn't stop the 2013 final (the next test);
+    - a missing 2013 weather file: the refusal names its path, before anything is written.
+    A refusal is parser.error's SystemExit with code 2 (the missing file may also be
+    require_weather's FileNotFoundError)."""
+    w = _world_2013(world, final_run, tmp_path, monkeypatch)
+    argv, named, raised = setup(w)
+    results, ledger_bytes = _tree(w.results), w.ledger.read_bytes()
+    _no_env_built(monkeypatch)
+    capsys.readouterr()
+
+    with pytest.raises(raised) as excinfo:
+        _main(argv, w.ledger)
+
+    if isinstance(excinfo.value, SystemExit):
+        assert excinfo.value.code == 2, "a refusal is parser.error's exit 2"
+    text = _refusal(excinfo, capsys)
+    assert named in text, text
+    assert _tree(w.results) == results
+    assert w.ledger.read_bytes() == ledger_bytes
+
+
+def test_a_2013_final_plays_only_its_seal_and_records_once(
+    world, final_run, tmp_path, monkeypatch, capsys
+):
+    """Done when (#71): with 2012 spent and its files in FINAL_RESULTS, --final <the 2013 row>
+    returns 0 and, through pass-through spies on evaluate.run_policy, evaluate.run_rb and
+    envs.run_baseline:
+    - plays exactly the 2013 seal's 6 scenarios (3 sites x days 45 and 49), each 3 times: seed 0's
+      run dir at "final" (run_policy), rb_default and rb_tuned (run_rb); no run_baseline (no
+      zero_controls or random registered); every call a 1-day season with allow_test=True; no 2012
+      scenario;
+    - reads only the three synthetic 2013 files and no 2012 file;
+    - writes FINAL_RESULTS/<2013 row>/ beside the 2012 row's dir, which is byte for byte as it was;
+    - seasons.parquet has (1 run + 2 baselines) x 3 splits x 2 scenarios = 18 rows, split by split
+      in the seal's order, all growth year 2013;
+    - per_split.json is keyed by exactly the 2013 splits, and `ledger final-result` records it
+      (the ledger checks its shape), spending 2013.
+    Then a second --final <the 2013 row> is refused before any env, "seal is spent", with
+    FINAL_RESULTS and the ledger as they were."""
+    w = _world_2013(world, final_run, tmp_path, monkeypatch)
+    spent_2012 = _tree(w.results / w.freg_id)
+    n_2012, n_2013 = len(world.reads), len(world.reads_2013)
+    calls = {}
+    for module, name in [(evaluate, "run_policy"), (evaluate, "run_rb"), (envs, "run_baseline")]:
+        calls[name] = []
+        monkeypatch.setattr(module, name, _spy(getattr(module, name), calls[name]))
+
+    assert _main(["--final", w.freg13], w.ledger) == 0
+
+    seal = [(site, 2013, day) for site in SITES_2013.values() for day in DAYS]
+    every = [*calls["run_policy"], *calls["run_rb"], *calls["run_baseline"]]
+    played = sorted(
+        (c["scenario"]["location"], c["scenario"]["growth_year"], c["scenario"]["start_day"])
+        for c in every
+    )
+    assert played == sorted(seal * 3)  # seed 0, rb_default and rb_tuned on each
+    assert calls["run_baseline"] == []
+    assert {(Path(c["run_dir"]), c["checkpoint"]) for c in calls["run_policy"]} == {
+        (w.run_dirs[0], "final")
+    }
+    assert {(c["season_length"], c["allow_test"]) for c in every} == {(1, True)}
+    assert world.reads[n_2012:] == [], "the 2013 final read 2012 weather"
+    assert set(world.reads_2013[n_2013:]) == {
+        (w.synthetic13 / site / "2013.csv").resolve() for site in SITES_2013.values()
+    }
+    assert _listing(w.results) == sorted([w.freg_id, w.freg13])
+    assert _tree(w.results / w.freg_id) == spent_2012
+    out = w.results / w.freg13
+    df = pd.read_parquet(out / "seasons.parquet")
+    assert len(df) == 18  # (1 run + 2 baselines) x 3 splits x 2 scenarios
+    assert list(dict.fromkeys(df["split"])) == list(SITES_2013)
+    assert set(df["growth_year"]) == {2013}
+    numbers = out / "per_split.json"
+    assert set(json.loads(numbers.read_text())["per_split"]) == set(SITES_2013)
+    argv = ["final-result", "--final-registered", w.freg13, "--numbers", str(numbers)]
+    assert ledger.main(argv, path=w.ledger) == 0
+    assert ledger.seal_spent(ledger.rows(path=w.ledger), 2013) is True
+
+    results, ledger_bytes = _tree(w.results), w.ledger.read_bytes()
+    _no_env_built(monkeypatch)
+    capsys.readouterr()
+    with pytest.raises(SystemExit) as excinfo:
+        _main(["--final", w.freg13], w.ledger)
+    assert excinfo.value.code == 2
+    text = _refusal(excinfo, capsys)
+    assert "seal is spent" in text, text
+    assert _tree(w.results) == results
+    assert w.ledger.read_bytes() == ledger_bytes
 
 
 def test_the_full_final_touches_nothing_real_and_writes_no_ledger_row(world, final_run):

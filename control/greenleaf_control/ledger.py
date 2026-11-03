@@ -82,6 +82,9 @@ RESULT_KEYS = (
 # The final's test splits and the baselines it may score, written out like RESULT_KEYS; tests pin
 # them to tuple(scenarios.TEST) and envs.BASELINES.
 TEST_SPLITS = ("amsterdam_2012", "london_2012", "abbotsford_2012")
+# Each test year is its own seal, {seal: its test splits}, written out the same way; a test pins it
+# to scenarios.SEALS. A final-registered row's optional int seal names one (absent: 2012).
+SEALS = {2012: TEST_SPLITS, 2013: ("amsterdam_2013", "london_2013", "abbotsford_2013")}
 FINAL_BASELINES = ("zero_controls", "random", "rb_default", "rb_tuned")
 FINAL_ARM_KEYS = {
     "iqm",
@@ -104,7 +107,9 @@ SUMMARY = {
         f"{r['registered']} iqm " + " ".join(f"{n}={v['iqm']}" for n, v in r["per_arm"].items())
     ),
     "decision": lambda r: f"{r['result']} {r['decision']}: {r['note']}",
-    "final-registered": lambda r: f"approved_by {r['approved_by']} at {r['approved_at']}",
+    "final-registered": lambda r: (
+        f"seal {seal_of(r)} approved_by {r['approved_by']} at {r['approved_at']}"
+    ),
     "final-result": lambda r: f"{r['final-registered']} splits {','.join(r['per_split'])}",
 }
 
@@ -148,6 +153,19 @@ def _run_ends(existing: list[dict], registered: str) -> list[tuple[dict, dict]]:
     return [(runs[r["run"]], r) for r in existing if r["kind"] == "run-end" and r["run"] in runs]
 
 
+def seal_of(final_registered: dict) -> int:
+    """A final-registered row's seal: its seal field, or 2012 for a row without one."""
+    return final_registered.get("seal", 2012)
+
+
+def seal_spent(rows: list[dict], seal: int) -> bool:
+    """Whether rows hold a final-result under a final-registered row of seal."""
+    finals = {r["row_id"]: r for r in rows if r["kind"] == "final-registered"}
+    return any(
+        r["kind"] == "final-result" and seal_of(finals[r["final-registered"]]) == seal for r in rows
+    )
+
+
 def final_arms(final_registered: dict, rows: list[dict]) -> dict[str, dict[str, str]]:
     """A final's learning arms, {arm: {run row_id: checkpoint}}, each named by its run rows' arm.
 
@@ -183,7 +201,8 @@ def _check(row: dict, path: Path) -> str:
     kind = row.get("kind")
     if kind not in KIND_FIELDS:
         raise ValueError(f"unknown kind {kind!r}; expected one of {list(KIND_FIELDS)}")
-    _need_keys(f"a {kind} row", row, BASE_FIELDS | KIND_FIELDS[kind])
+    optional = {"seal"} & set(row) if kind == "final-registered" else set()
+    _need_keys(f"a {kind} row", row, BASE_FIELDS | KIND_FIELDS[kind] | optional)
     if row["schema_version"] != SCHEMA_VERSION:
         raise ValueError(f"schema_version must be {SCHEMA_VERSION}, got {row['schema_version']!r}")
     if type(row["issue"]) is not int:
@@ -252,8 +271,11 @@ def _check(row: dict, path: Path) -> str:
         approved_by = row["approved_by"]
         if not isinstance(approved_by, str) or not approved_by.strip():
             raise ValueError("final-registered needs approved_by: the owner who approved the seal")
-        if any(r["kind"] == "final-result" for r in existing):
-            raise ValueError("a final-result already exists: the seal is spent")
+        seal = seal_of(row)
+        if type(seal) is not int or seal not in SEALS:
+            raise ValueError(f"seal must be an int, one of {list(SEALS)}; got {seal!r}")
+        if seal_spent(existing, seal):
+            raise ValueError(f"a final-result of the {seal} seal already exists: the seal is spent")
         checkpoints = row["checkpoints"]
         if not isinstance(checkpoints, dict) or not checkpoints:
             raise ValueError(
@@ -282,9 +304,10 @@ def _check(row: dict, path: Path) -> str:
                 f"learning arm(s) {clash} share a baseline's name; per_split can't tell them apart"
             )
     elif kind == "final-result":
-        if any(r["kind"] == "final-result" for r in existing):
-            raise ValueError("a final-result already exists: the seal is spent")
-        _need_keys("per_split", row["per_split"], set(TEST_SPLITS))
+        seal = seal_of(parent)
+        if seal_spent(existing, seal):
+            raise ValueError(f"a final-result of the {seal} seal already exists: the seal is spent")
+        _need_keys("per_split", row["per_split"], set(SEALS[seal]))
         registered = final_arms(parent, existing)
         names = set(registered) | set(parent["baselines"])
         for split, arms in row["per_split"].items():
@@ -417,9 +440,16 @@ def decide(*, result: str, decision: str, note: str, path: Path = LEDGER) -> dic
 
 
 def final_register(
-    *, issue: int, checkpoints: dict, baselines: list[str], approved_by: str, path: Path = LEDGER
+    *,
+    issue: int,
+    checkpoints: dict,
+    baselines: list[str],
+    approved_by: str,
+    seal: int | None = None,
+    path: Path = LEDGER,
 ) -> dict:
-    """Register the one-time final evaluation; it needs the owner's name."""
+    """Register a seal's one-time final evaluation; it needs the owner's name. The row carries seal
+    only when it is given (absent: the 2012 seal)."""
     row = _new_row(
         "final-registered",
         issue,
@@ -427,6 +457,7 @@ def final_register(
         baselines=baselines,
         approved_by=approved_by,
         approved_at=datetime.now(UTC).isoformat(),
+        **({} if seal is None else {"seal": seal}),
     )
     append(row, path)
     return row
@@ -489,6 +520,7 @@ def main(argv: list[str] | None = None, path: Path = LEDGER) -> int:
     p.add_argument("--checkpoints", type=json.loads, required=True)
     p.add_argument("--baselines", nargs="+", required=True)
     p.add_argument("--approved-by")  # not required, so the ledger's own refusal fires
+    p.add_argument("--seal", type=int, help="the test year this final spends (default 2012)")
 
     p = sub.add_parser("final-result", help="record the final evaluation's numbers")
     p.add_argument("--final-registered", required=True)

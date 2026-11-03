@@ -98,11 +98,9 @@ def _cells(row_id: str, ledger_path: Path) -> tuple[dict, list[tuple[dict, int, 
     if not found:
         raise ValueError(f"--registered {row_id}: no registered row with that id in {ledger_path}")
     [row] = found
-    sealed = [s for s in row["scenarios"] if s in scenarios.TEST]
+    sealed = [s for s in row["scenarios"] if any(s in t for t in scenarios.SEALS.values())]
     if sealed:
-        raise ValueError(
-            f"{row_id}: scenarios {sealed} are the sealed 2012 TEST weather (PROTOCOL §8)"
-        )
+        raise ValueError(f"{row_id}: scenarios {sealed} are sealed TEST weather (PROTOCOL §8)")
     for arm in row["arms"]:
         if arm["method"] not in envs.METHODS:
             raise ValueError(

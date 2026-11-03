@@ -29,6 +29,9 @@ before any env or file. The allow_test tests (issue #41) score TEST scenarios on
 weather dir in tmp_path whose 2012.csv files are byte copies of the real Amsterdam/2010.csv, under
 a tripwire that fails on any 2012.csv outside tmp_path. Nothing here may write the real ledger or
 control/runs/; the last test checks both are as they were when this module was collected.
+
+Issue #71 seals the 2013 weather too (amsterdam_2013, london_2013, abbotsford_2013): --split refuses
+those splits like the 2012 ones, and the no_2012_reads tripwire fails on any 2013.csv as well.
 """
 
 import inspect
@@ -97,6 +100,7 @@ ROW_KEYS = {
     "price_regime",
 }
 TEST_SPLITS = ("amsterdam_2012", "london_2012", "abbotsford_2012")
+TEST_2013_SPLITS = ("amsterdam_2013", "london_2013", "abbotsford_2013")  # issue #71
 CLI_FLAGS = ("--controller", "--split", "--out", "--final", "--price-regime")
 # Issue #67, PROTOCOL v3's price regimes, written out so the grading checks below don't read
 # metrics' own table: sim is upstream's registered prices (every result before v3); agc2020 is
@@ -129,14 +133,15 @@ def residual_run(tmp_path_factory) -> Path:
 
 @pytest.fixture
 def no_2012_reads(monkeypatch) -> None:
-    """Fail loudly if the test reads any 2012 weather file. pandas.read_csv is the only file read
-    upstream's weather loader makes (its own year, and the next year's file past the year's end);
-    the check runs before the real read, and every other file goes through the real one."""
+    """Fail loudly if the test reads any 2012 or 2013 (#71) weather file. pandas.read_csv is the
+    only file read upstream's weather loader makes (its own year, and the next year's file past the
+    year's end); the check runs before the real read, and every other file goes through the real
+    one."""
     real_read_csv = pd.read_csv
 
     def read_csv(filepath_or_buffer, *args, **kwargs):
-        if Path(str(filepath_or_buffer)).name.endswith("2012.csv"):
-            raise AssertionError(f"the sealed 2012 test weather was read: {filepath_or_buffer}")
+        if Path(str(filepath_or_buffer)).name.endswith(("2012.csv", "2013.csv")):
+            raise AssertionError(f"the sealed test weather was read: {filepath_or_buffer}")
         return real_read_csv(filepath_or_buffer, *args, **kwargs)
 
     monkeypatch.setattr(pd, "read_csv", read_csv)
@@ -566,10 +571,11 @@ def test_frame_out_of_bounds_steps_x_a_quarter_hour_are_the_violation_hours(kind
 # --- The seal (Done when; PROTOCOL §8) ---------------------------------------------------------
 
 
-@pytest.mark.parametrize("split", TEST_SPLITS)
+@pytest.mark.parametrize("split", [*TEST_SPLITS, *TEST_2013_SPLITS])
 @pytest.mark.usefixtures("no_2012_reads")
 def test_cli_refuses_a_test_split_without_final(split, tmp_path, monkeypatch, capsys):
-    """Done when: evaluate --split <a test split> without --final exits non-zero, naming the seal.
+    """Done when: evaluate --split <a test split, 2012's or (#71) 2013's> without --final exits
+    non-zero, naming the seal.
 
     --split takes every split in scenarios.SPLITS, so argparse doesn't refuse it as an unknown
     choice; evaluate refuses it, with SystemExit (code not 0) whose text says "sealed (PROTOCOL

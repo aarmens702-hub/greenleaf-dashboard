@@ -3,6 +3,10 @@
 Each test builds a temp git repo under tmp_path, writes its ledger through the real ledger API
 (path= under the temp repo), commits, and runs the script on it as a subprocess with --repo.
 No test runs it on this repo (CI clones at depth 1), and none writes the real ledger.
+
+Issue #71 counts final-results per seal: a final-registered row's seal (absent means 2012) is the
+seal its final-result spends. An unknown seal, a per_split whose keys aren't that seal's splits,
+or a second final-result for one seal is a violation; one final-result per seal is clean.
 """
 
 import json
@@ -35,7 +39,9 @@ REGISTRATION = {
 }
 DIAGNOSTICS = {"min_approx_kl": 0.002, "final_entropy": -1.5, "final_explained_variance": 0.8}
 SPLITS = ("amsterdam_2012", "london_2012", "abbotsford_2012")  # scenarios.TEST's keys
+SPLITS_2013 = ("amsterdam_2013", "london_2013", "abbotsford_2013")  # scenarios.TEST_2013's (#71)
 SECOND_FINAL = "final-result-0badc0de"
+FOREIGN_SEAL = "final-registered-0badc0de"  # #71: a hand-written final-registered row
 
 
 def _git(repo: Path, *args: str) -> str:
@@ -133,9 +139,10 @@ def _result(path: Path, registered: dict, run: dict) -> dict:
     )
 
 
-def _per_split(scored: dict) -> dict:
-    """A final-result's per_split: each test split holds arm a, scored at scored ({run row_id:
-    checkpoint}), and the two baselines, scored at none."""
+def _per_split(scored: dict, splits=SPLITS) -> dict:
+    """A final-result's per_split: each test split (the 2012 seal's unless splits says otherwise)
+    holds arm a, scored at scored ({run row_id: checkpoint}), and the two baselines, scored at
+    none."""
 
     def entry(arm: str, at: dict) -> dict:
         return {
@@ -149,31 +156,54 @@ def _per_split(scored: dict) -> dict:
         }
 
     arms = {"a": scored, "rb_default": {}, "rb_tuned": {}}
-    return {split: {arm: entry(arm, at) for arm, at in arms.items()} for split in SPLITS}
+    return {split: {arm: entry(arm, at) for arm, at in arms.items()} for split in splits}
 
 
-def _final_register(path: Path) -> tuple[dict, dict]:
-    """Register the final evaluation at the last result's selected checkpoints; return
-    (final-registered, those checkpoints)."""
+def _final_register(path: Path, **seal) -> tuple[dict, dict]:
+    """Register the final evaluation at the last result's selected checkpoints (with seal=, #71,
+    when given); return (final-registered, those checkpoints)."""
     checkpoints = ledger.rows(kind="result", path=path)[-1]["selected"]
     freg = ledger.final_register(
         issue=9,
         checkpoints=checkpoints,
         baselines=["rb_default", "rb_tuned"],
         approved_by="Aarmen",
+        **seal,
         path=path,
     )
     return freg, checkpoints
 
 
-def _final(path: Path) -> tuple[dict, dict]:
-    """Register the final evaluation at the last result's selected checkpoints and spend the seal
-    once; return (final-registered, final-result)."""
-    freg, checkpoints = _final_register(path)
+def _final(path: Path, **seal) -> tuple[dict, dict]:
+    """Register the final evaluation at the last result's selected checkpoints and spend its seal
+    (2012's, or seal=2013's with the 2013 splits) once; return (final-registered, final-result)."""
+    freg, checkpoints = _final_register(path, **seal)
+    splits = SPLITS_2013 if seal.get("seal") == 2013 else SPLITS
     fres = ledger.final_result(
-        final_registered=freg["row_id"], per_split=_per_split(checkpoints), path=path
+        final_registered=freg["row_id"], per_split=_per_split(checkpoints, splits), path=path
     )
     return freg, fres
+
+
+def _hand_final_result(freg: dict, per_split: dict) -> dict:
+    """A final-result row (row_id final-result-0badc0de) written by hand under freg, as a hand edit
+    would be: freg's issue and fingerprints (so they match), and per_split as given, which the
+    ledger may refuse."""
+    return {
+        "schema_version": 1,
+        "row_id": SECOND_FINAL,
+        "kind": "final-result",
+        "at": "2026-11-03T00:00:00+00:00",
+        "issue": freg["issue"],
+        "fingerprints": freg["fingerprints"],
+        "final-registered": freg["row_id"],
+        "per_split": per_split,
+    }
+
+
+def _append_by_hand(path: Path, *rows: dict) -> None:
+    with path.open("a") as f:
+        f.write("".join(_line(row) for row in rows))
 
 
 def _clean_history(repo: Path, path: Path) -> list[str]:
@@ -335,6 +365,101 @@ def test_two_final_results_exit_1_naming_the_second(tmp_path, monkeypatch):
 
     _violations(out)
     assert SECOND_FINAL in out.stdout
+
+
+# --- Issue #71: one final-result per seal ---------------------------------------------------------
+
+
+def test_a_2013_final_after_the_spent_2012_seal_is_clean(tmp_path, monkeypatch):
+    """Each test year is its own seal: after a clean experiment, the 2012 final (no seal) is
+    registered and spent and committed, then a seal-2013 final of the same checkpoints is
+    registered and spent with the 2013 splits and committed. Two final-results, one per seal, each
+    naming an earlier final-registered row with its fingerprints: exit 0, one summary line."""
+    repo = _make_repo(tmp_path, monkeypatch)
+    path = repo / LEDGER
+    _clean_history(repo, path)
+    _final(path)
+    _commit(repo, "the 2012 final")
+    _final(path, seal=2013)
+    _commit(repo, "the 2013 final")
+
+    _assert_clean(_check_locks(repo))
+
+
+def test_a_second_2013_final_result_exits_1_naming_it(tmp_path, monkeypatch):
+    """The 2013 seal is spent once: with 2012 and 2013 each spent once (clean, above), a copy of
+    the 2013 final-result (row_id final-result-0badc0de, under the same 2013 row) appended by hand
+    is the one violation, named by its row_id. The 2013 final-result itself is not a violation, so
+    a check counting final-results across seals, which names it too, fails here."""
+    repo = _make_repo(tmp_path, monkeypatch)
+    path = repo / LEDGER
+    _clean_history(repo, path)
+    _final(path)
+    _commit(repo, "the 2012 final")
+    _, fres13 = _final(path, seal=2013)
+    _commit(repo, "the 2013 final")
+    _append_by_hand(path, {**fres13, "row_id": SECOND_FINAL})
+    _commit(repo, "a second 2013 final-result, by hand")
+
+    out = _check_locks(repo)
+
+    lines = _violations(out)
+    assert len(lines) == 1, out.stdout
+    assert SECOND_FINAL in lines[0]
+    assert fres13["row_id"] not in out.stdout
+
+
+@pytest.mark.parametrize("seal", [2014, "2013"], ids=["2014", "the string 2013"])
+def test_an_unknown_seal_exits_1_naming_it(tmp_path, monkeypatch, seal):
+    """A seal is 2012 or 2013. After a clean experiment and a 2012 final-registered row (not
+    spent), a final-registered row with seal 2014 or the string "2013" (the 2012 row's copy,
+    row_id final-registered-0badc0de) and a final-result under it are appended by hand. That is
+    the one violation: one line naming the hand-written final-registered or final-result row and
+    the unknown seal. (Its per_split can't match an unknown seal's splits; that is the same fault,
+    not a second line.)"""
+    repo = _make_repo(tmp_path, monkeypatch)
+    path = repo / LEDGER
+    _clean_history(repo, path)
+    freg, checkpoints = _final_register(path)
+    _commit(repo, "the 2012 final-registered")
+    foreign = {**freg, "row_id": FOREIGN_SEAL, "seal": seal}
+    _append_by_hand(path, foreign, _hand_final_result(foreign, _per_split(checkpoints)))
+    _commit(repo, f"a seal {seal!r} final, by hand")
+
+    out = _check_locks(repo)
+
+    lines = _violations(out)
+    assert len(lines) == 1, out.stdout
+    assert FOREIGN_SEAL in lines[0] or SECOND_FINAL in lines[0], out.stdout
+    assert str(seal) in lines[0], out.stdout
+
+
+@pytest.mark.parametrize(
+    ("seal", "splits"),
+    [
+        pytest.param(2013, SPLITS, id="the 2012 splits under a 2013 row"),
+        pytest.param(2012, SPLITS_2013, id="the 2013 splits under a 2012 row"),
+    ],
+)
+def test_a_per_split_of_another_seals_splits_exits_1_naming_it(tmp_path, monkeypatch, seal, splits):
+    """A final-result's per_split holds exactly its seal's splits. After a clean experiment, a
+    final-registered row of seal 2013 (or none, so 2012) is registered through the ledger, then a
+    final-result under it keyed by the other seal's splits is appended by hand (the ledger refuses
+    it). No seal is spent twice and its fingerprints match, so it is the one violation, named by
+    its row_id."""
+    repo = _make_repo(tmp_path, monkeypatch)
+    path = repo / LEDGER
+    _clean_history(repo, path)
+    freg, checkpoints = _final_register(path, **({"seal": 2013} if seal == 2013 else {}))
+    _commit(repo, "the final-registered row")
+    _append_by_hand(path, _hand_final_result(freg, _per_split(checkpoints, splits)))
+    _commit(repo, "a final-result of another seal's splits, by hand")
+
+    out = _check_locks(repo)
+
+    lines = _violations(out)
+    assert len(lines) == 1, out.stdout
+    assert SECOND_FINAL in lines[0]
 
 
 @pytest.mark.parametrize(

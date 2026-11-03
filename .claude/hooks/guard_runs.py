@@ -1,6 +1,6 @@
 """PreToolUse hook that keeps every specialist off the ledger, results, runs, Modal, real training
-and the sealed 2012 test weather. Each agent's .claude/agents/*.md frontmatter runs it on every tool
-(matcher "*"), in its own mode:
+and the sealed 2012 and 2013 test weather (each test year is its own seal). Each agent's
+.claude/agents/*.md frontmatter runs it on every tool (matcher "*"), in its own mode:
 
     python3 guard_runs.py builder|test-writer|scout|reviewer
 
@@ -12,13 +12,14 @@ The four modes get the same rules; the mode only names the agent in the message.
   rm, cp, mv, tee, truncate or sed -i;
 - Bash that contains "modal", anywhere, in any case;
 - Bash that runs greenleaf_control.train or tune_rb without --smoke, run_grid without --dry,
-  evaluate on amsterdam_2012, london_2012 or abbotsford_2012 or with --final (or a prefix of it),
-  or a ledger subcommand other than show;
-- Read, Grep and Glob of any weather/<site>/2012.csv, gl_gym's copy in site-packages included,
-  always; and of a checkout's control/results/final/ until the ledger beside it, that checkout's
-  control/ledger/ledger.jsonl, holds a final-result row (the seal is spent). The ledger is opened
-  at the real path, not the case-folded one. No ledger, one it can't read, or a line in it that
-  isn't a JSON object keeps it sealed.
+  evaluate on a 2012 or 2013 test split (amsterdam_, london_ or abbotsford_ 2012 or 2013) or with
+  --final (or a prefix of it), or a ledger subcommand other than show;
+- Read, Grep and Glob of any weather/<site>/2012.csv or 2013.csv, gl_gym's path in site-packages
+  included, always; a Grep whose glob's basename is 2012.csv or 2013.csv, from any path (ripgrep
+  matches that glob at any depth); and of a checkout's control/results/final/ until the ledger
+  beside it, that checkout's control/ledger/ledger.jsonl, holds a final-result row (the seal is
+  spent). The ledger is opened at the real path, not the case-folded one. No ledger, one it can't
+  read, or a line in it that isn't a JSON object keeps it sealed.
 
 Paths are joined to the call's cwd (a Bash `cd DIR` moves it for the commands after it), followed
 through links (os.path.realpath), case-folded and matched anywhere in the result, so the main
@@ -32,8 +33,8 @@ The hole, stated plainly: hooks see tool calls, not what code runs. A script, a 
 `python -c` that an agent writes and runs can read any file, write the ledger, train or reach Modal.
 The Bash rules read words, so variables, $(...), heredocs, shells fed on stdin, and writers not in
 the list (dd, ln, rsync, perl -i, git checkout, find -delete) pass, as do `cat` of a sealed file and
-a Grep from above a sealed folder. The code-level refusals in train, evaluate and ledger are the
-real lock; the reviewer checks the diff.
+a Grep from above a sealed folder whose glob doesn't name the year (none, *.csv, 201[23].csv). The
+code-level refusals in train, evaluate and ledger are the real lock; the reviewer checks the diff.
 """
 
 import json
@@ -51,7 +52,9 @@ WRITE_TOOLS = ("Edit", "Write", "MultiEdit", "NotebookEdit")
 WRITE_PROTECTED = re.compile(
     r"(^|/)control/(ledger|results|runs)(/|$)|(^|/)control/configs/rule_based_tuned\.yml$"
 )
-SEALED_WEATHER = re.compile(r"(^|/)weather/[^/]+/2012\.csv$")
+SEALED_WEATHER = re.compile(r"(^|/)weather/[^/]+/(2012|2013)\.csv$")
+# A Grep glob's case-folded basename: ripgrep matches it at any depth below the Grep's path.
+SEALED_GLOB = re.compile(r"(2012|2013)\.csv")
 # Also searched in the real path, in its own case, to find the checkout whose ledger opens it.
 RESULTS_FINAL = re.compile(r"(^|/)control/results/final(/|$)", re.IGNORECASE)
 LEDGER = "control/ledger/ledger.jsonl"
@@ -61,15 +64,22 @@ WRITERS = ("rm", "cp", "mv", "tee", "truncate")
 SED_IN_PLACE = re.compile(r"-[^-]*[iI]|--i")  # -i, -i.bak, -Ei, BSD's -I, --in-place, --in
 CLI_MODULE = re.compile(r"greenleaf_control\.(\w+)")
 CLI_SCRIPT = re.compile(r"(?:^|/)greenleaf_control/(\w+)\.py$")
-TEST_SPLITS = ("amsterdam_2012", "london_2012", "abbotsford_2012")
+TEST_SPLITS = (
+    "amsterdam_2012",
+    "london_2012",
+    "abbotsford_2012",
+    "amsterdam_2013",
+    "london_2013",
+    "abbotsford_2013",
+)
 
 CLI_ONLY = (
     "control/ledger/, control/results/, control/runs/ and control/configs/rule_based_tuned.yml "
     "are written by the CLIs only; reading them is fine"
 )
 SEALED_UNTIL_FINAL = (
-    "control/results/final/ opens once this checkout's ledger has a final-result row; the 2012 "
-    "test weather stays sealed"
+    "control/results/final/ opens once this checkout's ledger has a final-result row; the 2012 and "
+    "2013 test weather stays sealed"
 )
 EXPERIMENT_ONLY = "real runs are experiments the orchestrator runs through /experiment"
 
@@ -98,7 +108,7 @@ def seal_spent(checkout):
 
 
 def sealed(path, cwd):
-    """Whether a Read, Grep or Glob of path is blocked: any 2012 weather, or a checkout's
+    """Whether a Read, Grep or Glob of path is blocked: any 2012 or 2013 weather, or a checkout's
     control/results/final/ until seal_spent says that checkout's seal is spent."""
     real = os.path.realpath(os.path.join(cwd, os.path.expanduser(path)))
     if SEALED_WEATHER.search(real.casefold()):
@@ -171,7 +181,7 @@ def cli_run(words):
 
 
 def sealed_evaluation(word):
-    """A 2012 test split, or --final or a prefix argparse expands to it (--fi, --fin=row)."""
+    """A 2012 or 2013 test split, or --final or a prefix argparse expands to (--fi, --fin=row)."""
     option = word.split("=", 1)[0]
     return any(s in word for s in TEST_SPLITS) or (len(option) > 2 and "--final".startswith(option))
 
@@ -184,8 +194,9 @@ def cli_reason(words):
         return f"greenleaf_control.run_grid without --dry — {EXPERIMENT_ONLY}; add --issue N --dry"
     if module == "evaluate" and any(sealed_evaluation(w) for w in rest):
         return (
-            "greenleaf_control.evaluate on a 2012 test split or with --final — the test weather "
-            "stays sealed until the final issue; evaluate on train_eval, validation or paper"
+            "greenleaf_control.evaluate on a 2012 or 2013 test split or with --final — the test "
+            "weather stays sealed until the final issue; evaluate on train_eval, validation or "
+            "paper"
         )
     if module == "ledger" and rest[:1] != ["show"]:
         subcommand = rest[0] if rest else "without a subcommand"
@@ -236,7 +247,8 @@ def tool_reason(tool, args, cwd):
         base = args.get("path") or ""
         extra = (args.get("glob") if tool == "Grep" else args.get("pattern")) or ""
         searched = [base] + ([os.path.join(base, extra)] if extra else [])
-        if any(sealed(p, cwd) for p in searched):
+        test_year = tool == "Grep" and SEALED_GLOB.fullmatch(os.path.basename(extra).casefold())
+        if test_year or any(sealed(p, cwd) for p in searched):
             return f"{tool} of {os.path.join(base or cwd, extra)} — {SEALED_UNTIL_FINAL}"
     elif tool == "Bash":
         return bash_reason(args.get("command") or "", cwd)

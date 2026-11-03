@@ -29,6 +29,10 @@ spent, so reading the results can't steer anything. No ledger, an unreadable one
 isn't a JSON object keeps it sealed. Writes there and the 2012 weather stay blocked for good. These
 tests use fake checkouts under tmp_path, so the real ledger's seal decides none of them: the day F1's
 final-result lands on dev, a test that read the real repo's results/final would turn red.
+
+Issue #71 adds the second seal, the 2013 test weather: guard_runs blocks Read, Grep and Glob of any
+weather/<dir>/2013.csv exactly as of 2012.csv, and evaluate on a 2013 split, in every mode. A Grep
+of a weather dir whose glob's basename is 2012.csv or 2013.csv is blocked too.
 """
 
 import ast
@@ -54,8 +58,10 @@ GUARD_RUNS_COMMAND = 'python3 "$CLAUDE_PROJECT_DIR/.claude/hooks/guard_runs.py" 
 GUARD_TESTS_COMMAND = 'python3 "$CLAUDE_PROJECT_DIR/.claude/hooks/guard_tests.py" {}'
 GC = "uv run python -m greenleaf_control"
 TEST_SPLITS = ["amsterdam_2012", "london_2012", "abbotsford_2012"]
+TEST_2013_SPLITS = ["amsterdam_2013", "london_2013", "abbotsford_2013"]  # issue #71
 # gl_gym ships its own copy of the test weather inside the venv.
-GL_GYM_2012 = CONTROL / ".venv/lib/python3.12/site-packages/gl_gym/data/weather/Amsterdam/2012.csv"
+GL_GYM_WEATHER = CONTROL / ".venv/lib/python3.12/site-packages/gl_gym/data/weather"
+GL_GYM_2012 = GL_GYM_WEATHER / "Amsterdam/2012.csv"
 WRITE_TOOLS = ["Write", "Edit", "MultiEdit", "NotebookEdit"]
 
 
@@ -176,7 +182,7 @@ BLOCKED_BASH = [
             CONTROL,
             id=f"evaluate {split}",
         )
-        for split in TEST_SPLITS
+        for split in [*TEST_SPLITS, *TEST_2013_SPLITS]
     ],
     pytest.param(f"{GC}.evaluate --final x", CONTROL, id="evaluate --final"),
     # Every ledger subcommand but show writes a row.
@@ -201,6 +207,24 @@ SEALED_READS = [
     pytest.param(_file_call("Read", GL_GYM_2012), id="read gl_gym's 2012 weather"),
     pytest.param(
         _call("Glob", ROOT, pattern="control/data/weather/*/2012.csv"), id="glob 2012 weather"
+    ),
+    # Issue #71: the 2013 files are the second seal's test weather, sealed the same way.
+    *[
+        pytest.param(
+            _file_call("Read", CONTROL / f"data/weather/{site}/2013.csv"),
+            id=f"read {site} 2013 weather",
+        )
+        for site in ("Amsterdam", "London", "Abbotsford")
+    ],
+    pytest.param(
+        _file_call("Read", GL_GYM_WEATHER / "London/2013.csv"), id="read gl_gym's 2013 path"
+    ),
+    pytest.param(
+        _call("Glob", ROOT, pattern="control/data/weather/*/2013.csv"), id="glob 2013 weather"
+    ),
+    pytest.param(
+        _call("Grep", CONTROL, pattern="1", path="data/weather/London", glob="2013.csv"),
+        id="grep 2013 weather",
     ),
 ]
 
@@ -229,6 +253,11 @@ ALLOWED = [
     ),
     pytest.param(
         _file_call("Read", CONTROL / "data/weather/Amsterdam/2010.csv"), id="read 2010 weather"
+    ),
+    # #71: a weather dir globbed to a year that is no seal's passes.
+    pytest.param(
+        _call("Grep", ROOT, pattern="1", path="control/data/weather", glob="2011.csv"),
+        id="grep weather dir glob 2011.csv",
     ),
     pytest.param(_file_call("Edit", HOOKS / "guard_runs.py"), id="edit guard_runs.py"),
 ]
@@ -260,7 +289,8 @@ def test_guard_runs_blocks_edits_to_cli_owned_paths(tool, path, cwd, mode):
 @pytest.mark.parametrize(("command", "cwd"), BLOCKED_BASH)
 def test_guard_runs_blocks_bash_that_writes_results_or_runs_for_real(command, cwd, mode):
     """Bash can't write the CLI-owned paths, mention modal, train, grid or tune without --smoke or
-    --dry, evaluate on a 2012 split or --final, or run a ledger subcommand other than show.
+    --dry, evaluate on a 2012 or 2013 (#71) split or --final, or run a ledger subcommand other than
+    show.
     """
     _assert_blocked(_hook("guard_runs.py", _bash(command, cwd), mode))
 
@@ -268,9 +298,44 @@ def test_guard_runs_blocks_bash_that_writes_results_or_runs_for_real(command, cw
 @pytest.mark.parametrize("mode", MODES)
 @pytest.mark.parametrize("payload", SEALED_READS)
 def test_guard_runs_blocks_reads_of_the_test_weather(payload, mode):
-    """Read, Grep and Glob can't reach any weather/<dir>/2012.csv, gl_gym's copy in the venv
-    included. control/results/final/'s reads are tested on fake checkouts (#40, below).
+    """Read, Grep and Glob can't reach any weather/<dir>/2012.csv or (#71) 2013.csv, gl_gym's path
+    in the venv included. control/results/final/'s reads are tested on fake checkouts (#40, below).
     """
+    _assert_blocked(_hook("guard_runs.py", payload, mode))
+
+
+# Issue #71: a Grep of a weather dir itself, above the <site>/ folders, filtered by a glob whose
+# basename is a test year's file. Ours from the repo root and from control/, and gl_gym's in the venv.
+SEALED_GREP_GLOBS = [
+    pytest.param(
+        _call("Grep", ROOT, pattern="1", path="control/data/weather", glob=glob),
+        id=f"grep control/data/weather glob {glob}",
+    )
+    for glob in ("2013.csv", "2012.csv", "*/2013.csv", "**/2012.csv")
+] + [
+    pytest.param(
+        _call("Grep", CONTROL, pattern="1", path="data/weather", glob="2013.csv"),
+        id="grep data/weather from control glob 2013.csv",
+    ),
+    *[
+        pytest.param(
+            _call("Grep", CONTROL, pattern="1", path=str(GL_GYM_WEATHER), glob=glob),
+            id=f"grep gl_gym's weather dir glob {glob}",
+        )
+        for glob in ("2013.csv", "2012.csv")
+    ],
+]
+
+
+@pytest.mark.parametrize("mode", MODES)
+@pytest.mark.parametrize("payload", SEALED_GREP_GLOBS)
+def test_guard_runs_blocks_a_grep_of_a_weather_dir_globbed_to_a_test_year(payload, mode):
+    """#71: a Grep whose path is a weather dir and whose glob's basename is 2012.csv or 2013.csv
+    searches every site's sealed file (ripgrep matches a glob without a slash against the basename
+    at any depth), so it is blocked in every mode, as a Read of one of them is. The hook matches the
+    glob's basename against (2012|2013).csv. "*/2013.csv" and "**/2012.csv" already join to
+    weather/<one part>/<year>.csv; the bare "2013.csv" joins to weather/2013.csv and got through.
+    (ALLOWED's twin: the same Grep globbed to 2011.csv passes.)"""
     _assert_blocked(_hook("guard_runs.py", payload, mode))
 
 

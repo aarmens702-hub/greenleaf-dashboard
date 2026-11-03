@@ -11,8 +11,15 @@ Weather data (control/data/weather/):
   and WS2M (2 m) wind, the height upstream's fetcher uses. Made, from control/, by:
   uv run python scripts/fetch_weather.py --location London --lat 51.51 --lon -0.13 --year 2012
   uv run python scripts/fetch_weather.py --location Abbotsford --lat 49.05 --lon -122.33 --year 2012
+- Amsterdam/2013.csv, London/2013.csv and Abbotsford/2013.csv are NASA POWER hourly data too
+  (accessed 2026/11/02), written the same way; Amsterdam's is NASA POWER, unlike its bundled
+  2008-2012 files. Made, from control/, by:
+  uv run python scripts/fetch_weather.py --location Amsterdam --lat 52.37 --lon 4.90 --year 2013
+  uv run python scripts/fetch_weather.py --location London --lat 51.51 --lon -0.13 --year 2013
+  uv run python scripts/fetch_weather.py --location Abbotsford --lat 49.05 --lon -122.33 --year 2013
 
-Every 2012 file is the sealed test weather.
+Each test year is its own seal (SEALS, PROTOCOL §8): every 2012 and every 2013 file is sealed test
+weather.
 """
 
 import hashlib
@@ -44,12 +51,20 @@ TEST = {
     "london_2012": _scenarios("London", [2012], _TEST_DAYS),
     "abbotsford_2012": _scenarios("Abbotsford", [2012], _TEST_DAYS),
 }
-SPLITS = {"train_eval": TRAIN_EVAL, "validation": VALIDATION, "paper": [PAPER], **TEST}
+TEST_2013 = {
+    "amsterdam_2013": _scenarios("Amsterdam", [2013], _TEST_DAYS),
+    "london_2013": _scenarios("London", [2013], _TEST_DAYS),
+    "abbotsford_2013": _scenarios("Abbotsford", [2013], _TEST_DAYS),
+}
+# Each test year is its own seal: {year: its test splits}, each finalized once (PROTOCOL §8).
+SEALS = {2012: TEST, 2013: TEST_2013}
+SPLITS = {"train_eval": TRAIN_EVAL, "validation": VALIDATION, "paper": [PAPER], **TEST, **TEST_2013}
 
 
 def is_test(scenario: dict) -> bool:
-    """True for any 2012 scenario, in a split or not: 2012 is the test weather at every location."""
-    return bool(scenario["growth_year"] == 2012)
+    """True for any scenario of a seal's year (2012, 2013), in a split or not: a seal's year is test
+    weather at every location. The year must be an int, as SEALS keys it."""
+    return scenario["growth_year"] in SEALS
 
 
 def weather_hashes() -> dict[str, str]:

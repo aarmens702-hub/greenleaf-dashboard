@@ -49,10 +49,10 @@ Known answers used throughout:
 - rb default never leaves the CO₂ band on PAPER (the golden 60-day season's viol_hours_co2 is 0.0);
   co2_day 2,500 doses toward 2,500 ppm by day, above the 1,600 ppm bound, so it does.
 
-The 2012 weather is sealed (PROTOCOL §8). Every test that could build an env runs under a tripwire
-on pandas.read_csv that fails before any *2012.csv is read; the CLI refusals also run with every
-env builder (and evaluate's run_rb, run_policy) replaced by one that fails, so a refusal must come
-before any env or file. Nothing here may write the real ledger, control/runs/ or control/results/;
+The 2012 and (#71) 2013 weather are sealed (PROTOCOL §8). Every test that could build an env runs
+under a tripwire on pandas.read_csv that fails before any *2012.csv or *2013.csv is read; the CLI
+refusals, on every seal's test splits, also run with every env builder (and evaluate's run_rb,
+run_policy) replaced by one that fails, so a refusal must come before any env or file. Nothing here may write the real ledger, control/runs/ or control/results/;
 the last test checks all three are as they were when this module was collected.
 """
 
@@ -133,7 +133,15 @@ STAMP = {
     "dirty": True,
     "gl_gym": manifest._versions()["gl-gym"],
 }
-TEST_SPLITS = ("amsterdam_2012", "london_2012", "abbotsford_2012")
+# Every seal's test splits: 2012's, and (#71) 2013's.
+TEST_SPLITS = (
+    "amsterdam_2012",
+    "london_2012",
+    "abbotsford_2012",
+    "amsterdam_2013",
+    "london_2013",
+    "abbotsford_2013",
+)
 CLI_FLAGS = ("--controller", "--split", "--out", "--final")
 PAPER_FILE = "rb_default_Amsterdam_2010_59.json"  # <controller>_<location>_<year>_<start day>
 MAX_BYTES = 250_000  # the plan's ceiling, 250 KB, in decimal kilobytes
@@ -166,15 +174,16 @@ PER_ARM = {
 
 
 @pytest.fixture
-def no_2012_reads(monkeypatch) -> None:
-    """Fail loudly if the test reads any 2012 weather file. pandas.read_csv is the only file read
-    upstream's weather loader makes (its own year, and the next year's file past the year's end);
-    the check runs before the real read, and every other file goes through the real one."""
+def no_sealed_reads(monkeypatch) -> None:
+    """Fail loudly if the test reads any 2012 or (#71) 2013 weather file, each a seal's test year.
+    pandas.read_csv is the only file read upstream's weather loader makes (its own year, and the
+    next year's file past the year's end); the check runs before the real read, and every other
+    file goes through the real one."""
     real_read_csv = pd.read_csv
 
     def read_csv(filepath_or_buffer, *args, **kwargs):
-        if Path(str(filepath_or_buffer)).name.endswith("2012.csv"):
-            raise AssertionError(f"the sealed 2012 test weather was read: {filepath_or_buffer}")
+        if Path(str(filepath_or_buffer)).name.endswith(("2012.csv", "2013.csv")):
+            raise AssertionError(f"the sealed test weather was read: {filepath_or_buffer}")
         return real_read_csv(filepath_or_buffer, *args, **kwargs)
 
     monkeypatch.setattr(pd, "read_csv", read_csv)
@@ -635,7 +644,7 @@ def test_export_is_finite_plain_json_with_one_value_per_hour_in_every_array(seas
 # --- The CLI: the written file (Done when) ------------------------------------------------------
 
 
-@pytest.mark.usefixtures("no_2012_reads")
+@pytest.mark.usefixtures("no_sealed_reads")
 def test_cli_writes_one_compact_60_day_paper_file_under_250_kb(tmp_path):
     """Done when: export_replay --controller rb_default --split paper --out <dir> returns 0 and
     writes exactly one file, rb_default_Amsterdam_2010_59.json (PAPER is one scenario), under
@@ -664,7 +673,7 @@ def test_cli_writes_one_compact_60_day_paper_file_under_250_kb(tmp_path):
     assert hourly["t_hour"] == list(range(60 * 24))
 
 
-@pytest.mark.usefixtures("no_2012_reads")
+@pytest.mark.usefixtures("no_sealed_reads")
 def test_cli_file_round_trips_the_season_and_its_totals_are_the_metrics(tmp_path, paper_60):
     """Done when (round trip, through the file): json.loads of the CLI's 60-day PAPER rb default
     file reproduces run_rb(default params, PAPER, 60, record_steps=True)'s season:
@@ -728,9 +737,10 @@ def _controller(controller: str, tmp_path: Path) -> str:
 
 @pytest.mark.parametrize("controller", ["rb_default", "<unregistered run dir>"])
 @pytest.mark.parametrize("split", TEST_SPLITS)
-@pytest.mark.usefixtures("no_2012_reads")
+@pytest.mark.usefixtures("no_sealed_reads")
 def test_cli_refuses_a_test_split_without_final(split, controller, tmp_path, monkeypatch, capsys):
-    """Done when: --split <a test split> without --final exits non-zero, naming the seal.
+    """Done when: --split <a test split> without --final exits non-zero, naming the seal. The test
+    splits are every seal's: the three 2012 splits and (#71) the three 2013 splits.
 
     --split takes every split in scenarios.SPLITS, so argparse doesn't refuse it as an unknown
     choice; export_replay refuses it, with SystemExit (code not 0) whose text says "sealed
@@ -754,7 +764,7 @@ def test_cli_refuses_a_test_split_without_final(split, controller, tmp_path, mon
 
 @pytest.mark.parametrize("controller", ["rb_default", "<unregistered run dir>"])
 @pytest.mark.parametrize("split", ["paper", "amsterdam_2012"])
-@pytest.mark.usefixtures("no_2012_reads")
+@pytest.mark.usefixtures("no_sealed_reads")
 def test_cli_refuses_final_as_f1s_not_implemented(split, controller, tmp_path, monkeypatch, capsys):
     """Done when: any --final is refused until F1. On a non-test split and on a test split alike,
     with a well-formed final-registered row id, it is refused naming F1 and "not implemented",
@@ -789,7 +799,7 @@ EXISTING_CASES = [
 
 
 @pytest.mark.parametrize(("controller", "split", "existing"), EXISTING_CASES)
-@pytest.mark.usefixtures("no_2012_reads")
+@pytest.mark.usefixtures("no_sealed_reads")
 def test_cli_refuses_an_existing_output_file_before_any_env(
     controller, split, existing, tmp_path, monkeypatch, capsys
 ):
@@ -823,7 +833,7 @@ class _Routed(Exception):
     """Raised by the spy on run_policy once it has recorded its call."""
 
 
-@pytest.mark.usefixtures("no_2012_reads")
+@pytest.mark.usefixtures("no_sealed_reads")
 def test_cli_plays_a_run_dir_through_run_policy_at_its_selected_checkpoint(tmp_path, monkeypatch):
     """Done when: --controller <run_dir> goes through evaluate.run_policy, the one evaluation path,
     at the checkpoint its registration's result row selected, not "final".
@@ -891,7 +901,7 @@ UNREGISTERED_CASES = [
 
 
 @pytest.mark.parametrize("e6", UNREGISTERED_CASES)
-@pytest.mark.usefixtures("no_2012_reads")
+@pytest.mark.usefixtures("no_sealed_reads")
 def test_cli_refuses_an_unregistered_run_dir_before_any_env(e6, tmp_path, monkeypatch, capsys):
     """Done when: a run dir (it holds a manifest.json) that no ledger run row names is refused
     before any env, naming the dir and "not a registered run" (the site replays registered runs
@@ -936,7 +946,7 @@ LOOKUP_CASES = [
 
 
 @pytest.mark.parametrize(("results", "count"), LOOKUP_CASES)
-@pytest.mark.usefixtures("no_2012_reads")
+@pytest.mark.usefixtures("no_sealed_reads")
 def test_cli_refuses_a_run_dir_without_exactly_one_result_row_selecting_it(
     results, count, tmp_path, monkeypatch, capsys
 ):
@@ -964,7 +974,7 @@ def test_cli_refuses_a_run_dir_without_exactly_one_result_row_selecting_it(
     assert _bytes(ledger_path) == before
 
 
-@pytest.mark.usefixtures("no_2012_reads")
+@pytest.mark.usefixtures("no_sealed_reads")
 def test_cli_run_dir_meta_names_its_registered_run_and_its_own_commit(
     tmp_path, monkeypatch, seasons
 ):

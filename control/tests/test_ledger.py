@@ -2,6 +2,10 @@
 
 Every test passes path= under tmp_path. The defaults bind to the real control/ledger/ledger.jsonl,
 which no test may write; the last test in this module checks that.
+
+Issue #71 makes each test year its own seal: a final-registered row may carry an int seal (absent
+means 2012, as every row before #71), each seal is spent once by a final-result under one of its
+final-registered rows, and a final-result's per_split holds exactly its seal's splits.
 """
 
 import copy
@@ -88,6 +92,10 @@ DIAGNOSTICS = {"min_approx_kl": 0.002, "final_entropy": -1.5, "final_explained_v
 # registers. Written out, not read from ledger, so collection can't ERROR; a test pins them.
 SPLITS = ("amsterdam_2012", "london_2012", "abbotsford_2012")
 BASELINES = ("rb_default", "rb_tuned")
+# Issue #71: the 2013 seal's splits (scenarios.TEST_2013's keys), and every seal's, written out
+# the same way and pinned below.
+SPLITS_2013 = ("amsterdam_2013", "london_2013", "abbotsford_2013")
+SEALS = {2012: SPLITS, 2013: SPLITS_2013}
 # The CLI's register arguments, and the row fields they must parse to.
 CLI_ARMS = [
     {"name": "a", "method": "ppo", "config": {"learning_rate": 0.0003}},
@@ -169,13 +177,15 @@ def _per_arm(arms, iqm=1.5) -> dict:
 
 
 def _final_register(
-    ledger, path, checkpoints, *, issue=9, baselines=BASELINES, approved_by="Aarmen"
+    ledger, path, checkpoints, *, issue=9, baselines=BASELINES, approved_by="Aarmen", **seal
 ) -> dict:
+    """final_register with these defaults; seal, when given (#71), is passed as seal=."""
     return ledger.final_register(
         issue=issue,
         checkpoints=checkpoints,
         baselines=list(baselines),
         approved_by=approved_by,
+        **seal,
         path=path,
     )
 
@@ -193,11 +203,12 @@ def _entry(arm: str, scored: dict) -> dict:
     }
 
 
-def _per_split(scored: dict, baselines=BASELINES) -> dict:
-    """A final-result's per_split: each test split holds every learning arm, scored at its
-    registered checkpoints ({arm: {run row_id: checkpoint}}), and every baseline, scored at none."""
+def _per_split(scored: dict, baselines=BASELINES, splits=SPLITS) -> dict:
+    """A final-result's per_split: each test split (the 2012 seal's unless splits says otherwise)
+    holds every learning arm, scored at its registered checkpoints ({arm: {run row_id:
+    checkpoint}}), and every baseline, scored at none."""
     arms = {**scored, **{name: {} for name in baselines}}
-    return {split: {arm: _entry(arm, at) for arm, at in arms.items()} for split in SPLITS}
+    return {split: {arm: _entry(arm, at) for arm, at in arms.items()} for split in splits}
 
 
 def _experiment(ledger, path) -> dict:
@@ -226,6 +237,18 @@ def _chain(ledger, path, *, final_result=True) -> dict:
             final_registered=freg["row_id"], per_split=_per_split({"a": checkpoints}), path=path
         )
     return chain
+
+
+def _spend_2013(ledger, path, checkpoints: dict) -> tuple[dict, dict]:
+    """#71: register issue 71's seal-2013 final of arm a at checkpoints and spend it with a 2013
+    per_split; return (final-registered, final-result)."""
+    freg = _final_register(ledger, path, checkpoints, issue=71, seal=2013)
+    fres = ledger.final_result(
+        final_registered=freg["row_id"],
+        per_split=_per_split({"a": checkpoints}, splits=SPLITS_2013),
+        path=path,
+    )
+    return freg, fres
 
 
 def _two_seeds_registered(ledger, path) -> tuple[dict, dict]:
@@ -1243,6 +1266,263 @@ def test_final_names_are_pinned_to_scenarios_and_envs():
         "scored",
     }
     assert tuple(scenarios.TEST) == SPLITS
+
+
+# --- Issue #71: seal groups, one per test year ----------------------------------------------------
+
+
+def test_ledger_seals_are_pinned_to_scenarios_seals():
+    """ledger.SEALS, written out so the ledger stays stdlib-only, is {seal year: its split names}:
+    {2012: the 2012 splits, 2013: the 2013 splits}, each seal's names in scenarios.SEALS's order.
+    The 2012 seal's names are TEST_SPLITS. This module's SEALS copy is pinned too."""
+    import greenleaf_control.ledger as ledger
+    from greenleaf_control import scenarios
+
+    assert list(ledger.SEALS) == [2012, 2013]
+    assert {seal: tuple(names) for seal, names in ledger.SEALS.items()} == SEALS
+    assert {seal: tuple(splits) for seal, splits in scenarios.SEALS.items()} == SEALS
+    assert tuple(ledger.SEALS[2012]) == ledger.TEST_SPLITS
+
+
+def test_a_final_without_a_seal_is_the_2012_seal(tmp_path):
+    """A final-registered row written without seal (every row before #71) carries no seal key and
+    is the 2012 seal's: seal_of gives 2012. seal_spent(rows, 2012) is False until its final-result
+    is recorded and True after; seal_spent(rows, 2013) stays False throughout."""
+    import greenleaf_control.ledger as ledger
+
+    path = tmp_path / "ledger.jsonl"
+    freg = _chain(ledger, path, final_result=False)["final-registered"]
+
+    assert "seal" not in freg
+    assert ledger.seal_of(freg) == 2012
+    assert ledger.seal_spent(ledger.rows(path=path), 2012) is False
+    assert ledger.seal_spent(ledger.rows(path=path), 2013) is False
+    ledger.final_result(
+        final_registered=freg["row_id"], per_split=_per_split({"a": freg["checkpoints"]}), path=path
+    )
+    assert ledger.seal_spent(ledger.rows(path=path), 2012) is True
+    assert ledger.seal_spent(ledger.rows(path=path), 2013) is False
+
+
+def test_a_2013_final_registers_and_records_once_2012_is_spent(tmp_path):
+    """With the 2012 seal spent (a full chain), final_register(seal=2013) is accepted: its row has
+    exactly the final-registered fields plus seal, the int 2013, and seal_of gives 2013. Its
+    final-result, a per_split of exactly the 2013 splits, is accepted and has exactly the
+    final-result fields (the seal is its parent's). Both seals are then spent; each line is the
+    row append wrote."""
+    import greenleaf_control.ledger as ledger
+
+    path = tmp_path / "ledger.jsonl"
+    checkpoints = _chain(ledger, path)["result"]["selected"]
+    before = path.read_bytes()
+
+    freg, fres = _spend_2013(ledger, path, checkpoints)
+
+    assert set(freg) == BASE_FIELDS | KIND_FIELDS["final-registered"] | {"seal"}
+    assert type(freg["seal"]) is int and freg["seal"] == 2013
+    assert ledger.seal_of(freg) == 2013
+    assert set(fres) == BASE_FIELDS | KIND_FIELDS["final-result"]
+    assert list(fres["per_split"]) == list(SPLITS_2013)
+    assert path.read_bytes() == before + _line(freg) + _line(fres)
+    rows = ledger.rows(path=path)
+    assert ledger.seal_spent(rows, 2012) is True
+    assert ledger.seal_spent(rows, 2013) is True
+
+
+@pytest.mark.parametrize(
+    ("spent", "seal"),
+    [
+        pytest.param((2012,), 2012, id="seal=2012 once 2012 is spent"),
+        pytest.param((2012, 2013), 2013, id="seal=2013 once 2013 is spent"),
+    ],
+)
+def test_final_register_is_refused_once_its_seal_is_spent(tmp_path, spent, seal):
+    """A spent seal takes no new final: final_register(seal=<a spent seal>) raises ValueError "the
+    seal is spent", the file byte-identical. (Without seal, on a spent 2012,
+    test_final_register_is_refused_once_the_seal_is_spent shows the same.)"""
+    import greenleaf_control.ledger as ledger
+
+    path = tmp_path / "ledger.jsonl"
+    checkpoints = _chain(ledger, path)["result"]["selected"]
+    if 2013 in spent:
+        _spend_2013(ledger, path, checkpoints)
+    before = path.read_bytes()
+
+    with pytest.raises(ValueError, match="the seal is spent"):
+        _final_register(ledger, path, checkpoints, issue=72, seal=seal)
+    assert path.read_bytes() == before
+
+
+@pytest.mark.parametrize("seal", [2014, "2013", True], ids=["2014", "the string 2013", "True"])
+@pytest.mark.parametrize("via", ["final_register", "append"])
+def test_an_unknown_seal_is_refused(tmp_path, seal, via):
+    """A seal is an int key of SEALS. 2014 (no such seal), the string "2013" and True (a bool,
+    though True == 1) raise ValueError naming seal, the file byte-identical, through
+    final_register(seal=...) and through append of a hand-built final-registered row (the 2012
+    row's copy, with the seal added). The same row with seal 2013 is then accepted."""
+    import greenleaf_control.ledger as ledger
+
+    path = tmp_path / "ledger.jsonl"
+    chain = _chain(ledger, path)
+    checkpoints = chain["result"]["selected"]
+    if via == "final_register":
+        before = path.read_bytes()
+        with pytest.raises(ValueError, match="seal"):
+            _final_register(ledger, path, checkpoints, issue=71, seal=seal)
+        assert path.read_bytes() == before
+        assert _final_register(ledger, path, checkpoints, issue=71, seal=2013)["seal"] == 2013
+    else:
+        row = {**chain["final-registered"], "row_id": "final-registered-0badc0de", "issue": 71}
+        _check_rejected(ledger, path, {**row, "seal": seal}, {**row, "seal": 2013})
+
+
+PER_SPLIT_SEAL_FAULTS = [
+    pytest.param(2013, SPLITS, "amsterdam_2013", id="a 2013 final with the 2012 splits"),
+    pytest.param(
+        2013, (*SPLITS_2013, "london_2012"), "london_2012", id="a 2013 final with a 2012 split too"
+    ),
+    pytest.param(2012, SPLITS_2013, "amsterdam_2012", id="a 2012 final with the 2013 splits"),
+]
+
+
+@pytest.mark.parametrize(("seal", "splits", "named"), PER_SPLIT_SEAL_FAULTS)
+def test_a_final_results_per_split_holds_exactly_its_seals_splits(tmp_path, seal, splits, named):
+    """per_split is keyed by exactly the seal's splits (ledger.SEALS[seal]), the seal its
+    final-registered row's (absent: 2012). A 2013 final's per_split of the 2012 splits, or of the
+    2013 splits plus london_2012, and a 2012 final's of the 2013 splits raise ValueError naming the
+    split at fault, the file byte-identical; its own seal's splits are then accepted. (Flat
+    per_split here; #72 nests a 2013 split by price regime.)"""
+    import greenleaf_control.ledger as ledger
+
+    path = tmp_path / "ledger.jsonl"
+    checkpoints = _experiment(ledger, path)["result"]["selected"]
+    freg = _final_register(ledger, path, checkpoints, **({"seal": 2013} if seal == 2013 else {}))
+    before = path.read_bytes()
+
+    with pytest.raises(ValueError) as excinfo:
+        ledger.final_result(
+            final_registered=freg["row_id"],
+            per_split=_per_split({"a": checkpoints}, splits=splits),
+            path=path,
+        )
+    assert named in str(excinfo.value), str(excinfo.value)
+    assert path.read_bytes() == before
+
+    good = _per_split({"a": checkpoints}, splits=SEALS[seal])
+    fres = ledger.final_result(final_registered=freg["row_id"], per_split=good, path=path)
+    assert ledger.rows(kind="final-result", path=path) == [fres]
+
+
+@pytest.mark.parametrize("second_on", ["the same 2013 row", "another 2013 row"])
+def test_a_second_2013_final_result_is_refused(tmp_path, second_on):
+    """The 2013 seal is spent once, like 2012's: with 2012 spent and two 2013 final-registered rows
+    written, a 2013 final-result under one of them makes any further final-result under either
+    raise ValueError naming final-result, the file byte-identical: two final-results in all."""
+    import greenleaf_control.ledger as ledger
+
+    path = tmp_path / "ledger.jsonl"
+    checkpoints = _chain(ledger, path)["result"]["selected"]
+    first = _final_register(ledger, path, checkpoints, issue=71, seal=2013)
+    other = _final_register(ledger, path, checkpoints, issue=72, seal=2013)
+    per_split = _per_split({"a": checkpoints}, splits=SPLITS_2013)
+    ledger.final_result(final_registered=first["row_id"], per_split=per_split, path=path)
+    target = first if second_on == "the same 2013 row" else other
+    before = path.read_bytes()
+
+    with pytest.raises(ValueError, match="final-result"):
+        ledger.final_result(final_registered=target["row_id"], per_split=per_split, path=path)
+    assert path.read_bytes() == before
+    assert len(ledger.rows(kind="final-result", path=path)) == 2
+
+
+def test_spending_2013_leaves_an_unspent_2012_open(tmp_path):
+    """Seals are independent: on a ledger where no final has run, a 2013 final-registered and its
+    final-result spend 2013 only. seal_spent(rows, 2012) stays False, and a 2012 final (no seal)
+    then registers and records its final-result of the 2012 splits."""
+    import greenleaf_control.ledger as ledger
+
+    path = tmp_path / "ledger.jsonl"
+    checkpoints = _experiment(ledger, path)["result"]["selected"]
+    _spend_2013(ledger, path, checkpoints)
+    assert ledger.seal_spent(ledger.rows(path=path), 2012) is False
+
+    freg = _final_register(ledger, path, checkpoints, issue=9)
+    fres = ledger.final_result(
+        final_registered=freg["row_id"], per_split=_per_split({"a": checkpoints}), path=path
+    )
+    assert ledger.rows(kind="final-result", path=path)[-1] == fres
+    assert ledger.seal_spent(ledger.rows(path=path), 2012) is True
+
+
+def test_spending_2013_leaves_a_spent_2012_spent(tmp_path):
+    """2012 stays spent whatever 2013 does: after 2012's final-result and then 2013's, a final
+    without seal raises ValueError "the seal is spent", the file byte-identical, and both seals
+    read as spent."""
+    import greenleaf_control.ledger as ledger
+
+    path = tmp_path / "ledger.jsonl"
+    checkpoints = _chain(ledger, path)["result"]["selected"]
+    _spend_2013(ledger, path, checkpoints)
+    before = path.read_bytes()
+
+    with pytest.raises(ValueError, match="the seal is spent"):
+        _final_register(ledger, path, checkpoints, issue=10)
+    assert path.read_bytes() == before
+    rows = ledger.rows(path=path)
+    assert ledger.seal_spent(rows, 2012) is True
+    assert ledger.seal_spent(rows, 2013) is True
+
+
+def test_cli_final_register_takes_a_seal(tmp_path, capsys):
+    """final-register --seal <year> passes an int seal through the ledger's own checks: on a ledger
+    where 2012 is spent, --seal 2014 raises ValueError naming seal, the file byte-identical; --seal
+    2013 prints the new row's id, and that row's seal is the int 2013."""
+    import greenleaf_control.ledger as ledger
+
+    path = tmp_path / "ledger.jsonl"
+    checkpoints = _chain(ledger, path)["result"]["selected"]
+    argv = [
+        "final-register",
+        *("--issue", "71"),
+        *("--checkpoints", json.dumps(checkpoints)),
+        *("--baselines", "rb_default", "rb_tuned"),
+        *("--approved-by", "Aarmen"),
+    ]
+    before = path.read_bytes()
+
+    with pytest.raises(ValueError, match="seal"):
+        ledger.main([*argv, "--seal", "2014"], path=path)
+    assert path.read_bytes() == before
+
+    capsys.readouterr()
+    assert ledger.main([*argv, "--seal", "2013"], path=path) == 0
+    row_id = capsys.readouterr().out.strip()
+    row = ledger.rows(kind="final-registered", path=path)[-1]
+    assert row["row_id"] == row_id
+    assert type(row["seal"]) is int and row["seal"] == 2013
+
+
+@pytest.mark.parametrize("via", ["api", "cli"])
+def test_show_names_a_final_registered_rows_seal(tmp_path, capsys, via):
+    """show prints a final-registered row's seal on its line: "seal 2013" for a row written with
+    seal=2013, and "seal 2012" for a row without one (every row before #71; seal_of gives 2012).
+    Issue 7's experiment, then issue 9's final without seal and issue 71's with seal 2013, neither
+    spent: each final's one line names its own seal and not the other's."""
+    import greenleaf_control.ledger as ledger
+
+    path = tmp_path / "ledger.jsonl"
+    checkpoints = _experiment(ledger, path)["result"]["selected"]
+    old = _final_register(ledger, path, checkpoints, issue=9)
+    new = _final_register(ledger, path, checkpoints, issue=71, seal=2013)
+    capsys.readouterr()
+
+    _show(ledger, path, via)
+    lines = capsys.readouterr().out.splitlines()
+
+    for row, seal, other in ((old, 2012, 2013), (new, 2013, 2012)):
+        [line] = [line for line in lines if row["row_id"] in line]
+        assert re.search(rf"\bseal {seal}\b", line), line
+        assert f"seal {other}" not in line, line
 
 
 def test_register_dry_returns_the_row_and_writes_nothing(tmp_path):

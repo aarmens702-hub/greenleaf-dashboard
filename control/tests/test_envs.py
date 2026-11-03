@@ -24,6 +24,10 @@ when a season plus its 0.5-day lookahead runs past the end of the year (so a lat
 reads 2012.csv although its scenario says 2011). The allow_test tests that step a TEST scenario
 (issue #41) run on a synthetic weather dir in tmp_path whose 2012.csv files are byte copies of the
 real Amsterdam/2010.csv, under a tripwire that fails on any 2012.csv outside tmp_path.
+
+Issue #71 seals 2013 the same way (scenarios.SEALS = {2012: TEST, 2013: TEST_2013}; is_test is
+growth_year in SEALS, so envs.py itself is untouched): the refusal tripwire fails before any 2013.csv
+is opened too, and the one test that opens 2013 weather only resets on it with allow_test=True.
 """
 
 import functools
@@ -82,6 +86,13 @@ LATE_2010 = {"location": "Amsterdam", "growth_year": 2010, "start_day": 340}
 LATE_2011 = {"location": "Amsterdam", "growth_year": 2011, "start_day": 340}
 # "2012" != 2012, but upstream reads <location>/2012.csv for it all the same.
 STRING_2012 = {"location": "Amsterdam", "growth_year": "2012", "start_day": 45}
+# Issue #71: the 2013 seal's sites and splits, written out so collection can't ERROR while
+# scenarios.TEST_2013 is missing; test_scenarios pins TEST_2013 to them.
+SITES_2013 = {
+    "amsterdam_2013": "Amsterdam",
+    "london_2013": "London",
+    "abbotsford_2013": "Abbotsford",
+}
 
 
 def _only(s: dict) -> dict:
@@ -163,7 +174,8 @@ def _record_flags(monkeypatch, envs) -> list[tuple[bool, bool]]:
 
 @pytest.fixture
 def seal_tripwire(monkeypatch) -> list[tuple[str, ...]]:
-    """Fail loudly if the test opens any 2012 weather file: a refusal must come before the read.
+    """Fail loudly if the test opens any 2012 or 2013 (#71) weather file: a refusal must come before
+    the read.
 
     It sits on pandas.read_csv, the only file read upstream's loader makes: load_weather_data reads
     <location>/<year>.csv, and expand_weather_data reads <location>/<year + 1>.csv when the season
@@ -176,8 +188,8 @@ def seal_tripwire(monkeypatch) -> list[tuple[str, ...]]:
 
     def read_csv(filepath_or_buffer, *args, **kwargs):
         path = Path(str(filepath_or_buffer))
-        if path.name == "2012.csv":
-            raise AssertionError(f"the sealed 2012 test weather was read: {path}")
+        if path.name in ("2012.csv", "2013.csv"):
+            raise AssertionError(f"the sealed {path.stem} test weather was read: {path}")
         reads.append(path.parts[-2:])
         return real_read_csv(filepath_or_buffer, *args, **kwargs)
 
@@ -840,6 +852,54 @@ def test_allow_test_lets_a_test_scenario_reset(name):
     import greenleaf_control.envs as envs
 
     s = scenarios.TEST[name][0]
+    env = envs.make_raw_env(scenario=s, season_length=1, normalize_actions=False, allow_test=True)
+    obs, info = env.reset(seed=0)
+    env.close()
+    assert info["scenario"] == s
+    shape_ok = obs.shape == (UPSTREAM_DIM,)
+    assert shape_ok, f"wrong observation shape after resetting on {s}"
+    finite = bool(np.all(np.isfinite(obs)))
+    assert finite, f"non-finite observation after resetting on {s}"
+
+
+@pytest.mark.usefixtures("seal_tripwire")
+@pytest.mark.parametrize("how", ["scenario", "sampler", "reset"])
+@pytest.mark.parametrize("site", SITES_2013.values())
+def test_2013_weather_is_refused_without_allow_test(site, how):
+    """Issue #71: 2013 is the second seal, refused like 2012. Every 2013 scenario (start days 45 to
+    73 step 4) at the site raises a ValueError naming allow_test before its weather loads, three
+    ways in: make_raw_env(scenario=s) and a sampler whose only draw is s at construction, and
+    reset(options={"scenario": s}) on a PAPER env. A sampler that mixes 2013 into the TRAIN years
+    is refused too. The env stays usable: a VALIDATION reset after the refusals works."""
+    import greenleaf_control.envs as envs
+
+    days = range(45, 74, 4)
+    paper = envs.make_raw_env(scenario=scenarios.PAPER, season_length=1, normalize_actions=False)
+    for day in days:
+        s = {"location": site, "growth_year": 2013, "start_day": day}
+        with pytest.raises(ValueError, match="allow_test"):
+            if how == "reset":
+                paper.reset(options={"scenario": s})
+            else:
+                weather = {"scenario": s} if how == "scenario" else {"sampler_kwargs": _only(s)}
+                envs.make_raw_env(**weather, season_length=1, normalize_actions=False)
+    mixed = {"locations": [site], "growth_years": [2011, 2013], "start_days": list(days)}
+    with pytest.raises(ValueError, match="allow_test"):
+        envs.make_raw_env(sampler_kwargs=mixed, season_length=1, normalize_actions=True)
+    _, info = paper.reset(options={"scenario": scenarios.VALIDATION[0]})
+    paper.close()
+    assert info["scenario"] == scenarios.VALIDATION[0]
+
+
+@pytest.mark.parametrize("name", SITES_2013)
+def test_allow_test_lets_a_2013_scenario_reset(name):
+    """Issue #71: with allow_test=True the 2013 split's first scenario (scenarios.TEST_2013) resets,
+    as a 2012 one does: the env is on that scenario, with a finite 22-dim observation. No step is
+    taken, and the checks are reduced to bools so no weather value is printed."""
+    import greenleaf_control.envs as envs
+
+    s = scenarios.TEST_2013[name][0]
+    assert s == {"location": SITES_2013[name], "growth_year": 2013, "start_day": 45}
     env = envs.make_raw_env(scenario=s, season_length=1, normalize_actions=False, allow_test=True)
     obs, info = env.reset(seed=0)
     env.close()

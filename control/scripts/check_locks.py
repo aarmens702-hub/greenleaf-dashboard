@@ -2,8 +2,9 @@
 
 It proves that every commit only appended to control/ledger/ledger.jsonl, that every result
 names an earlier registration with the same fingerprints, that every run has a run-end, and that
-the seal was spent at most once, by a final-result naming an earlier final-registered row with
-the same fingerprints. /ship and /promote run it.
+each seal (each test year, SEALS) was spent at most once, by a final-result naming an earlier
+final-registered row of that seal (a row without seal is 2012's) with the same fingerprints and a
+per_split of exactly that seal's splits. /ship and /promote run it.
 It walks the whole history, so it needs a full clone and refuses a shallow one.
 
 Standalone on purpose: it reads the ledger through git and never imports greenleaf_control, so
@@ -16,6 +17,11 @@ import subprocess
 from pathlib import Path
 
 LEDGER = "control/ledger/ledger.jsonl"  # a repo-relative pathspec
+# Each seal's test splits, written out (ledger.SEALS and scenarios.SEALS are the writer's own).
+SEALS = {
+    2012: ("amsterdam_2012", "london_2012", "abbotsford_2012"),
+    2013: ("amsterdam_2013", "london_2013", "abbotsford_2013"),
+}
 
 
 def _git(top: Path, *args: str) -> bytes:
@@ -72,8 +78,8 @@ def _fingerprints_differ(row: dict, parent: dict) -> str:
 
 
 def check_head(top: Path) -> tuple[list[str], int]:
-    """The rows at HEAD link up: results and the final-result to earlier registrations with their
-    fingerprints, runs to run-ends, one seal.
+    """The rows at HEAD link up: results and final-results to earlier registrations with their
+    fingerprints, runs to run-ends, one final-result per seal, holding that seal's splits.
 
     Returns the violations and the number of rows at HEAD.
     """
@@ -91,7 +97,7 @@ def check_head(top: Path) -> tuple[list[str], int]:
 
     ended = {r["run"] for r in rows if r["kind"] == "run-end"}
     earlier = {}  # (kind, row_id) -> row, for the rows above the current one
-    finals = 0
+    spent = set()  # the seals a final-result above has spent
     for row in rows:
         kind, row_id = row["kind"], row["row_id"]
         if kind == "result":
@@ -106,17 +112,31 @@ def check_head(top: Path) -> tuple[list[str], int]:
         elif kind == "run" and row_id not in ended:
             violations.append(f"{row_id}: no run-end; close it with run_end(status='crashed')")
         elif kind == "final-result":
-            finals += 1
             freg = earlier.get(("final-registered", row["final-registered"]))
-            if finals > 1:
-                violations.append(f"{row_id}: a second final-result; the seal is spent")
-            elif freg is None:
+            seal = None if freg is None else freg.get("seal", 2012)
+            if freg is None:
                 violations.append(
                     f"{row_id}: names final-registered {row['final-registered']}, "
                     "which is not an earlier final-registered row"
                 )
-            elif row["fingerprints"] != freg["fingerprints"]:
-                violations.append(_fingerprints_differ(row, freg))
+            elif type(seal) is not int or seal not in SEALS:
+                violations.append(
+                    f"{row_id}: its final-registered {freg['row_id']} has seal {seal!r},"
+                    f" not one of {list(SEALS)}"
+                )
+            elif seal in spent:
+                violations.append(
+                    f"{row_id}: a second final-result of the {seal} seal; it is spent"
+                )
+            else:
+                spent.add(seal)
+                if set(row["per_split"]) != set(SEALS[seal]):
+                    violations.append(
+                        f"{row_id}: per_split holds {sorted(row['per_split'])}, not the {seal}"
+                        f" seal's splits {list(SEALS[seal])}"
+                    )
+                elif row["fingerprints"] != freg["fingerprints"]:
+                    violations.append(_fingerprints_differ(row, freg))
         earlier[(kind, row_id)] = row
     return violations, len(rows)
 

@@ -150,7 +150,8 @@ def _parser() -> argparse.ArgumentParser:
         "--split",
         choices=list(scenarios.SPLITS),
         required=True,
-        help=f"the test splits ({', '.join(scenarios.TEST)}) need --final",
+        help=f"the test splits ({', '.join(n for t in scenarios.SEALS.values() for n in t)}) need"
+        " --final",
     )
     p.add_argument(
         "--out", type=Path, required=True, help="the dir to write into; no file in it is replaced"
@@ -169,7 +170,7 @@ def main(argv: list[str] | None = None, *, ledger_path: Path = ledger.LEDGER) ->
             f"--final {args.final}: the one-time final evaluation is F1's (Stage 3), not"
             " implemented yet"
         )
-    if args.split in scenarios.TEST:
+    if any(args.split in t for t in scenarios.SEALS.values()):
         parser.error(
             f"--split {args.split} is TEST weather, sealed (PROTOCOL §8): only --final"
             " <final-registered row> may export it"

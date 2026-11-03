@@ -3,6 +3,10 @@
 The splits are docs/PROTOCOL.md §2, the interface is docs/API-CONTRACT.md. The 2012 files are the
 sealed test weather: tests only reset an env on them, hash them, and check their format and
 ranges in code, and an assertion on them never prints a weather value.
+
+Issue #71 makes each test year its own seal: SEALS = {2012: TEST, 2013: TEST_2013}. The 2013 files
+(NASA POWER for all three sites, fetched by the orchestrator) are sealed the same way and tested
+the same way: reset, hashed against the issue's sha256s, and checked for format and ranges in code.
 """
 
 import base64
@@ -32,15 +36,10 @@ HEADER = (
     "time,global radiation,wind speed,air temperature,sky temperature,??,"
     "CO2 concentration,day number,RH"
 )
-SPLIT_NAMES = [
-    "train_eval",
-    "validation",
-    "paper",
-    "amsterdam_2012",
-    "london_2012",
-    "abbotsford_2012",
-]
 TEST_NAMES = ["amsterdam_2012", "london_2012", "abbotsford_2012"]
+TEST_2013_NAMES = ["amsterdam_2013", "london_2013", "abbotsford_2013"]  # issue #71
+SPLIT_NAMES = ["train_eval", "validation", "paper", *TEST_NAMES, *TEST_2013_NAMES]
+SEALED_NAMES = [*TEST_NAMES, *TEST_2013_NAMES]
 TEST_DAYS = (45, 49, 53, 57, 61, 65, 69, 73)
 # Every weather file, keyed as weather_hashes() keys it.
 WEATHER_KEYS = {
@@ -51,6 +50,15 @@ WEATHER_KEYS = {
     "Amsterdam/2012.csv",
     "London/2012.csv",
     "Abbotsford/2012.csv",
+    "Amsterdam/2013.csv",
+    "London/2013.csv",
+    "Abbotsford/2013.csv",
+}
+# Issue #71's sha256 of each 2013 file (NASA POWER; PROTOCOL §2 records them too).
+SHA256_2013 = {
+    "Amsterdam": "4908f27ec091c417611c24d2e99107c4b9370cde8d04a116a933dc403d97f97a",
+    "London": "ef8c6536864a8dc57e99d1351a8c5332d7c9557b2af6f4b14cdd988f27268a83",
+    "Abbotsford": "a8ff975b5a5c9baca3e777ec474a928bafc5f1970b5dba6dbfe317a264e226aa",
 }
 
 
@@ -66,6 +74,9 @@ EXPECTED = {
     "amsterdam_2012": _scen("Amsterdam", 2012, TEST_DAYS),
     "london_2012": _scen("London", 2012, TEST_DAYS),
     "abbotsford_2012": _scen("Abbotsford", 2012, TEST_DAYS),
+    "amsterdam_2013": _scen("Amsterdam", 2013, TEST_DAYS),
+    "london_2013": _scen("London", 2013, TEST_DAYS),
+    "abbotsford_2013": _scen("Abbotsford", 2013, TEST_DAYS),
 }
 SIZES = {
     "train_eval": 9,
@@ -74,6 +85,9 @@ SIZES = {
     "amsterdam_2012": 8,
     "london_2012": 8,
     "abbotsford_2012": 8,
+    "amsterdam_2013": 8,
+    "london_2013": 8,
+    "abbotsford_2013": 8,
 }
 
 
@@ -89,6 +103,8 @@ def _own_split(scenarios, name: str) -> list[dict]:
         return scenarios.VALIDATION
     if name == "paper":
         return [scenarios.PAPER]
+    if name in TEST_2013_NAMES:
+        return scenarios.TEST_2013[name]
     return scenarios.TEST[name]
 
 
@@ -131,17 +147,15 @@ def test_weather_dir_is_control_data_weather():
     assert scenarios.WEATHER_DIR.is_dir()
 
 
-@pytest.mark.parametrize(
-    "name",
-    ["train_eval", "validation", "paper", "amsterdam_2012", "london_2012", "abbotsford_2012"],
-)
+@pytest.mark.parametrize("name", SPLIT_NAMES)
 def test_split_has_protocol_scenarios(name):
     """Each split holds exactly PROTOCOL §2's scenarios, ordered by year then start day.
 
     Sizes: TRAIN_EVAL 9 (Amsterdam {2008, 2009, 2011} × {45, 60, 75}), VALIDATION 3 (Amsterdam
     2010 × {45, 59, 75}), PAPER 1 (Amsterdam 2010, day 59), and 8 per TEST split (2012 ×
-    {45, 49, ..., 73}). The split is read both from its own attribute and from SPLITS, and its
-    values are plain str and int (they go into JSON manifests and ledger rows).
+    {45, 49, ..., 73}) and per TEST_2013 split (#71: 2013 × the same days). The split is read both
+    from its own attribute (TEST_2013 for the 2013 splits) and from SPLITS, and its values are
+    plain str and int (they go into JSON manifests and ledger rows).
     """
     import greenleaf_control.scenarios as scenarios
 
@@ -155,13 +169,33 @@ def test_split_has_protocol_scenarios(name):
         assert type(s["start_day"]) is int
 
 
-def test_splits_has_exactly_the_six_named_splits():
-    """SPLITS has the 6 split names; TEST has the 3 test names; SPLITS["paper"] is [PAPER]."""
+def test_splits_has_exactly_the_nine_named_splits():
+    """SPLITS has the 9 split names (#71 adds the 3 2013 ones); TEST has the 3 2012 test names and
+    TEST_2013 the 3 2013 ones; SPLITS["paper"] is [PAPER]."""
     import greenleaf_control.scenarios as scenarios
 
+    assert len(SPLIT_NAMES) == 9
     assert set(scenarios.SPLITS) == set(SPLIT_NAMES)
     assert set(scenarios.TEST) == set(TEST_NAMES)
+    assert set(scenarios.TEST_2013) == set(TEST_2013_NAMES)
     assert scenarios.SPLITS["paper"] == [scenarios.PAPER]
+
+
+def test_seals_map_each_test_year_to_its_splits():
+    """Issue #71: each test year is its own seal. SEALS is {2012: TEST, 2013: TEST_2013}, those very
+    dicts, keyed by plain int years in that order, and each seal's splits are SPLITS' own."""
+    import greenleaf_control.scenarios as scenarios
+
+    assert list(scenarios.SEALS) == [2012, 2013]
+    assert all(type(year) is int for year in scenarios.SEALS)
+    assert scenarios.SEALS[2012] is scenarios.TEST
+    assert scenarios.SEALS[2013] is scenarios.TEST_2013
+    assert list(scenarios.SEALS[2012]) == TEST_NAMES
+    assert list(scenarios.SEALS[2013]) == TEST_2013_NAMES
+    for year, splits in scenarios.SEALS.items():
+        for name, split in splits.items():
+            assert scenarios.SPLITS[name] == split, name
+            assert {s["growth_year"] for s in split} == {year}, name
 
 
 def test_paper_is_upstream_default_and_inside_validation():
@@ -178,7 +212,8 @@ def test_paper_is_upstream_default_and_inside_validation():
 
 
 def test_train_sampler_kwargs_match_contract_and_exclude_held_out_years():
-    """TRAIN_SAMPLER_KWARGS is the contract literal; it holds no 2010 (VALIDATION) or 2012 (TEST)."""
+    """TRAIN_SAMPLER_KWARGS is the contract literal; it holds no 2010 (VALIDATION), 2012 (TEST) or
+    2013 (TEST_2013)."""
     import greenleaf_control.scenarios as scenarios
 
     assert scenarios.TRAIN_SAMPLER_KWARGS == {
@@ -188,24 +223,27 @@ def test_train_sampler_kwargs_match_contract_and_exclude_held_out_years():
     }
     assert 2010 not in scenarios.TRAIN_SAMPLER_KWARGS["growth_years"]
     assert 2012 not in scenarios.TRAIN_SAMPLER_KWARGS["growth_years"]
+    assert 2013 not in scenarios.TRAIN_SAMPLER_KWARGS["growth_years"]
 
 
 def test_splits_are_disjoint():
-    """TRAIN_EVAL, VALIDATION and the 3 TEST splits share no scenario, and none repeats one.
+    """TRAIN_EVAL, VALIDATION, the 3 TEST splits and the 3 TEST_2013 splits share no scenario,
+    and none repeats one.
 
     TRAIN's support (every year × start day its sampler can draw) misses VALIDATION, PAPER and
-    every TEST split. TRAIN_EVAL is inside TRAIN's support by design, so it isn't checked here.
+    every TEST and TEST_2013 split. TRAIN_EVAL is inside TRAIN's support by design, so it isn't
+    checked here.
     """
     import greenleaf_control.scenarios as scenarios
 
-    held = ["train_eval", "validation", *TEST_NAMES]
+    held = ["train_eval", "validation", *SEALED_NAMES]
     keys = {name: [_key(s) for s in scenarios.SPLITS[name]] for name in SPLIT_NAMES}
     for name in SPLIT_NAMES:
         assert len(set(keys[name])) == len(keys[name]), f"{name} repeats a scenario"
     for a, b in itertools.combinations(held, 2):
         assert not set(keys[a]) & set(keys[b]), f"{a} and {b} overlap"
     train = _train_support(scenarios)
-    for name in ["validation", "paper", *TEST_NAMES]:
+    for name in ["validation", "paper", *SEALED_NAMES]:
         assert not train & set(keys[name]), f"TRAIN can draw a {name} scenario"
 
 
@@ -218,10 +256,14 @@ def test_splits_are_disjoint():
         ("amsterdam_2012", True),
         ("london_2012", True),
         ("abbotsford_2012", True),
+        ("amsterdam_2013", True),
+        ("london_2013", True),
+        ("abbotsford_2013", True),
     ],
 )
 def test_is_test_flags_exactly_the_test_splits(name, expected):
-    """is_test is True on every TEST scenario and False on every scenario of the other splits."""
+    """is_test is True on every TEST and TEST_2013 scenario (#71: any seal's) and False on every
+    scenario of the other splits."""
     import greenleaf_control.scenarios as scenarios
 
     for s in scenarios.SPLITS[name]:
@@ -246,6 +288,25 @@ def test_is_test_on_scenarios_outside_the_splits():
         assert scenarios.is_test(s) is False, s
 
 
+@pytest.mark.parametrize(
+    ("location", "year", "day", "expected"),
+    [
+        ("Amsterdam", 2013, 100, True),  # in no split, but 2013 is a seal's year
+        ("London", 2013, 1, True),
+        ("Abbotsford", 2013, 365, True),
+        ("Amsterdam", 2014, 100, False),  # a year no seal holds
+        ("Amsterdam", 2010, 100, False),  # the validation year
+    ],
+)
+def test_is_test_is_any_seals_year(location, year, day, expected):
+    """Issue #71: is_test is growth_year in SEALS, on a split or not. Any 2013 scenario is sealed
+    test weather, at every site and start day; 2014 and 2010 are not. It returns a plain bool."""
+    import greenleaf_control.scenarios as scenarios
+
+    s = {"location": location, "growth_year": year, "start_day": day}
+    assert scenarios.is_test(s) is expected, s
+
+
 def test_no_training_or_validation_season_reaches_the_next_years_file():
     """No non-test season runs past the end of its year's weather file.
 
@@ -267,16 +328,13 @@ def test_no_training_or_validation_season_reaches_the_next_years_file():
         assert day + 60 + 1 <= 365, day
 
 
-@pytest.mark.parametrize(
-    "name",
-    ["train_eval", "validation", "paper", "amsterdam_2012", "london_2012", "abbotsford_2012"],
-)
+@pytest.mark.parametrize("name", SPLIT_NAMES)
 def test_every_scenario_in_split_resets_a_one_day_env(name):
     """Every scenario of the split resets gl_gym/GreenLightTomato-v0 for a 1-day season.
 
     The env reads our WEATHER_DIR (not gl-gym's bundled copy), loads exactly the scenario asked
-    for, and returns a finite observation. On a 2012 scenario this only checks the file loads:
-    nothing is evaluated, and the observation is never printed.
+    for, and returns a finite observation. On a 2012 or 2013 scenario this only checks the file
+    loads: nothing is evaluated, and the observation is never printed.
     """
     import greenleaf_control.scenarios as scenarios
 
@@ -290,10 +348,7 @@ def test_every_scenario_in_split_resets_a_one_day_env(name):
         assert finite, f"non-finite observation after resetting on {s}"
 
 
-@pytest.mark.parametrize(
-    "name",
-    ["train_eval", "validation", "paper", "amsterdam_2012", "london_2012", "abbotsford_2012"],
-)
+@pytest.mark.parametrize("name", SPLIT_NAMES)
 def test_require_weather_passes_on_every_split(name):
     """Every split's weather is on disk, so require_weather returns None."""
     import greenleaf_control.scenarios as scenarios
@@ -305,7 +360,7 @@ def test_require_weather_passes_on_every_split(name):
     ("location", "year"),
     [
         ("Nowhere", 2010),  # an unknown location
-        ("Amsterdam", 2013),  # a known location, a year we don't have
+        ("Amsterdam", 2014),  # a known location, a year we don't have (#71 added 2013)
     ],
 )
 def test_require_weather_names_the_missing_file(location, year):
@@ -339,8 +394,9 @@ def test_require_weather_reads_weather_dir_at_call_time(tmp_path, monkeypatch):
     assert scenarios.require_weather([scenarios.PAPER]) is None
 
 
-def test_weather_hashes_cover_the_seven_csvs_and_are_stable():
-    """weather_hashes keys each of the 7 weather files "<location>/<year>.csv" to its sha256.
+def test_weather_hashes_cover_the_ten_csvs_and_are_stable():
+    """weather_hashes keys each of the 10 weather files "<location>/<year>.csv" to its sha256
+    (#71 adds the three 2013 files).
 
     Each value is 64 lowercase hex characters, equal to hashlib's sha256 of the file's bytes,
     and two calls return the same dict.
@@ -353,6 +409,16 @@ def test_weather_hashes_cover_the_seven_csvs_and_are_stable():
         assert re.fullmatch(r"[0-9a-f]{64}", digest), key
         assert digest == hashlib.sha256((WEATHER / key).read_bytes()).hexdigest(), key
     assert scenarios.weather_hashes() == first
+
+
+@pytest.mark.parametrize("location", ["Amsterdam", "London", "Abbotsford"])
+def test_2013_weather_is_the_issues_file(location):
+    """Issue #71: each <location>/2013.csv hashes, through weather_hashes, to the sha256 the issue
+    records. weather_hashes stamps every run's manifest and FINAL_RESULTS/<row>/stamp.json; the
+    final-registered row pins PROTOCOL §2's copy of these sha256s, not the files."""
+    import greenleaf_control.scenarios as scenarios
+
+    assert scenarios.weather_hashes()[f"{location}/2013.csv"] == SHA256_2013[location]
 
 
 @pytest.mark.parametrize("year", [2008, 2009, 2010, 2011, 2012])
@@ -399,13 +465,25 @@ def test_weather_hashes_reads_weather_dir_at_call_time(tmp_path, monkeypatch):
     assert after["There/2002.csv"] == hashlib.sha256(b"x,y\n1,3\n").hexdigest()
 
 
-@pytest.mark.parametrize("location", ["London", "Abbotsford"])
-def test_fetched_csv_has_gl_gym_format_and_plausible_ranges(location):
-    """The fetched <location>/2012.csv has gl-gym's exact format and plausible weather.
+@pytest.mark.parametrize(
+    ("location", "year", "last"),
+    [
+        # 2012 is a leap year: 366 d × 24 h = 8,784 hours, the last at 8,783 × 3,600 s.
+        ("London", 2012, 31_618_800),
+        ("Abbotsford", 2012, 31_618_800),
+        # #71's 2013 files, Amsterdam's too (NASA POWER, unlike its bundled 2008-2012): 365 d ×
+        # 24 h = 8,760 hours, the last at 8,759 × 3,600 s = 31,532,400 s.
+        ("Amsterdam", 2013, 31_532_400),
+        ("London", 2013, 31_532_400),
+        ("Abbotsford", 2013, 31_532_400),
+    ],
+)
+def test_fetched_csv_has_gl_gym_format_and_plausible_ranges(location, year, last):
+    """The fetched <location>/<year>.csv has gl-gym's exact format and plausible weather.
 
-    Format: the exact header; time from 0 in 300 s steps to 31,618,800 s, so 105,397 rows
-    (2012 is a leap year: 366 d × 24 h = 8,784 hours, the last at 8,783 × 3,600 s);
-    ?? = 0, CO2 = 400, day number = floor(time / 86,400); no NaN.
+    Format: the exact header; time from 0 in 300 s steps to the year's last hour, so last / 300 + 1
+    rows (105,397 for 2012, 105,109 for 2013); ?? = 0, CO2 = 400, day number =
+    floor(time / 86,400); no NaN.
     Ranges (these catch unit slips and fill values such as -999): air temperature in
     [-30, 45] °C; RH in [0, 100] %; global radiation >= 0 W/m² with an annual max in
     [500, 1400] W/m²; wind speed in [0, 40] m/s; and on each hour, sky temperature <= air
@@ -417,16 +495,16 @@ def test_fetched_csv_has_gl_gym_format_and_plausible_ranges(location):
     This is test weather: each check is reduced to a bool before it's asserted, so a failure
     names the check, never a weather value.
     """
-    path = WEATHER / location / "2012.csv"
+    path = WEATHER / location / f"{year}.csv"
     assert path.is_file(), f"missing {path}"
     with path.open() as f:
         assert f.readline().rstrip("\n") == HEADER
 
     df = pd.read_csv(path)
     t = df["time"].to_numpy()
-    assert len(df) == 105_397  # 31,618,800 s / 300 s + 1
+    assert len(df) == last // 300 + 1  # 105,397 for 2012, 105,109 for 2013
     assert t[0] == 0
-    assert t[-1] == 31_618_800
+    assert t[-1] == last
     hourly = df.iloc[::12]  # 3,600 s / 300 s = 12 rows per hour
     checks = {
         "no NaN": not df.isna().any().any(),
@@ -449,7 +527,7 @@ def test_fetched_csv_has_gl_gym_format_and_plausible_ranges(location):
         ),
     }
     failed = [name for name, ok in checks.items() if not bool(ok)]
-    assert not failed, f"{location}/2012.csv fails: {failed}"
+    assert not failed, f"{location}/{year}.csv fails: {failed}"
 
 
 def test_fetch_weather_cli_takes_location_lat_lon_year():

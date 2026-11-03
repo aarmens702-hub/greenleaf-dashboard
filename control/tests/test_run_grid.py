@@ -709,9 +709,11 @@ REGISTERED_REFUSALS = [
         "penalty-weight",
         id="config-key-in-kebab-case",
     ),
+    # Every seal's test splits: 2012's and (#71) 2013's.
     *[
         pytest.param({"scenarios": ["validation", split]}, None, split, id=f"test-split-{split}")
-        for split in scenarios.TEST
+        for splits in scenarios.SEALS.values()
+        for split in splits
     ],
 ]
 
@@ -722,8 +724,9 @@ def test_registered_refuses_before_launching_anything(
     over, row_id, named, backend, tmp_path, monkeypatch, capsys
 ):
     """run_grid checks every cell before it launches any, on either backend: an unknown row, an
-    arm whose method isn't in envs.METHODS, an arm config key that isn't a train flag, or a 2012
-    TEST split among the registration's scenarios (PROTOCOL §8) each refuse naming what's wrong.
+    arm whose method isn't in envs.METHODS, an arm config key that isn't a train flag, or a TEST
+    split of any seal (2012, or #71's 2013) among the registration's scenarios (PROTOCOL §8) each
+    refuse naming what's wrong.
     The bad arm is the second, after a good one. _run_local is never called, no remote session is
     opened and the ledger is byte-identical. The remote grid has a clean temp repo and an empty
     runs dir, so only the registration can be what's refused."""
