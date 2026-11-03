@@ -789,8 +789,13 @@ def main(argv: list[str] | None = None) -> int:
     points = tradeoff_points()
     references = [rb_tuned_reference(n) for n in sorted({len(p["seeds"]) for p in points})]
     pick = None if args.replay is None else replay_pick(args.replay)
-    # The test weather: sealed until the ledger holds the final-result row (one at most).
-    finals = ledger.rows("final-result", path=ledger.LEDGER)
+    # The test weather: sealed until the ledger holds the 2012 seal's final-result row (one at
+    # most); a final-result of another seal (2013's) doesn't open it.
+    existing = ledger.rows(path=ledger.LEDGER)
+    seals = {r["row_id"]: ledger.seal_of(r) for r in existing if r["kind"] == "final-registered"}
+    finals = [
+        r for r in existing if r["kind"] == "final-result" and seals[r["final-registered"]] == 2012
+    ]
     test_weather = (
         f"the 2012 test results are in docs/REPORT.md §5 ({finals[0]['row_id']})"
         if finals

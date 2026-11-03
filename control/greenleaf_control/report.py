@@ -154,13 +154,18 @@ def _ids(reg: dict, existing: list[dict]) -> dict | None:
 
 
 def _final(split: str, existing: list[dict]) -> tuple[dict, dict]:
-    """(the final-result row, the final-registered row it names). A TEST split is sealed (PROTOCOL
-    §8) until the ledger holds the final-result: a ValueError naming the split says so."""
-    finals = [r for r in existing if r["kind"] == "final-result"]
+    """(the 2012 final-result row, the final-registered row it names). A TEST split is sealed
+    (PROTOCOL §8) until the ledger holds the 2012 seal's final-result: a ValueError naming the split
+    says so. A final-result of another seal (2013's) doesn't open it."""
+    seals = {r["row_id"]: ledger.seal_of(r) for r in existing if r["kind"] == "final-registered"}
+    finals = [
+        r for r in existing if r["kind"] == "final-result" and seals[r["final-registered"]] == 2012
+    ]
     if not finals:
         raise ValueError(
             f"split {split!r} is 2012 test weather, sealed (PROTOCOL §8): the report reads it only"
-            " from the final's files, once the ledger holds the final-result row, and it has none"
+            " from the final's files, once the ledger holds the 2012 seal's final-result row, and"
+            " it has none"
         )
     return finals[0], ledger._find(existing, finals[0]["final-registered"], "final-registered")
 

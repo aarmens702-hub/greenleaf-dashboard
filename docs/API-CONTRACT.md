@@ -506,9 +506,10 @@ Paths are relative to `control/`. Scenario dicts are `{"location": str, "growth_
 - `ANALYSIS` = `control/results/analysis`; `BASELINE` = `"rb_tuned"`; `METRICS` = `(profit_eur_m2, viol_hours_total,
   viol_hours_co2, viol_hours_temp, viol_hours_rh, yield_kg_m2, paper_return)`; `SCORED_ONCE` = `"2012 test weather,
   scored once"`.
-- **Splits:** validation, and the three TEST splits (A1c) once the ledger holds the `final-result` row. Until then a
-  test split is refused (a ValueError naming it and the seal, PROTOCOL §8) before any parquet is read (only the ledger
-  is read). `train_eval` and `paper` are always refused (a ValueError naming the split from `load_scores`, an argparse
+- **Splits:** validation, and the three TEST splits (A1c) once the ledger holds the 2012 `final-result` row (#73: the
+  one whose final-registered row has `ledger.seal_of(...) == 2012`; a 2013 final-result doesn't open them, wherever
+  it sits in the file, and every TEST-split read below is of the 2012 final). Until then a test split is refused (a
+  ValueError naming it and the seal, PROTOCOL §8) before any parquet is read (only the ledger is read). `train_eval` and `paper` are always refused (a ValueError naming the split from `load_scores`, an argparse
   error from the CLI).
 - `load_scores(split, *, ledger_path=ledger.LEDGER) -> pd.DataFrame`: one row per label × run × scenario.
   - **Columns:** `label, arm, issue, registered, result, decision, protocol, run, seed, crashed, split, location,
@@ -596,7 +597,8 @@ Paths are relative to `control/`. Scenario dicts are `{"location": str, "growth_
 - `build(out: Path, *, root=manifest.REPO_ROOT, ledger_path=ledger.LEDGER, force=False) -> dict`:
   - returns `{"final_result": <final-result row id>, "replays": <int, copied into out/data/final>, "files": <int,
     files written>, "bytes": <int, their total size>}`.
-  - **The final** is the ledger's one `final-result` row; its replays are `root/control/results/final/<the
+  - **The final** is the ledger's 2012 `final-result` row (#73: the one whose final-registered row has
+    `ledger.seal_of(...) == 2012`; a 2013 final-result changes nothing); its replays are `root/control/results/final/<the
     final-registered row it names>/replays`, never typed.
   - **Copies, byte for byte:** every plain file directly in `root/site` and `root/site/data/*.json`, to the same
     relative path under `out`; and each page controller's `<id>_<Location>_2012_<day>.json` from the final's replays to
@@ -622,9 +624,10 @@ Paths are relative to `control/`. Scenario dicts are `{"location": str, "growth_
       name) and of each arm it scored (`ledger.final_arms`, by report's `<arm> #<issue>/<4 hex>` label of its
       registration), null for every other label.
   - Neither JSON holds NaN or Infinity (`allow_nan=False`).
-  - **Refusals** (`SystemExit` with a message), all before anything is made or written: the ledger has no
-    `final-result` row (the message names it); `out`, resolved and casefolded, is in or equal to `root/site`,
-    `root/control/results`, `root/control/runs` or `root/control/ledger`; `out` is `root` or an ancestor of it
+  - **Refusals** (`SystemExit` with a message), all before anything is made or written: the ledger has no 2012
+    `final-result` row (the message names it; a ledger whose only final-result is 2013's included); `out`, resolved
+    and casefolded, is in or equal to `root/site`, `root/control/results`, `root/control/runs` or
+    `root/control/ledger`; `out` is `root` or an ancestor of it
     (`force` included); `out` is non-empty without `force`. `force` overwrites same-named files and never deletes.
 - `main(argv=None, *, ledger_path=ledger.LEDGER) -> int`; CLI `python -m greenleaf_control.site_build --out DIR
   [--force]` (`--out` required). Prints one line per file group (the site files, `<n> replays`, `index.json`,
@@ -649,7 +652,9 @@ Paths are relative to `control/`. Scenario dicts are `{"location": str, "growth_
   viol_hours_{co2,temp,rh}, valid, run, source`; `seed` float, NaN for a baseline). Validation: the rows of
   `control/results/analysis/validation/scores.parquet` whose label `site_build._validation_arms` maps, `controller` =
   the final's arm id. The 2012 splits: every row of `control/results/final/<final-registered row>/seasons.parquet`,
-  found from the ledger's one `final-result` row, random included. No `final-result` row: ValueError naming it.
+  found from the ledger's 2012 `final-result` row (#73: the one whose final-registered row has `ledger.seal_of(...)
+  == 2012`; a 2013 final-result changes nothing), random included. No 2012 `final-result` row: ValueError naming
+  it.
 - `tables(seasons) -> {"regimes", "sweep", "crossovers"}`, per split present. A controller's matrix is its runs (by
   seed) × scenarios (`scenarios.SPLITS` order), as `report._matrix`.
   - `regimes`: `split, regime, rank, controller, n_runs, profit_{iqm,lo,hi}, gain_rb_tuned_{iqm,lo,hi},
@@ -722,3 +727,42 @@ Paths are relative to `control/`. Scenario dicts are `{"location": str, "growth_
     (profit vs season length per controller, a line per start day, per regime).
   - Figures: `Figure(layout="constrained")`, 200 dpi, every text ≥ 9 pt, `site_build.CONTROLLERS` display names, one
     panel per regime titled with its name. No clock time or out path in the `.md` files. Returns 0.
+
+## `greenleaf_control.hypotheses` (#73; plays no season, writes no ledger row)
+- **Grades the registered 2013 hypotheses H1-H4 from the 2013 final's recorded seasons**, so none is graded by hand.
+  The 2013 final is found from the ledger, never typed: the `final-result` row whose final-registered row has
+  `ledger.seal_of(...) == 2013`, then `FINAL_RESULTS/<that final-registered row>/seasons.parquet` (#72's shape, one
+  row per season and `price_regime`, `sim` and `agc2020`). `FINAL_RESULTS` = `control/results/final`, read at call
+  time. No env, `evaluate`, `report` or `selection` is imported; no weather file is opened; the 2012 final's files are
+  never read.
+- **Per 2013 split** (`scenarios.SEALS[2013]` order), each regime from its own rows; nothing is pooled.
+  - An arm's matrix is its runs (by seed) × the split's seasons (`scenarios.SEALS[2013][split]` order, as
+    `report._matrix`); a baseline is 1 run. Refused (ValueError naming the arm) unless every run holds each season
+    once, so a missing graded arm or baseline is refused.
+  - A paired gain is `stats.iqm_ci(arm − the baseline's 1 × 8 row)`; a baseline's like-for-like profit IQM is
+    `stats.iqm_ci(np.tile(<its row>, (n_runs, 1)))[0]`; "CI above X" is `ci_low > X`, "below X" `ci_high < X`.
+  - Σ is the sum of the CO₂, temp and RH violation-hour IQMs (rliable's point IQM); rb_tuned's like-for-like Σ
+    tiles its rows the same way.
+  - **H1** (ppo vs rb_default): gain CI below 0 at agc2020 and above 0 at sim. **H2** (residual_w05 vs rb_tuned): gain
+    CI above 0 at sim and at agc2020. Parts are named by their regime.
+  - **H3** (ppo_agc, residual_agc, at agc2020) and **H4** (residual_w05, lag_b100, at sim): (a) the arm's profit
+    `ci_low` > the highest like-for-like profit IQM of rb_default, rb_tuned and rb_tuned_agc2020 (H3) or rb_tuned's
+    (H4); (b) Σ ≤ rb_tuned's like-for-like Σ, no slack; (c) its invalid seasons plus solver failures = 0.
+- `main(argv=None, *, ledger_path=ledger.LEDGER) -> int`; CLI `python -m greenleaf_control.hypotheses [--out DIR]`,
+  `--out` defaulting to `OUT` = `control/results/analysis/final_2013`.
+  - **Refusals**, all before `out` is made: no 2013 `final-result` row (ValueError naming "2013" and "final-result",
+    before any parquet is read); the 2013 final's `seasons.parquet` missing; a graded arm or baseline missing.
+  - Writes `hypotheses.csv`: exactly `split, hypothesis, arm, regime, part, value, bar, pass`, one row per split ×
+    hypothesis × arm × part (H1/H2: `agc2020`, `sim`; H3/H4: `a`, `b`, `c`), full precision. `value` and `bar`: a
+    gain's `ci_high` (below) or `ci_low` (above) and 0; a: the arm's profit `ci_low` and the bar; b: the arm's Σ and
+    rb_tuned's like-for-like Σ; c: the count and 0. `pass` is a boolean.
+  - Writes `summary.md`: line 1 names the command, `control/results/final/<final-registered row>/seasons.parquet` and
+    the 2013 final-result row; the hypotheses word for word as registered (issue #73's text, named on a source line)
+    and a legend (including how H3(a)'s bar is read); then one table row per split × hypothesis × arm with n runs,
+    its verdict (`verified` when every part passes, else `fails (<parts>)`, with `n<5: no claim` appended for an arm
+    with fewer than 5 runs) and each part's value, relation and bar (part c as invalid seasons and solver failures,
+    each at the graded regime). No timestamp or out path. Prints each file written and each verdict; returns 0.
+- **The 2012 readers keep 2012** (#73): `site_build.build`, `prices.load_seasons`, `report`'s TEST splits and
+  `media`'s note read the `final-result` whose final-registered row has `ledger.seal_of(...) == 2012`, wherever a 2013
+  final-result sits in the ledger, and a ledger whose only final-result is 2013's is refused (or sealed) as one with
+  none.

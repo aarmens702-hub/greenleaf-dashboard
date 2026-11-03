@@ -18,9 +18,12 @@ The conventions pinned here (the issue's steps, with the orchestrator's defaults
   to root/site, root/control/results, root/control/runs or root/control/ledger; (3) out is root or
   an ancestor of it; (4) out exists and is non-empty without force. --force overwrites same-named
   files and never deletes.
-- The final is found from the ledger, never typed: its one final-result row (#45's
+- The final is found from the ledger, never typed: its 2012 final-result row (#45's
   final-result-aee23915) names its final-registered row (final-registered-4d0a4ba9), and the
-  replays are root/control/results/final/<that row id>/replays.
+  replays are root/control/results/final/<that row id>/replays. #73: the 2012 final-result is the
+  one whose final-registered row has ledger.seal_of(...) == 2012, so a 2013 final-result in the
+  ledger (#71's second seal), before or after it, changes nothing, and a ledger whose only
+  final-result is 2013's is refused like one with none.
 - out/ holds site/'s plain files (index.html, style.css, app.js) and site/data/*.json at the same
   relative paths, byte for byte; the final's replays of exactly 7 controllers (rb_tuned,
   rb_default, residual_w05, lag_b100, ppo, ppo_paper, zero_controls; not random) x 3 cities x 8
@@ -80,6 +83,10 @@ REPLAYS = CONTROL / "results" / "final" / FINAL_REGISTERED / "replays"
 # A fake checkout's final, under other ids, so a builder that typed the real ones is caught.
 FAKE_RESULT = "final-result-1e1e1e1e"
 FAKE_REGISTERED = "final-registered-0f0f0f0f"
+# #73: a synthetic 2013 final (#71's second seal), under ids no real row has. Its files are nowhere,
+# so a build that took it has no replays to copy.
+FINAL_REGISTERED_2013 = "final-registered-13131313"
+FINAL_RESULT_2013 = "final-result-13131313"
 
 # (id, display name, meta.run.seed of its final replays: the lowest seed the final scored; None
 # for a baseline), in the issue's order. #63 (a requirement change, the issue's scope comment,
@@ -260,6 +267,39 @@ def _fake_checkout(base: Path, *, replays: str) -> tuple[Path, Path]:
     ledger_path.parent.mkdir(parents=True)
     ledger_path.write_text(renamed, encoding="utf-8")
     return root, ledger_path
+
+
+def _with_a_2013_final(text: str, *, where: str) -> str:
+    """The ledger text with a synthetic 2013 final's two rows added (#73): a final-registered row of
+    seal 2013 at the 2012 final's checkpoints, with #72's rb_tuned_agc2020 among its baselines, and
+    its final-result over the 2013 splits (per_split nested by price regime, #72's shape; empty
+    placeholders, which no reader of 2012 opens). where="after" appends them, the ledger's real
+    order (2013 is spent after 2012); where="before" puts them just before the 2012 final-result
+    row, so the first final-result in file order is 2013's."""
+    lines = text.splitlines(keepends=True)
+    rows = [json.loads(line) for line in lines]
+    [registered_2012] = [r for r in rows if r["row_id"] == FINAL_REGISTERED]
+    stamp = {k: registered_2012[k] for k in ("schema_version", "at", "fingerprints")}
+    registered = {
+        **registered_2012,
+        "row_id": FINAL_REGISTERED_2013,
+        "issue": 72,
+        "baselines": [*registered_2012["baselines"], "rb_tuned_agc2020"],
+        "seal": 2013,
+    }
+    result = {
+        **stamp,
+        "row_id": FINAL_RESULT_2013,
+        "kind": "final-result",
+        "issue": 72,
+        "final-registered": FINAL_REGISTERED_2013,
+        "per_split": {split: {"sim": {}, "agc2020": {}} for split in ledger.SEALS[2013]},
+    }
+    new = [json.dumps(r, sort_keys=True) + "\n" for r in (registered, result)]
+    if where == "after":
+        return "".join(lines + new)
+    at = next(i for i, r in enumerate(rows) if r["row_id"] == FINAL_RESULT)
+    return "".join(lines[:at] + new + lines[at:])
 
 
 def _assert_refused_with_a_message(refused: pytest.ExceptionInfo) -> str:
@@ -558,18 +598,47 @@ def test_the_finals_dir_comes_from_its_final_registered_row(tmp_path):
         assert results[split]["note"] == TEST_NOTE.format(FAKE_RESULT)
 
 
+@pytest.mark.parametrize("where", ["after", "before"])
+def test_a_2013_final_result_in_the_ledger_leaves_the_build_on_2012s(built, tmp_path, where):
+    """Done when (#73 c): the committed ledger with a 2013 final added (_with_a_2013_final, after
+    the 2012 final-result or before it) builds exactly the site the committed ledger builds: the
+    same summary (final_result-aee23915, 168 replays) and the same files with the same bytes
+    (index.json and results.json naming the 2012 final-result, its replays). The 2013 final's files
+    are nowhere, so a build that took it can't finish."""
+    site_build = _module()
+    real_out, real_summary = built()
+    path = tmp_path / "ledger.jsonl"
+    text = REAL_LEDGER.read_text(encoding="utf-8")
+    path.write_text(_with_a_2013_final(text, where=where), encoding="utf-8")
+    out = tmp_path / "out"
+    try:
+        summary = site_build.build(out, ledger_path=path)
+    except (ValueError, SystemExit) as e:
+        pytest.fail(f"a 2013 final-result in the ledger stopped the 2012 site's build: {e!r}")
+    assert summary == real_summary
+    assert summary["final_result"] == FINAL_RESULT
+    on_disk = _files(out)
+    assert on_disk == _files(real_out)
+    assert [r for r in on_disk if (out / r).read_bytes() != (real_out / r).read_bytes()] == []
+
+
 # --- Refusals --------------------------------------------------------------------------------
 
 
-def test_a_ledger_without_a_final_result_row_is_refused(tmp_path):
-    """The real ledger minus its final-result line: SystemExit naming "final-result", and out is
-    not made."""
+@pytest.mark.parametrize("case", ["no-final-result", "only-a-2013-final-result"])
+def test_a_ledger_without_a_final_result_row_is_refused(tmp_path, case):
+    """The real ledger minus its 2012 final-result line (by row id: #73, a 2013 one may follow it),
+    alone or with a 2013 final added (#73: a final-result of another seal has no 2012 seasons):
+    SystemExit naming "final-result", and out is not made."""
     site_build = _module()
     lines = REAL_LEDGER.read_text(encoding="utf-8").splitlines(keepends=True)
-    kept = [line for line in lines if json.loads(line)["kind"] != "final-result"]
+    kept = [line for line in lines if json.loads(line)["row_id"] != FINAL_RESULT]
     assert len(kept) == len(lines) - 1
+    text = "".join(kept)
+    if case == "only-a-2013-final-result":
+        text = _with_a_2013_final(text, where="after")
     no_final = tmp_path / "ledger.jsonl"
-    no_final.write_text("".join(kept), encoding="utf-8")
+    no_final.write_text(text, encoding="utf-8")
     out = tmp_path / "out"
     with pytest.raises(SystemExit) as refused:
         site_build.build(out, root=ROOT, ledger_path=no_final)

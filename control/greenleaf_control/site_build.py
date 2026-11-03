@@ -134,14 +134,19 @@ def build(
     """Assemble the site in out; every refusal is a SystemExit before anything is made or written.
     Returns {"final_result", "replays", "files", "bytes"}: the final-result row id, the replays
     copied into out/data/final, and the count and total size of the files written."""
-    finals = ledger.rows("final-result", path=ledger_path)
+    existing = ledger.rows(path=ledger_path)
+    # The 2012 final: a final-result of another seal (2013's) has no 2012 seasons.
+    seals = {r["row_id"]: ledger.seal_of(r) for r in existing if r["kind"] == "final-registered"}
+    finals = [
+        r for r in existing if r["kind"] == "final-result" and seals[r["final-registered"]] == 2012
+    ]
     if not finals:
         raise SystemExit(
-            f"{ledger_path} has no final-result row: there are no recorded 2012 seasons to show"
+            f"{ledger_path} has no 2012 final-result row: there are no recorded 2012 seasons to"
+            " show"
         )
     [final] = finals
     _check_out(out, root, force)
-    existing = ledger.rows(path=ledger_path)
     registered = ledger._find(existing, final["final-registered"], "final-registered")
     replays = root / "control" / "results" / "final" / registered["row_id"] / "replays"
     analysis = root / "control" / "results" / "analysis"

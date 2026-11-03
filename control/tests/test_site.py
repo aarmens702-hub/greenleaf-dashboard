@@ -874,14 +874,20 @@ def test_site_final_result_row_is_read_from_index_json_not_typed():
     - app.js names final_result as a whole word, index.json's key (however it reads it:
       index.final_result, a destructuring, index["final_result"]);
     - neither app.js nor index.html contains a final-result row id, "final-result-" and 8 hex
-      digits. Non-vacuous: the ledger's one final-result row (only read) has that form, so typing
-      it fails.
+      digits. Non-vacuous: the ledger's 2012 final-result row (only read; #73: the one whose
+      final-registered row has ledger.seal_of(...) == 2012, as a 2013 one may follow it) has that
+      form, so typing it fails.
     That a test view shows "2012 test weather, scored once in the final" with the row id, and a
     validation view doesn't, is checked in Chrome (the issue's QA item). #49's app.js names
     neither."""
-    finals = [r["row_id"] for r in ledger.rows(kind="final-result", path=ledger.LEDGER)]
+    registered = {r["row_id"]: r for r in ledger.rows(kind="final-registered", path=ledger.LEDGER)}
+    finals = [
+        r["row_id"]
+        for r in ledger.rows(kind="final-result", path=ledger.LEDGER)
+        if ledger.seal_of(registered[r["final-registered"]]) == 2012
+    ]
     assert len(finals) == 1 and FINAL_RESULT_ID.fullmatch(finals[0]), (
-        f"the ledger's final-result rows are {finals}"
+        f"the ledger's 2012 final-result rows are {finals}"
     )
     app = SITE / "app.js"
     index = SITE / "index.html"

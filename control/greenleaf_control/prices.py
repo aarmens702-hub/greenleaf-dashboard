@@ -127,11 +127,15 @@ def load_seasons(*, ledger_path: Path = ledger.LEDGER) -> pd.DataFrame:
     scores.parquet rows of the labels site_build._validation_arms maps, and every row of the final's
     seasons.parquet (the three 2012 splits, random included). Reads; checks nothing."""
     existing = ledger.rows(path=ledger_path)
-    finals = [r for r in existing if r["kind"] == "final-result"]
+    # The 2012 final: a final-result of another seal (2013's) has no 2012 seasons.
+    seals = {r["row_id"]: ledger.seal_of(r) for r in existing if r["kind"] == "final-registered"}
+    finals = [
+        r for r in existing if r["kind"] == "final-result" and seals[r["final-registered"]] == 2012
+    ]
     if not finals:
         raise ValueError(
-            f"{ledger_path} has no final-result row: no recorded 2012 seasons to re-price, and no"
-            " final to map validation's labels to its arms"
+            f"{ledger_path} has no 2012 final-result row: no recorded 2012 seasons to re-price, and"
+            " no final to map validation's labels to its arms"
         )
     [final] = finals
     registered = ledger._find(existing, final["final-registered"], "final-registered")

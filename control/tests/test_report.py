@@ -84,6 +84,10 @@ defaults on the issue and its scope note):
 - summarize and figures run unchanged; the footer adds "2012 test weather, scored once", each
   figure's title (viz's title=) names the split and it, and summary.md's first line names the
   final's seasons.parquet, the final-result row and it. Validation's output is unchanged.
+- #73 (c): "the final-result row" is the 2012 one, the final-result whose final-registered row has
+  ledger.seal_of(...) == 2012, wherever it sits in the file: a 2013 final-result (#71's second
+  seal) before or after it changes nothing, and a ledger whose only final-result is 2013's keeps
+  the 2012 splits sealed.
 
 Offline: every ledger, run dir, parquet and output is under tmp_path; selection.RESULTS and
 evaluate.FINAL_RESULTS are patched to tmp_path in every test that loads (the real
@@ -1666,6 +1670,41 @@ def _final_world(
     return w
 
 
+def _add_a_2013_final(path: Path, w: dict, *, where: str) -> str:
+    """Add a 2013 final (#71's second seal) to _final_world's ledger at path, as raw rows (the
+    ledger's checks on a 2013 per_split are #72's): a final-registered row of seal 2013 at the 2012
+    final's checkpoints, with #72's rb_tuned_agc2020 among its baselines, and its final-result over
+    the 2013 splits (nested by price regime, empty placeholders). where="after" appends them, the
+    ledger's real order; where="before" puts them just before the 2012 final-result row, so the
+    first final-result in file order is 2013's. Its seasons.parquet is never written, so a report
+    that read it fails. Returns its final-result's row id."""
+    lines = path.read_text(encoding="utf-8").splitlines(keepends=True)
+    freg = w["freg"]
+    registered = {
+        **freg,
+        "row_id": "final-registered-13131313",
+        "issue": 72,
+        "baselines": [*freg["baselines"], "rb_tuned_agc2020"],
+        "seal": 2013,
+    }
+    result = {
+        **{k: freg[k] for k in ("schema_version", "at", "fingerprints")},
+        "row_id": "final-result-13131313",
+        "kind": "final-result",
+        "issue": 72,
+        "final-registered": registered["row_id"],
+        "per_split": {split: {"sim": {}, "agc2020": {}} for split in scenarios.SEALS[2013]},
+    }
+    new = [json.dumps(r, sort_keys=True) + "\n" for r in (registered, result)]
+    if where == "before":
+        at = next(i for i, line in enumerate(lines) if w["final_result"] in line)
+        lines[at:at] = new
+    else:
+        lines += new
+    path.write_text("".join(lines), encoding="utf-8")
+    return result["row_id"]
+
+
 def _read_spy(monkeypatch) -> list:
     """The path of every pd.read_parquet call, from now on (it still reads)."""
     reads = []
@@ -1697,9 +1736,12 @@ def _ran(report, argv: list[str], path: Path) -> None:
     assert code == 0
 
 
+@pytest.mark.parametrize(
+    "with_2013", [False, True], ids=["no-final-result", "only-a-2013-final-result"]
+)
 @pytest.mark.parametrize("split", list(scenarios.TEST))
 def test_a_test_split_is_refused_without_a_final_result_row_before_any_parquet_is_read(
-    split, tmp_path, monkeypatch, capsys
+    split, with_2013, tmp_path, monkeypatch, capsys
 ):
     """Rewritten by #53, which reverses A1a's "a test split is always refused (an argparse
     error)": a test split is now refused only while the ledger has no final-result row (PROTOCOL
@@ -1708,10 +1750,14 @@ def test_a_test_split_is_refused_without_a_final_result_row_before_any_parquet_i
     seasons.parquet is on disk, as between `evaluate --final` and `ledger final-result`.
     load_scores(<split>) is a ValueError naming the split and the seal; main --split <split>
     refuses naming both too. Neither reads a parquet (a spy on pd.read_parquet: not the final's
-    seasons.parquet, not validation's rb_tuned one), makes --out or writes anything."""
+    seasons.parquet, not validation's rb_tuned one), makes --out or writes anything.
+    #73: the same with a 2013 final added (_add_a_2013_final): a final-result of the 2013 seal
+    doesn't open the 2012 splits."""
     report, results = _report(monkeypatch, tmp_path)
     path = tmp_path / "ledger.jsonl"
-    _final_world(path, tmp_path, results, split, result=False)
+    w = _final_world(path, tmp_path, results, split, result=False)
+    if with_2013:
+        _add_a_2013_final(path, w, where="after")
     reads = _read_spy(monkeypatch)
     out = tmp_path / "analysis"
     before = _tree(tmp_path)
@@ -1807,6 +1853,31 @@ def test_a_test_split_with_a_final_result_reads_only_the_finals_seasons(
         assert scores[key].tolist() == [x[key] for x in want_seasons], key
     assert scores["viol_hours_total"].tolist() == [sum(x[v] for v in VIOL) for x in want_seasons]
     assert {Path(read).resolve() for read in reads} <= {w["seasons"].resolve()}, reads
+
+
+@pytest.mark.parametrize("where", ["after", "before"])
+def test_a_2012_split_reads_the_2012_final_with_a_2013_final_result_in_the_ledger(
+    where, tmp_path, monkeypatch
+):
+    """Done when (#73 c): _final_world's ledger for london_2012 with a 2013 final added
+    (_add_a_2013_final, after the 2012 final-result or before it): load_scores("london_2012")
+    gives exactly the 56 rows it gives without the 2013 rows, and reads only the 2012 final's
+    seasons.parquet (the 2013 final's is nowhere)."""
+    report, results = _report(monkeypatch, tmp_path)
+    split = "london_2012"
+    path = tmp_path / "ledger.jsonl"
+    w = _final_world(path, tmp_path, results, split)
+    alone = tmp_path / "alone.jsonl"
+    alone.write_text(path.read_text(encoding="utf-8"), encoding="utf-8")
+    want = _accepted(report, split, alone)
+    _add_a_2013_final(path, w, where=where)
+    reads = _read_spy(monkeypatch)
+
+    scores = _accepted(report, split, path)
+
+    assert len(want) == FINAL_ROWS
+    pd.testing.assert_frame_equal(scores, want)
+    assert {Path(read).resolve() for read in reads} == {w["seasons"].resolve()}, reads
 
 
 @pytest.mark.parametrize("split", list(scenarios.TEST))

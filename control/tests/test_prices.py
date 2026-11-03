@@ -16,8 +16,11 @@ The conventions pinned here (the scout's change map, with the orchestrator's def
   SEASON_COLUMNS. It reads and checks nothing: validation from
   control/results/analysis/validation/scores.parquet, only the 7 labels site_build._validation_arms
   maps (selected by label, never by arm), controller = the final's arm id; the 3 test splits from
-  control/results/final/<final-registered row>/seasons.parquet, found from the ledger's one
-  final-result row, random included. No final-result row: ValueError naming "final-result".
+  control/results/final/<final-registered row>/seasons.parquet, found from the ledger's 2012
+  final-result row, random included. No final-result row: ValueError naming "final-result". #73:
+  the 2012 final-result is the one whose final-registered row has ledger.seal_of(...) == 2012, so a
+  2013 final-result in the ledger (#71's second seal), before or after it, changes nothing, and a
+  ledger whose only final-result is 2013's is refused like one with none.
 - tables(seasons) -> {"regimes", "sweep", "crossovers"}: DataFrames with exactly REGIMES_COLUMNS,
   SWEEP_COLUMNS and CROSSOVER_COLUMNS, for the splits present in seasons (already checked, random
   dropped). A controller's matrix is runs by seed (NaN -> -1) x scenarios in scenarios.SPLITS order,
@@ -75,6 +78,11 @@ REAL_LEDGER = CONTROL / "ledger" / "ledger.jsonl"
 ANALYSIS = CONTROL / "results" / "analysis"
 VALIDATION_SCORES = ANALYSIS / "validation" / "scores.parquet"
 FINAL_SEASONS = CONTROL / "results" / "final" / "final-registered-4d0a4ba9" / "seasons.parquet"
+FINAL_RESULT = "final-result-aee23915"  # #45's, the 2012 seal's
+FINAL_REGISTERED = "final-registered-4d0a4ba9"
+# #73: a synthetic 2013 final (#71's second seal), under ids no real row has; its files are nowhere.
+FINAL_REGISTERED_2013 = "final-registered-13131313"
+FINAL_RESULT_2013 = "final-result-13131313"
 
 PHRASE = "exploratory, re-priced recorded seasons"
 COMMAND = "python -m greenleaf_control.prices"
@@ -192,6 +200,38 @@ def _tree(top: Path) -> dict[str, tuple[int, int, int]]:
                 st.st_mtime_ns,
             )
     return found
+
+
+def _with_a_2013_final(text: str, *, where: str) -> str:
+    """The ledger text with a synthetic 2013 final's two rows added (#73): a final-registered row of
+    seal 2013 at the 2012 final's checkpoints, with #72's rb_tuned_agc2020 among its baselines, and
+    its final-result over the 2013 splits (per_split nested by price regime, #72's shape; empty
+    placeholders). where="after" appends them, the ledger's real order; where="before" puts them
+    just before the 2012 final-result row, so the first final-result in file order is 2013's."""
+    lines = text.splitlines(keepends=True)
+    rows = [json.loads(line) for line in lines]
+    [registered_2012] = [r for r in rows if r["row_id"] == FINAL_REGISTERED]
+    stamp = {k: registered_2012[k] for k in ("schema_version", "at", "fingerprints")}
+    registered = {
+        **registered_2012,
+        "row_id": FINAL_REGISTERED_2013,
+        "issue": 72,
+        "baselines": [*registered_2012["baselines"], "rb_tuned_agc2020"],
+        "seal": 2013,
+    }
+    result = {
+        **stamp,
+        "row_id": FINAL_RESULT_2013,
+        "kind": "final-result",
+        "issue": 72,
+        "final-registered": FINAL_REGISTERED_2013,
+        "per_split": {split: {"sim": {}, "agc2020": {}} for split in scenarios.SEALS[2013]},
+    }
+    new = [json.dumps(r, sort_keys=True) + "\n" for r in (registered, result)]
+    if where == "after":
+        return "".join(lines + new)
+    at = next(i for i, r in enumerate(rows) if r["row_id"] == FINAL_RESULT)
+    return "".join(lines[:at] + new + lines[at:])
 
 
 def _one(frame: pd.DataFrame, **where) -> pd.Series:
@@ -551,6 +591,26 @@ def test_load_seasons_reads_every_final_season_random_included(split):
         assert _season_keys(mine[mine["controller"] == arm]) == want, arm
 
 
+@pytest.mark.parametrize("where", ["after", "before"])
+def test_load_seasons_reads_the_2012_final_with_a_2013_final_result_in_the_ledger(where, tmp_path):
+    """Done when (#73 c): with a 2013 final added to a copy of the committed ledger
+    (_with_a_2013_final, after the 2012 final-result or before it), load_seasons returns exactly
+    what it returns on the committed ledger: validation and the 2012 final's seasons
+    (final-registered-4d0a4ba9's seasons.parquet), never the 2013 final's (its files are
+    nowhere)."""
+    prices = _module()
+    path = tmp_path / "ledger.jsonl"
+    text = REAL_LEDGER.read_text(encoding="utf-8")
+    path.write_text(_with_a_2013_final(text, where=where), encoding="utf-8")
+    want = prices.load_seasons()
+    try:
+        got = prices.load_seasons(ledger_path=path)
+    except (ValueError, OSError) as e:
+        pytest.fail(f"a 2013 final-result in the ledger stopped load_seasons: {e!r}")
+    pd.testing.assert_frame_equal(got, want)
+    assert set(got["split"]) == set(SPLITS)
+
+
 # --- The hand-built tables ---------------------------------------------------------------------------
 
 
@@ -755,19 +815,32 @@ def test_an_invalid_kept_season_is_refused_before_anything_is_written(tmp_path, 
     assert _tree(tmp_path) == before
 
 
-def test_a_ledger_without_a_final_result_row_is_refused(tmp_path):
-    """The committed ledger minus its final-result line: no final to read the 2012 seasons (or map
-    validation's labels) from. main raises ValueError naming "final-result"; out is never made."""
+@pytest.mark.parametrize("case", ["no-final-result", "only-a-2013-final-result"])
+def test_a_ledger_without_a_final_result_row_is_refused(tmp_path, case):
+    """The committed ledger minus its 2012 final-result line (by row id: #73, a 2013 one may follow
+    it), alone or with a 2013 final added (#73: a final-result of another seal has no 2012
+    seasons): no final to read the 2012 seasons (or map validation's labels) from. main raises
+    ValueError naming "final-result" (not an error reading the 2013 final's missing files); out is
+    never made."""
     prices = _module()
     lines = REAL_LEDGER.read_text(encoding="utf-8").splitlines(keepends=True)
-    kept = [line for line in lines if json.loads(line)["kind"] != "final-result"]
+    kept = [line for line in lines if json.loads(line)["row_id"] != FINAL_RESULT]
     assert len(kept) == len(lines) - 1
+    text = "".join(kept)
+    if case == "only-a-2013-final-result":
+        text = _with_a_2013_final(text, where="after")
     no_final = tmp_path / "ledger.jsonl"
-    no_final.write_text("".join(kept), encoding="utf-8")
+    no_final.write_text(text, encoding="utf-8")
     out = tmp_path / "out"
-    with pytest.raises(ValueError) as refused:
+    try:
         prices.main(["--out", str(out)], ledger_path=no_final)
-    assert "final-result" in str(refused.value)
+    except ValueError as e:
+        said = str(e)
+    except OSError as e:
+        pytest.fail(f"main read a final's files instead of refusing: {e!r}")
+    else:
+        pytest.fail("main ran without a 2012 final-result row")
+    assert "final-result" in said, said
     assert not out.exists()
 
 
