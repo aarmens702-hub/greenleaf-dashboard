@@ -1,0 +1,28 @@
+{
+  "per_arm": {
+    "rb_tuned_agc2020": {
+      "ci_high": 2820.476948187181,
+      "ci_low": 2820.476948187181,
+      "guards": {
+        "viol_hours_co2": {
+          "ci_high": 8.0,
+          "ci_low": 8.0,
+          "iqm": 8.0
+        },
+        "viol_hours_rh": {
+          "ci_high": 272.25,
+          "ci_low": 272.25,
+          "iqm": 272.25
+        },
+        "viol_hours_temp": {
+          "ci_high": 43.5,
+          "ci_low": 43.5,
+          "iqm": 43.5
+        }
+      },
+      "invalid_episodes": 0,
+      "iqm": 2820.476948187181
+    }
+  },
+  "selected": {}
+}
