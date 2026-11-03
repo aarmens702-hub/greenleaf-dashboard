@@ -80,12 +80,15 @@ RESULT_KEYS = (
     "paper_reward_sum",
 )
 # The final's test splits and the baselines it may score, written out like RESULT_KEYS; tests pin
-# them to tuple(scenarios.TEST) and envs.BASELINES.
+# them to tuple(scenarios.TEST) and to envs.BASELINES plus rb_tuned_agc2020 (evaluate.BASELINES).
 TEST_SPLITS = ("amsterdam_2012", "london_2012", "abbotsford_2012")
 # Each test year is its own seal, {seal: its test splits}, written out the same way; a test pins it
 # to scenarios.SEALS. A final-registered row's optional int seal names one (absent: 2012).
 SEALS = {2012: TEST_SPLITS, 2013: ("amsterdam_2013", "london_2013", "abbotsford_2013")}
-FINAL_BASELINES = ("zero_controls", "random", "rb_default", "rb_tuned")
+FINAL_BASELINES = ("zero_controls", "random", "rb_default", "rb_tuned", "rb_tuned_agc2020")
+# The price regimes a 2013 final grades each season at (PROTOCOL §8), written out the same way; a
+# test pins it to tuple(metrics.PRICE_REGIMES). A 2013 per_split is {split: {regime: {arm: entry}}}.
+PRICE_REGIMES = ("sim", "agc2020")
 FINAL_ARM_KEYS = {
     "iqm",
     "ci_low",
@@ -310,10 +313,20 @@ def _check(row: dict, path: Path) -> str:
         _need_keys("per_split", row["per_split"], set(SEALS[seal]))
         registered = final_arms(parent, existing)
         names = set(registered) | set(parent["baselines"])
-        for split, arms in row["per_split"].items():
-            _need_keys(f"per_split[{split!r}]", arms, names)
+        # A 2012 split holds its arms; a later seal's holds each price regime, and each its arms.
+        graded = {f"per_split[{split!r}]": arms for split, arms in row["per_split"].items()}
+        if seal != 2012:
+            for at, by_regime in graded.items():
+                _need_keys(at, by_regime, set(PRICE_REGIMES))
+            graded = {
+                f"{at}[{regime!r}]": arms
+                for at, by_regime in graded.items()
+                for regime, arms in by_regime.items()
+            }
+        for at, arms in graded.items():
+            _need_keys(at, arms, names)
             for arm, numbers in arms.items():
-                where = f"per_split[{split!r}][{arm!r}]"
+                where = f"{at}[{arm!r}]"
                 _need_keys(where, numbers, FINAL_ARM_KEYS)
                 if (numbers["prob_improvement"] is None) != (arm == "rb_tuned"):
                     raise ValueError(

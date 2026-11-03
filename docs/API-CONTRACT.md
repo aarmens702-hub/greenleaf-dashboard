@@ -141,8 +141,8 @@ Paths are relative to `control/`. Scenario dicts are `{"location": str, "growth_
   | `run-end` | `run`, `status`, `wall_s`, `timesteps`, `solver_failures`, `cost_usd`, `diagnostics` ({min_approx_kl, final_entropy, final_explained_variance}) |
   | `result` | `registered`, `per_arm` ({iqm, ci_low, ci_high (null when no run was scored), guards ({guard: {iqm, ci_low, ci_high}}), crashed, invalid_episodes, spend_usd (the arm's run-ends' cost_usd, null as 0)}), `selected` ({run row_id → `"<steps>"` \| `"final"`}, learning runs only) |
   | `decision` | `result`, `decision` (adopted or dropped), `note` |
-  | `final-registered` | `checkpoints` ({run row_id → `"<steps>"` \| `"final"`}; each pair is exactly a value of some `result` row's `selected`; a learning arm is named by its run rows' `arm` and comes from one registration; a learning arm's name is not one of the row's `baselines`), `baselines` (a list drawn from `FINAL_BASELINES`, no duplicates, with `rb_default` and `rb_tuned`), `approved_by`, `approved_at`; optional `seal` (an int key of `SEALS`, written only when given; absent means 2012) |
-  | `final-result` | `final-registered`, `per_split` ({split: {arm: {iqm, ci_low, ci_high, guards ({g: {iqm, ci_low, ci_high}}, g in F1a-3's `FINAL_GUARDS`), invalid_episodes, prob_improvement, scored}}}). Never carries `seal`: its seal is its final-registered row's. split is exactly `SEALS[<that seal>]` (`TEST_SPLITS` for 2012); arm is exactly `final_arms` plus `baselines`; iqm and ci_* are on the primary `profit_eur_m2`; prob_improvement is P(arm > rb_tuned) on the primary, null for rb_tuned; scored is {run row_id → checkpoint} as registered, `{}` for a baseline |
+  | `final-registered` | `checkpoints` ({run row_id → `"<steps>"` \| `"final"`}; each pair is exactly a value of some `result` row's `selected`; a learning arm is named by its run rows' `arm` and comes from one registration; a learning arm's name is not one of the row's `baselines`), `baselines` (a list drawn from `FINAL_BASELINES`, no duplicates, with `rb_default` and `rb_tuned`; `rb_tuned_agc2020` allowed, not required), `approved_by`, `approved_at`; optional `seal` (an int key of `SEALS`, written only when given; absent means 2012) |
+  | `final-result` | `final-registered`, `per_split` ({split: {arm: {iqm, ci_low, ci_high, guards ({g: {iqm, ci_low, ci_high}}, g in F1a-3's `FINAL_GUARDS`), invalid_episodes, prob_improvement, scored}}}). Never carries `seal`: its seal is its final-registered row's. split is exactly `SEALS[<that seal>]` (`TEST_SPLITS` for 2012). A 2012 split holds its arms (the shape above); a 2013 split holds each price regime, `{split: {regime: {arm: {...}}}}`, regime exactly `PRICE_REGIMES`, each regime's entries computed on its own rows (PROTOCOL §8). In every (split) or (split, regime), arm is exactly `final_arms` plus `baselines`; iqm and ci_* are on the primary `profit_eur_m2`; prob_improvement is P(arm > rb_tuned) on the primary, null for rb_tuned; scored is {run row_id → checkpoint} as registered, `{}` for a baseline |
 
 - **CLI** (`python -m greenleaf_control.ledger`):
   - `register ... [--dry]`
@@ -153,8 +153,10 @@ Paths are relative to `control/`. Scenario dicts are `{"location": str, "growth_
     int) passes `seal=` through the same checks; without it the row is 2012's
   - `final-result --final-registered <row> --numbers <file>`: `<file>` is exactly `{per_split}` as F1a-3's `evaluate --final` will write it; prints the row id
 - **Names:** `TEST_SPLITS` and `FINAL_BASELINES` (written out; tests pin them to `tuple(scenarios.TEST)` and
-  `envs.BASELINES`), `SEALS` (`{2012: TEST_SPLITS, 2013: ("amsterdam_2013", "london_2013", "abbotsford_2013")}`,
-  written out; a test pins it to `scenarios.SEALS`), `FINAL_ARM_KEYS`, `final_arms(final_registered: dict, rows:
+  `(*envs.BASELINES, "rb_tuned_agc2020")`, evaluate's `BASELINES`), `SEALS` (`{2012: TEST_SPLITS, 2013:
+  ("amsterdam_2013", "london_2013", "abbotsford_2013")}`, written out; a test pins it to `scenarios.SEALS`),
+  `PRICE_REGIMES = ("sim", "agc2020")` (written out; a test pins it to `tuple(metrics.PRICE_REGIMES)`; a 2013
+  split's keys in `per_split`), `FINAL_ARM_KEYS`, `final_arms(final_registered: dict, rows:
   list[dict]) -> dict[str, dict[str, str]]` (arm → {run row_id → checkpoint}), `seal_of(final_registered: dict) ->
   int` (its `seal`, or 2012), `seal_spent(rows: list[dict], seal: int) -> bool` (a `final-result` under one of the
   seal's rows), and `final_register(*, issue, checkpoints, baselines, approved_by, seal=None, path=LEDGER)`.
@@ -164,8 +166,10 @@ Paths are relative to `control/`. Scenario dicts are `{"location": str, "growth_
   that isn't an int key of `SEALS` (a ValueError naming seal; on every append), its seal spent, empty `checkpoints`,
   a pair no result's `selected` holds, one arm from two registrations, bad `baselines`, and a learning arm named like
   one of its baselines. `final-result` refuses a second final-result of its seal first, then a `per_split` whose
-  splits (its seal's), arms or entry keys aren't the above, a `prob_improvement` that isn't null exactly for
-  `rb_tuned`, and a `scored` that differs from the registration (guard names are checked in F1a-3 via `FINAL_GUARDS`,
+  splits (its seal's), a 2013 split's regimes (exactly `PRICE_REGIMES`: a flat 2013 split, a missing or an extra
+  regime; a 2012 split nested by regime is refused too), arms or entry keys aren't the above, a `prob_improvement`
+  that isn't null exactly for `rb_tuned`, and a `scored` that differs from the registration, each checked in every
+  (split) or (split, regime) and named in the ValueError (guard names are checked in F1a-3 via `FINAL_GUARDS`,
   not here). Seals are independent: spending one leaves the others as they were.
   `check_locks` holds a result's and a final-result's fingerprints to their parent's, and counts final-results per
   seal (the parent's; absent 2012): an unknown seal, a `per_split` not keyed by exactly that seal's splits, or a
@@ -249,11 +253,13 @@ Paths are relative to `control/`. Scenario dicts are `{"location": str, "growth_
     rows ("the seal is spent"); (3) a row that isn't its seal's newest (names the newer); (4)
     `manifest.fingerprints()` unequal to the row's (names the keys); (5) a `FINAL_RESULTS` holding anything but the
     dirs of spent seals' final-registered rows ("`<FINAL_RESULTS>` is not empty"; an unspent seal's own dir is an
-    interrupted final); (6) a missing weather file of the seal's scenarios (`scenarios.require_weather`'s
-    `FileNotFoundError`, naming the path); (7) for any run in `ledger.final_arms(row)`: a run dir without
-    `manifest.json`, `ckpt_<c>.zip`, `vecnorm_<c>.pkl` or `selected.json`, or a `selected.json` whose `checkpoint`
-    isn't `<c>` (names the run's row id, arm, seed and dir); (8) a dirty tree (`manifest.code_stamp(smoke=False)`
-    raises). The seal's splits are `scenarios.SEALS[seal]`, read at call time.
+    interrupted final); (6) a registered `rb_*` baseline whose `rule_based.CONFIGS / "rule_based_<name>.yml"` (read
+    at call time) isn't a file (names each missing file's path); (7) a missing weather file of the seal's scenarios
+    (`scenarios.require_weather`'s `FileNotFoundError`, naming the path); (8) for any run in
+    `ledger.final_arms(row)`: a run dir without `manifest.json`, `ckpt_<c>.zip`, `vecnorm_<c>.pkl` or
+    `selected.json`, or a `selected.json` whose `checkpoint` isn't `<c>` (names the run's row id, arm, seed and dir);
+    (9) a dirty tree (`manifest.code_stamp(smoke=False)` raises). The seal's splits are `scenarios.SEALS[seal]`,
+    read at call time.
   - **Scores**, for each of the seal's splits in `scenarios.SEALS[seal]` order and each scenario in split order,
     60-day seasons:
     each learning arm (by name), its runs by ascending seed, with `run_policy(run_dir, c, s, 60, allow_test=True)`;
@@ -261,6 +267,13 @@ Paths are relative to `control/`. Scenario dicts are `{"location": str, "growth_
     Traced seasons, each arm's lowest registered seed and every baseline, are scored with `record_steps=True,
     return_trace=True` (`zero_controls` and `random`: the frame and trace from `run_baseline`'s infos); each
     season is played once.
+  - **A 2013 final grades each play at both regimes** (PROTOCOL §8): every season is played once with
+    `return_trace=True`, a run at its manifest's `config.get("price_regime", "sim")` (as `run_policy` plays it) and
+    a baseline at `sim` (`rb_tuned_agc2020` plays `load_rb_params("tuned_agc2020")`), then graded at each of
+    `metrics.PRICE_REGIMES` in order: at the play's regime the row is the play's own result; at the other it is
+    `_regraded(result, trace, regime, season_steps)`, `metrics.episode_metrics(states, controls, params,
+    season_steps=season_length × 96, prices=metrics.PRICE_REGIMES[regime])` plus the play's own `paper_reward_sum`
+    (a play quantity, the reward at the play's regime, so equal in both rows).
   - **Writes `FINAL_RESULTS/<row>/` once** (`mkdir(exist_ok=False)`, each file opened exclusively): `stamp.json`
     (the code stamp) before the first season; `seasons.parquet`, one row per split × scenario × arm × run, identity
     columns `arm, run, seed, checkpoint` (null for a baseline), `split, location, growth_year, start_day,
@@ -269,23 +282,30 @@ Paths are relative to `control/`. Scenario dicts are `{"location": str, "growth_
     the runs × scenarios array (a baseline is one run) gives `iqm, ci_low, ci_high` on `FINAL_PRIMARY` and `guards`
     on each of `FINAL_GUARDS`; `invalid_episodes` counts seasons with `valid == False`; `prob_improvement` is
     `stats.prob_improvement(arm, rb_tuned)` on the primary, null for `rb_tuned`; `scored` is `final_arms`' (`{}` for
-    a baseline).
+    a baseline). A 2013 final's `seasons.parquet` has a `price_regime` column after `season_length` and two rows per
+    season, one per regime in `metrics.PRICE_REGIMES` order (one per split × scenario × arm × run × regime), and its
+    `per_split` is `{split: {regime: {arm: ...}}}`, each regime's entries computed as above on that regime's rows
+    alone (`prob_improvement` against `rb_tuned` at the same regime).
   - **Then `replays/`** (after `per_split.json`, before the `next:` line): one
     `<prefix>_<location>_<growth_year>_<start_day>.json` per traced season, `<prefix>` the arm's name or the
-    baseline's, each `export_replay.export(...)` of its scored season (so `totals` is its `seasons.parquet` row),
-    written exclusively, compact, no NaN, under 250 KB. `meta.controller` is `<prefix>`; the stamp is
-    `{commit, dirty}` of the one `code_stamp(smoke=False)` plus `gl_gym`; `meta.run` is export's
-    {id, registered, result, arm, seed, checkpoint, commit} for the traced run (`result` the result row selecting
+    baseline's, each `export_replay.export(..., prices=metrics.PRICE_REGIMES[<its play's regime>])` of its scored
+    season (so `totals` is its `seasons.parquet` row, and its hourly counters are graded at the same regime; a
+    baseline plays at `sim`, a run at its manifest's), written exclusively, compact, no NaN, under 250 KB.
+    `meta.controller` is `<prefix>`; the stamp is `{commit, dirty}` of the one `code_stamp(smoke=False)` plus
+    `gl_gym`; `meta.run` is export's {id, registered, result, arm, seed, checkpoint, commit} for the traced run (`result` the result row selecting
     its checkpoint), `None` for a baseline; `meta.note` is `"registered final <row>: <arm> seed <k> at checkpoint
-    <c>"` or `"registered final <row>: <baseline>"`. The stamp and each `meta.run` are built before
+    <c>"` or `"registered final <row>: <baseline>"`. A 2013 final writes one replay per traced play (not per graded
+    row): its note ends `", played at <regime> prices"`, the play's regime, and its `totals` is the play's own
+    result, its `seasons.parquet` row at that regime. The stamp and each `meta.run` are built before
     `FINAL_RESULTS/<row>/` is made.
   - **A short traced season** (its frame isn't `season_length × 96` steps, e.g. a solver failure ended it) gets no
     replay; every full-length one is still written. After the replays, `--final` raises one `RuntimeError` naming
     each short season (`<prefix> <split> day <start_day>: <n> of <N> steps`), saying `seasons.parquet` and
     `per_split.json` are complete, and giving the `final-result --final-registered <row> --numbers
     <per_split.json>` command in place of the `next:` line.
-  - **Prints** one line per split × arm (primary and each guard as `iqm [lo, hi]`, `P(improvement)`, `n_runs`,
-    `invalid_episodes`, and `n<5: no claim` for a learning arm under 5 runs), then last
+  - **Prints** one line per split × arm, a 2013 final's per split × regime × arm naming its regime after the split
+    (primary and each guard as `iqm [lo, hi]`, `P(improvement)`, `n_runs`, `invalid_episodes`, and `n<5: no claim`
+    for a learning arm under 5 runs), then last
     `next: python -m greenleaf_control.ledger final-result --final-registered <row> --numbers <per_split.json>`.
   - **Writes no ledger row.** Every `allow_test=True` in evaluate is inside `_final`, this path.
 - **Names:** `FINAL_RESULTS` (`control/results/final/`), `FINAL_PRIMARY = "profit_eur_m2"`, `FINAL_GUARDS =
@@ -297,7 +317,8 @@ Paths are relative to `control/`. Scenario dicts are `{"location": str, "growth_
     step's info values (reward-side diagnostics, not metrics).
 
 ## `greenleaf_control.export_replay` (D2, for the demo site)
-- `export(frame, result, states, controls, params, *, controller, scenario, stamp, split, run) -> dict`:
+- `export(frame, result, states, controls, params, *, controller, scenario, stamp, split, run,
+  prices=metrics.PRICES) -> dict`:
   - `{meta, hourly, totals}`.
   - `meta` = {controller, scenario, split, run, commit, dirty, gl_gym, note, bounds, units}:
     - `split` is the split's name; `run` is `None` for a baseline, and for a run dir {id, registered, result, arm,
@@ -309,7 +330,8 @@ Paths are relative to `control/`. Scenario dicts are `{"location": str, "growth_
     - t_hour;
     - co2/temp/rh at the end of each hour (frame row 4h+3, 3 significant digits);
     - the six u_* as the hour's mean (3 decimals);
-    - profit and viol_co2/temp/rh as metrics on the prefix to that hour (4 decimals).
+    - profit and viol_co2/temp/rh as metrics on the prefix to that hour (4 decimals), profit at `prices` (pass the
+      regime `result` was graded at, so the last hour's profit is the season's).
   - `totals` = the result exactly.
 - CLI `--controller {zero_controls|random|rb_default|rb_tuned|<run_dir>} --split ... --out <dir> [--final ROW]`,
   `main(argv=None, *, ledger_path=ledger.LEDGER)` as `selection.main`:

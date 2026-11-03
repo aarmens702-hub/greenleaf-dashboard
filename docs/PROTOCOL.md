@@ -1,6 +1,6 @@
 # Evaluation protocol (core)
 
-**Version 4, 2026-11-03.** Each test year is its own seal (§8): TEST (2012) stays spent and untouched, and TEST_2013 (§2), three NASA POWER 2013 sites, is sealed the same way and finalized once; spending one seal opens no other. A 2013 final grades as the 2012 final did. Version 3 (2026-11-02): prices are a setting, the price regime (§1): `sim`, the regime of every result before v3, or `agc2020`. A season's profit and `paper_return` are graded at one regime and no comparison mixes regimes; a recorded season may be re-graded at another regime, labelled 're-priced' and exploratory unless registered before it was graded (§4). The rules may be tuned per regime (§3). Version 2 (2026-10-30): after E5's pinned λ_co2, a zero-budget constraint in `residual_lag` keeps a fixed multiplier of 1 (§3), and §5 checks budgets only where nonzero. This file decides how every GreenLeaf 2.0 result is scored, so it is a scorer file:
+**Version 4, 2026-11-03.** Each test year is its own seal (§8): TEST (2012) stays spent and untouched, and TEST_2013 (§2), three NASA POWER 2013 sites, is sealed the same way and finalized once; spending one seal opens no other. A 2013 final plays each season once and grades it at both price regimes, `sim` and `agc2020`, with every comparison inside one regime's rows (§8); the 2012 final's grading is unchanged. Version 3 (2026-11-02): prices are a setting, the price regime (§1): `sim`, the regime of every result before v3, or `agc2020`. A season's profit and `paper_return` are graded at one regime and no comparison mixes regimes; a recorded season may be re-graded at another regime, labelled 're-priced' and exploratory unless registered before it was graded (§4). The rules may be tuned per regime (§3). Version 2 (2026-10-30): after E5's pinned λ_co2, a zero-budget constraint in `residual_lag` keeps a fixed multiplier of 1 (§3), and §5 checks budgets only where nonzero. This file decides how every GreenLeaf 2.0 result is scored, so it is a scorer file:
 - changing it needs Aarmen's yes;
 - its hash stamps every ledger row, so results recorded under an older version stop being comparable.
 
@@ -89,7 +89,9 @@ Per episode:
 - **One regime per comparison:** a season is graded at one price regime (§1), and no comparison mixes regimes. A
   registration's arms share one, and its baselines are graded at it. A controller's trajectory does not depend on
   prices (only a learner's reward does), so a recorded season may be re-graded at another regime; a re-graded result
-  is labelled 're-priced' and is exploratory unless it was registered before it was graded.
+  is labelled 're-priced' and is exploratory unless it was registered before it was graded. A 2013 final grades
+  every season at both regimes, as registered here before it runs (§8); each of its comparisons uses one regime's
+  rows.
 
 ## 5. Training, checkpoints, selection
 - **Checkpoints:** every 250,000 steps and at the end, each with its frozen VecNormalize stats.
@@ -158,6 +160,13 @@ Per episode:
 - **Once:** each seal's final runs once. A `final-result` row under one of the seal's rows consumes that seal; the
   code and `check_locks.py` refuse a second for it. Spending one seal opens no other: 2012 stays spent whatever
   2013 does, and spending 2013 leaves 2012 as it was.
+- **A 2013 final grades at both regimes:** it plays each (run or baseline, scenario) once, a run at its manifest's
+  `price_regime` and a baseline at `sim` (the rules never see a price), and grades that one trajectory at `sim` and
+  at `agc2020` (§1, §4): the row at the play's regime is the play's own result, the other its raw trace graded at the
+  other regime's prices. `paper_reward_sum` stays the play's own, the reward at the play's regime. Each split's
+  numbers are kept per regime, and every statistic and comparison (each arm against `rb_tuned`) uses one regime's
+  rows alone, so no comparison mixes regimes (§4). A 2013 row may also list `rb_tuned_agc2020`, the rules tuned at
+  `agc2020` (§3), scored like the other baselines. The 2012 final grades each season once, at its play's regime.
 - **What is not sealed:** loading the 2012 or 2013 weather to check an env resets, and hashing or format-checking
   those files, is not scoring and is allowed in tests. Nothing else may touch a seal's scenarios.
 

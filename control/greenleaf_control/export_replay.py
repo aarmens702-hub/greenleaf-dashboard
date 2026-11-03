@@ -34,16 +34,30 @@ UNITS = {"co2": "ppm", "temp": "°C", "rh": "%", "profit": "€/m²", "hours": "
 
 
 def export(
-    frame, result, states, controls, params, *, controller, scenario, stamp, split, run
+    frame,
+    result,
+    states,
+    controls,
+    params,
+    *,
+    controller,
+    scenario,
+    stamp,
+    split,
+    run,
+    prices=metrics.PRICES,
 ) -> dict:
     """The site's payload for one season: evaluate's per-step frame and result, and the season's
     raw states (T + 1, nx), controls (T, 6) and model params for the running counters. split is the
-    split's name; run is a run dir's provenance from _registered_run, or None for a baseline."""
+    split's name; run is a run dir's provenance from _registered_run, or None for a baseline.
+    prices grades the running profit; pass the regime result was graded at."""
     n_hours = len(frame) // 4
     end_of_hour = frame.iloc[3::4]
     means = frame[U_COLS].to_numpy(dtype=np.float64).reshape(n_hours, 4, len(U_COLS)).mean(axis=1)
     prefixes = [
-        metrics.episode_metrics(states[: k + 1], controls[:k], params, season_steps=k)
+        metrics.episode_metrics(
+            states[: k + 1], controls[:k], params, season_steps=k, prices=prices
+        )
         for k in range(4, 4 * n_hours + 1, 4)
     ]
     hourly = {

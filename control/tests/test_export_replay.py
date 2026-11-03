@@ -1067,7 +1067,8 @@ def test_cli_runs_as_a_module_and_lists_its_flags_and_every_split(tmp_path):
 
 def test_signatures_match_the_design_and_no_test_wrote_the_real_ledger_runs_or_results():
     """Done when: export(frame, result, states, controls, params, *, controller, scenario, stamp,
-    split, run) and main(argv=None, *, ledger_path=ledger.LEDGER), as selection.main.
+    split, run, prices=metrics.PRICES) and main(argv=None, *, ledger_path=ledger.LEDGER), as
+    selection.main.
 
     This test runs last in the module and checks the real ledger's size and mtime, and the
     listings of control/runs/ and control/results/, are as they were when the module was
@@ -1078,8 +1079,9 @@ def test_signatures_match_the_design_and_no_test_wrote_the_real_ledger_runs_or_r
     positional = [n for n, p in export.items() if p.kind is p.POSITIONAL_OR_KEYWORD]
     keyword = [n for n, p in export.items() if p.kind is p.KEYWORD_ONLY]
     assert positional == ["frame", "result", "states", "controls", "params"]
-    assert keyword == ["controller", "scenario", "stamp", "split", "run"]
-    assert len(export) == 10
+    assert keyword == ["controller", "scenario", "stamp", "split", "run", "prices"]
+    assert len(export) == 11
+    assert export["prices"].default is metrics.PRICES
     main = inspect.signature(export_replay.main).parameters
     assert list(main) == ["argv", "ledger_path"]
     assert main["argv"].default is None

@@ -6,6 +6,11 @@ which no test may write; the last test in this module checks that.
 Issue #71 makes each test year its own seal: a final-registered row may carry an int seal (absent
 means 2012, as every row before #71), each seal is spent once by a final-result under one of its
 final-registered rows, and a final-result's per_split holds exactly its seal's splits.
+
+Issue #72 grades the 2013 final at both price regimes: a 2013 final-result's per_split is {split:
+{regime: {arm: entry}}}, each split keyed by exactly ledger.PRICE_REGIMES ("sim", "agc2020"), the
+arm checks run per (split, regime), and a flat 2013 per_split (#71's shape) is refused. The 2012
+per_split stays flat. A final may register rb_tuned_agc2020 (the agc2020 tune's rules) as a baseline.
 """
 
 import copy
@@ -96,6 +101,9 @@ BASELINES = ("rb_default", "rb_tuned")
 # the same way and pinned below.
 SPLITS_2013 = ("amsterdam_2013", "london_2013", "abbotsford_2013")
 SEALS = {2012: SPLITS, 2013: SPLITS_2013}
+# Issue #72: the price regimes a 2013 split is graded at (metrics.PRICE_REGIMES' keys, in order),
+# written out the same way and pinned below.
+REGIMES = ("sim", "agc2020")
 # The CLI's register arguments, and the row fields they must parse to.
 CLI_ARMS = [
     {"name": "a", "method": "ppo", "config": {"learning_rate": 0.0003}},
@@ -203,12 +211,19 @@ def _entry(arm: str, scored: dict) -> dict:
     }
 
 
-def _per_split(scored: dict, baselines=BASELINES, splits=SPLITS) -> dict:
+def _per_split(scored: dict, baselines=BASELINES, splits=SPLITS, regimes=None) -> dict:
     """A final-result's per_split: each test split (the 2012 seal's unless splits says otherwise)
     holds every learning arm, scored at its registered checkpoints ({arm: {run row_id:
-    checkpoint}}), and every baseline, scored at none."""
+    checkpoint}}), and every baseline, scored at none. With regimes (#72, a 2013 final), each split
+    holds each regime, and each regime those arms."""
     arms = {**scored, **{name: {} for name in baselines}}
-    return {split: {arm: _entry(arm, at) for arm, at in arms.items()} for split in splits}
+
+    def graded() -> dict:
+        return {arm: _entry(arm, at) for arm, at in arms.items()}
+
+    if regimes is None:
+        return {split: graded() for split in splits}
+    return {split: {regime: graded() for regime in regimes} for split in splits}
 
 
 def _experiment(ledger, path) -> dict:
@@ -241,11 +256,11 @@ def _chain(ledger, path, *, final_result=True) -> dict:
 
 def _spend_2013(ledger, path, checkpoints: dict) -> tuple[dict, dict]:
     """#71: register issue 71's seal-2013 final of arm a at checkpoints and spend it with a 2013
-    per_split; return (final-registered, final-result)."""
+    per_split, nested by price regime (#72); return (final-registered, final-result)."""
     freg = _final_register(ledger, path, checkpoints, issue=71, seal=2013)
     fres = ledger.final_result(
         final_registered=freg["row_id"],
-        per_split=_per_split({"a": checkpoints}, splits=SPLITS_2013),
+        per_split=_per_split({"a": checkpoints}, splits=SPLITS_2013, regimes=REGIMES),
         path=path,
     )
     return freg, fres
@@ -1249,13 +1264,14 @@ def test_final_result_refuses_prob_improvement_unless_null_exactly_for_rb_tuned(
 
 def test_final_names_are_pinned_to_scenarios_and_envs():
     """The ledger writes these out to stay stdlib-only, so they are pinned here: TEST_SPLITS is
-    scenarios.TEST's keys in order, FINAL_BASELINES is envs.BASELINES, and FINAL_ARM_KEYS is the
+    scenarios.TEST's keys in order, FINAL_BASELINES is envs.BASELINES plus rb_tuned_agc2020 (#72:
+    evaluate's BASELINES, the agc2020 tune's rules a 2013 final grades), and FINAL_ARM_KEYS is the
     contract's per-split arm entry. This module's SPLITS copy is pinned too."""
     import greenleaf_control.ledger as ledger
     from greenleaf_control import envs, scenarios
 
     assert ledger.TEST_SPLITS == tuple(scenarios.TEST)
-    assert ledger.FINAL_BASELINES == envs.BASELINES
+    assert ledger.FINAL_BASELINES == (*envs.BASELINES, "rb_tuned_agc2020")
     assert ledger.FINAL_ARM_KEYS == {
         "iqm",
         "ci_low",
@@ -1323,6 +1339,7 @@ def test_a_2013_final_registers_and_records_once_2012_is_spent(tmp_path):
     assert ledger.seal_of(freg) == 2013
     assert set(fres) == BASE_FIELDS | KIND_FIELDS["final-result"]
     assert list(fres["per_split"]) == list(SPLITS_2013)
+    assert all(set(by_regime) == set(REGIMES) for by_regime in fres["per_split"].values())
     assert path.read_bytes() == before + _line(freg) + _line(fres)
     rows = ledger.rows(path=path)
     assert ledger.seal_spent(rows, 2012) is True
@@ -1390,25 +1407,26 @@ def test_a_final_results_per_split_holds_exactly_its_seals_splits(tmp_path, seal
     """per_split is keyed by exactly the seal's splits (ledger.SEALS[seal]), the seal its
     final-registered row's (absent: 2012). A 2013 final's per_split of the 2012 splits, or of the
     2013 splits plus london_2012, and a 2012 final's of the 2013 splits raise ValueError naming the
-    split at fault, the file byte-identical; its own seal's splits are then accepted. (Flat
-    per_split here; #72 nests a 2013 split by price regime.)"""
+    split at fault, the file byte-identical; its own seal's splits are then accepted. (#72: a 2013
+    final's per_split, wrong or right, nests each split by price regime; a 2012 one stays flat.)"""
     import greenleaf_control.ledger as ledger
 
     path = tmp_path / "ledger.jsonl"
     checkpoints = _experiment(ledger, path)["result"]["selected"]
     freg = _final_register(ledger, path, checkpoints, **({"seal": 2013} if seal == 2013 else {}))
+    regimes = REGIMES if seal == 2013 else None
     before = path.read_bytes()
 
     with pytest.raises(ValueError) as excinfo:
         ledger.final_result(
             final_registered=freg["row_id"],
-            per_split=_per_split({"a": checkpoints}, splits=splits),
+            per_split=_per_split({"a": checkpoints}, splits=splits, regimes=regimes),
             path=path,
         )
     assert named in str(excinfo.value), str(excinfo.value)
     assert path.read_bytes() == before
 
-    good = _per_split({"a": checkpoints}, splits=SEALS[seal])
+    good = _per_split({"a": checkpoints}, splits=SEALS[seal], regimes=regimes)
     fres = ledger.final_result(final_registered=freg["row_id"], per_split=good, path=path)
     assert ledger.rows(kind="final-result", path=path) == [fres]
 
@@ -1424,7 +1442,7 @@ def test_a_second_2013_final_result_is_refused(tmp_path, second_on):
     checkpoints = _chain(ledger, path)["result"]["selected"]
     first = _final_register(ledger, path, checkpoints, issue=71, seal=2013)
     other = _final_register(ledger, path, checkpoints, issue=72, seal=2013)
-    per_split = _per_split({"a": checkpoints}, splits=SPLITS_2013)
+    per_split = _per_split({"a": checkpoints}, splits=SPLITS_2013, regimes=REGIMES)
     ledger.final_result(final_registered=first["row_id"], per_split=per_split, path=path)
     target = first if second_on == "the same 2013 row" else other
     before = path.read_bytes()
@@ -1523,6 +1541,147 @@ def test_show_names_a_final_registered_rows_seal(tmp_path, capsys, via):
         [line] = [line for line in lines if row["row_id"] in line]
         assert re.search(rf"\bseal {seal}\b", line), line
         assert f"seal {other}" not in line, line
+
+
+# --- Issue #72: a 2013 final is graded at both price regimes -------------------------------------
+
+
+def test_ledger_price_regimes_are_pinned_to_metrics():
+    """ledger.PRICE_REGIMES, written out so the ledger stays stdlib-only, is
+    tuple(metrics.PRICE_REGIMES): ("sim", "agc2020"), the keys of each split of a 2013 final's
+    per_split. This module's REGIMES copy is pinned too."""
+    import greenleaf_control.ledger as ledger
+    from greenleaf_control import metrics
+
+    assert getattr(ledger, "PRICE_REGIMES", None) == tuple(metrics.PRICE_REGIMES)
+    assert tuple(metrics.PRICE_REGIMES) == REGIMES
+
+
+def _flat(per_split: dict, split: str | None = None) -> None:
+    """Flatten per_split in place to #71's shape, {split: {arm: entry}} (each split's sim entries),
+    for every split or only split."""
+    for name in [split] if split else list(per_split):
+        per_split[name] = per_split[name]["sim"]
+
+
+# A 2013 per_split fault, laid into the last split and, where it is one regime's, its agc2020 (so a
+# check of the first split, or of sim alone, misses it), and the names the refusal must give.
+PER_SPLIT_REGIME_FAULTS = [
+    pytest.param("a flat per_split", ["agc2020"], id="a flat per_split (#71's shape)"),
+    pytest.param("a flat last split", ["abbotsford_2013", "agc2020"], id="a flat last split"),
+    pytest.param("a missing regime", ["abbotsford_2013", "agc2020"], id="a missing regime"),
+    pytest.param("an extra regime", ["abbotsford_2013", "agc2024"], id="an extra regime"),
+    pytest.param(
+        "a missing arm in agc2020",
+        ["abbotsford_2013", "agc2020", "rb_default"],
+        id="a missing arm in one regime",
+    ),
+    pytest.param(
+        "rb_tuned's prob_improvement in agc2020",
+        ["abbotsford_2013", "agc2020", "prob_improvement", "rb_tuned"],
+        id="prob_improvement in one regime",
+    ),
+    pytest.param(
+        "a baseline scored in agc2020",
+        ["abbotsford_2013", "agc2020", "scored", "rb_default"],
+        id="a baseline's scored not {} in one regime",
+    ),
+]
+
+
+@pytest.mark.parametrize(("fault", "named"), PER_SPLIT_REGIME_FAULTS)
+def test_a_2013_per_split_needs_both_regimes_in_every_split(tmp_path, fault, named):
+    """A 2013 final's per_split is {split: {regime: {arm: entry}}}: each split holds exactly
+    PRICE_REGIMES, sim and agc2020, and the arm checks (exactly the registered arms plus the
+    baselines, FINAL_ARM_KEYS, prob_improvement null exactly for rb_tuned, scored as registered)
+    run in every (split, regime).
+
+    A seal-2013 final of arm a (issue 7's run at "final") with rb_default and rb_tuned is
+    registered. Each fault raises ValueError naming its cause (the split at fault and the regime,
+    or the arm and key), the file byte-identical: the whole per_split flat (#71's shape), the last
+    split flat, the last split without agc2020, the last split with a third regime agc2024, and in
+    the last split's agc2020 alone, rb_default missing, rb_tuned's prob_improvement 0.5, or
+    rb_default scored at arm a's checkpoint. The faithful nested per_split is then accepted."""
+    import greenleaf_control.ledger as ledger
+
+    path = tmp_path / "ledger.jsonl"
+    checkpoints = _experiment(ledger, path)["result"]["selected"]
+    freg = _final_register(ledger, path, checkpoints, issue=72, seal=2013)
+    per_split = _per_split({"a": checkpoints}, splits=SPLITS_2013, regimes=REGIMES)
+    broken = copy.deepcopy(per_split)
+    last = broken["abbotsford_2013"]
+    {
+        "a flat per_split": lambda: _flat(broken),
+        "a flat last split": lambda: _flat(broken, "abbotsford_2013"),
+        "a missing regime": lambda: last.pop("agc2020"),
+        "an extra regime": lambda: last.update(agc2024=copy.deepcopy(last["agc2020"])),
+        "a missing arm in agc2020": lambda: last["agc2020"].pop("rb_default"),
+        "rb_tuned's prob_improvement in agc2020": lambda: last["agc2020"]["rb_tuned"].update(
+            prob_improvement=0.5
+        ),
+        "a baseline scored in agc2020": lambda: last["agc2020"]["rb_default"].update(
+            scored=dict(checkpoints)
+        ),
+    }[fault]()
+    before = path.read_bytes()
+
+    with pytest.raises(ValueError) as excinfo:
+        ledger.final_result(final_registered=freg["row_id"], per_split=broken, path=path)
+    for name in named:
+        assert name in str(excinfo.value), str(excinfo.value)
+    assert path.read_bytes() == before
+
+    fres = ledger.final_result(final_registered=freg["row_id"], per_split=per_split, path=path)
+    assert ledger.rows(kind="final-result", path=path) == [fres]
+
+
+def test_a_2012_per_split_stays_flat(tmp_path):
+    """The 2012 path is unchanged (#72): a 2012 final's per_split nested by price regime, as a 2013
+    one is, raises ValueError naming its first split, the file byte-identical; the flat per_split is
+    then accepted. (A guard: it passes before #72 too, and must after.)"""
+    import greenleaf_control.ledger as ledger
+
+    path = tmp_path / "ledger.jsonl"
+    checkpoints = _experiment(ledger, path)["result"]["selected"]
+    freg = _final_register(ledger, path, checkpoints)
+    before = path.read_bytes()
+
+    with pytest.raises(ValueError) as excinfo:
+        ledger.final_result(
+            final_registered=freg["row_id"],
+            per_split=_per_split({"a": checkpoints}, regimes=REGIMES),
+            path=path,
+        )
+    assert "amsterdam_2012" in str(excinfo.value), str(excinfo.value)
+    assert path.read_bytes() == before
+
+    fres = ledger.final_result(
+        final_registered=freg["row_id"], per_split=_per_split({"a": checkpoints}), path=path
+    )
+    assert ledger.rows(kind="final-result", path=path) == [fres]
+
+
+def test_a_2013_final_registers_rb_tuned_agc2020_and_grades_it_in_each_regime(tmp_path):
+    """A 2013 final may register rb_tuned_agc2020, the rules tune_rb tuned at agc2020's prices
+    (configs/rule_based_tuned_agc2020.yml), beside rb_default and rb_tuned: with 2012 spent,
+    final_register(seal=2013, baselines=[rb_default, rb_tuned, rb_tuned_agc2020]) is accepted with
+    those baselines in that order, and its final-result, rb_tuned_agc2020 a baseline in every
+    (split, regime) (scored {}, prob_improvement a number), is accepted as given."""
+    import greenleaf_control.ledger as ledger
+
+    path = tmp_path / "ledger.jsonl"
+    checkpoints = _chain(ledger, path)["result"]["selected"]
+    baselines = ("rb_default", "rb_tuned", "rb_tuned_agc2020")
+
+    freg = _final_register(ledger, path, checkpoints, issue=72, baselines=baselines, seal=2013)
+
+    assert freg["baselines"] == list(baselines)
+    per_split = _per_split(
+        {"a": checkpoints}, baselines=baselines, splits=SPLITS_2013, regimes=REGIMES
+    )
+    fres = ledger.final_result(final_registered=freg["row_id"], per_split=per_split, path=path)
+    assert fres["per_split"] == per_split
+    assert ledger.seal_spent(ledger.rows(path=path), 2013) is True
 
 
 def test_register_dry_returns_the_row_and_writes_nothing(tmp_path):

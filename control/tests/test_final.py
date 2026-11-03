@@ -18,7 +18,7 @@ pytest.MonkeyPatch.context() for the whole module:
   vecnorm_final.pkl; each run's selected.json names its checkpoint (CHECKPOINTS);
 - writes a tmp ledger chain with ledger's own functions: registered -> a run and a run-end per seed
   -> result (selected: seed 0 at "final", seed 1 at "1024") -> final-registered (the same
-  checkpoints, all four baselines, in FINAL_BASELINES order);
+  checkpoints, the four BASELINES: zero_controls, random, rb_default, rb_tuned);
 - then points scenarios.WEATHER_DIR at tmp "synthetic", where Amsterdam, London and Abbotsford each
   have a 2012.csv that is a byte copy of the real Amsterdam/2010.csv; cuts scenarios.TEST to start
   days 45 and 49 per split; sets evaluate.SEASON_LENGTH to 1 day (96 steps) and
@@ -38,6 +38,14 @@ body (_world_2013): a copied world where 2012 is spent (its files in FINAL_RESUL
 final-result recorded), synthetic 2013.csv files in tmp that are byte copies of the real
 Amsterdam/2010.csv (never the real 2013 weather), SEALS[2013] cut to days 45 and 49, and a seal-2013
 final-registered row of seed 0 at "final" with rb_default and rb_tuned.
+
+Issue #72: the 2013 final plays each (run or baseline, scenario) once and grades it at both price
+regimes, sim and agc2020: two seasons.parquet rows per season (price_regime after season_length),
+a per_split nested {split: {regime: {arm: entry}}} with each regime's stats on its rows alone, and
+rb_tuned_agc2020 registrable as a baseline. Most #72 tests share one 2013 final (final_run_2013) in
+a dual world: both seeds registered, the four BASELINES, and seed 0's copied manifest set to
+price_regime agc2020, so the traced run plays at agc2020 and seed 1 at sim. The 2012 path is
+unchanged: the tests above pin it as it was.
 """
 
 import ast
@@ -54,6 +62,7 @@ import numpy as np
 import pandas as pd
 import pytest
 import torch
+import yaml
 from stable_baselines3 import PPO
 
 from greenleaf_control import (
@@ -92,7 +101,10 @@ N_DAY = 96  # 86,400 s / 900 s
 ARM = "residual"  # the one learning arm
 SITES = {"amsterdam_2012": "Amsterdam", "london_2012": "London", "abbotsford_2012": "Abbotsford"}
 TEST_SPLITS = tuple(SITES)
-BASELINES = ledger.FINAL_BASELINES  # zero_controls, random, rb_default, rb_tuned: the row's order
+# The four baselines the module's rows register, in the row's order: ledger.FINAL_BASELINES as it
+# was before #72, written out because #72 adds rb_tuned_agc2020 to it and the 2012 world must not
+# change (rb_tuned_agc2020 has its own 2013 test).
+BASELINES = ("zero_controls", "random", "rb_default", "rb_tuned")
 PRIMARY = "profit_eur_m2"
 FINAL_GUARDS = (
     "viol_hours_co2",
@@ -1152,14 +1164,17 @@ SITES_2013 = {
 REAL_2010 = CONTROL / "data" / "weather" / "Amsterdam" / "2010.csv"  # not test weather
 
 
-def _world_2013(world, final_run, tmp_path, monkeypatch) -> SimpleNamespace:
+def _world_2013(
+    world, final_run, tmp_path, monkeypatch, *, seeds=(0,), baselines=("rb_default", "rb_tuned")
+) -> SimpleNamespace:
     """A copied world (_copy_world) where the 2012 seal is spent (_spent_seal: a full --final's
     files in FINAL_RESULTS/<2012 row>/, then ledger final-result on them), with:
     - scenarios.WEATHER_DIR at tmp "synthetic_2013" (.synthetic13), where Amsterdam, London and
       Abbotsford each have a 2013.csv that is a byte copy of the real Amsterdam/2010.csv;
     - scenarios.SEALS[2013] (and TEST_2013) cut to start days 45 and 49 per 2013 split;
-    - a seal-2013 final-registered row (.freg13), issue 71, of seed 0 at "final" (.checkpoints13)
-      with baselines rb_default and rb_tuned.
+    - a seal-2013 final-registered row (.freg13), issue 71, of seeds' runs at their CHECKPOINTS
+      (.checkpoints13; by default seed 0 at "final") with baselines (by default rb_default and
+      rb_tuned).
     Called from a test's body, so a missing seal= fails that test, not a fixture."""
     w = _copy_world(world, tmp_path, monkeypatch)
     _spent_seal(w, final_run, monkeypatch)
@@ -1174,11 +1189,11 @@ def _world_2013(world, final_run, tmp_path, monkeypatch) -> SimpleNamespace:
     }
     monkeypatch.setattr(scenarios, "TEST_2013", test_2013, raising=False)
     monkeypatch.setitem(scenarios.SEALS, 2013, test_2013)
-    w.checkpoints13 = {w.run_ids[0]: "final"}
+    w.checkpoints13 = {w.run_ids[seed]: CHECKPOINTS[seed] for seed in seeds}
     w.freg13 = ledger.final_register(
         issue=71,
         checkpoints=w.checkpoints13,
-        baselines=["rb_default", "rb_tuned"],
+        baselines=list(baselines),
         approved_by="Aarmen",
         seal=2013,
         path=w.ledger,
@@ -1266,10 +1281,11 @@ def test_a_2013_final_plays_only_its_seal_and_records_once(
       scenario;
     - reads only the three synthetic 2013 files and no 2012 file;
     - writes FINAL_RESULTS/<2013 row>/ beside the 2012 row's dir, which is byte for byte as it was;
-    - seasons.parquet has (1 run + 2 baselines) x 3 splits x 2 scenarios = 18 rows, split by split
-      in the seal's order, all growth year 2013;
+    - seasons.parquet has (1 run + 2 baselines) x 3 splits x 2 scenarios x 2 price regimes = 36
+      rows (#72: each season graded at sim and at agc2020), split by split in the seal's order, all
+      growth year 2013;
     - per_split.json is keyed by exactly the 2013 splits, and `ledger final-result` records it
-      (the ledger checks its shape), spending 2013.
+      (the ledger checks its shape, nested by price regime since #72), spending 2013.
     Then a second --final <the 2013 row> is refused before any env, "seal is spent", with
     FINAL_RESULTS and the ledger as they were."""
     w = _world_2013(world, final_run, tmp_path, monkeypatch)
@@ -1302,7 +1318,7 @@ def test_a_2013_final_plays_only_its_seal_and_records_once(
     assert _tree(w.results / w.freg_id) == spent_2012
     out = w.results / w.freg13
     df = pd.read_parquet(out / "seasons.parquet")
-    assert len(df) == 18  # (1 run + 2 baselines) x 3 splits x 2 scenarios
+    assert len(df) == 36  # (1 run + 2 baselines) x 3 splits x 2 scenarios x 2 price regimes
     assert list(dict.fromkeys(df["split"])) == list(SITES_2013)
     assert set(df["growth_year"]) == {2013}
     numbers = out / "per_split.json"
@@ -1321,6 +1337,548 @@ def test_a_2013_final_plays_only_its_seal_and_records_once(
     assert "seal is spent" in text, text
     assert _tree(w.results) == results
     assert w.ledger.read_bytes() == ledger_bytes
+
+
+# --- #72: the 2013 final plays each season once and grades it at both price regimes -------------
+
+# PROTOCOL v3's price regimes, written out (as test_evaluate does) so the regrading checks don't read
+# metrics' own table: EUR/kg fresh fruit, dry matter per fresh matter, EUR/kWh heat, EUR/kWh
+# electricity, EUR/kg CO2.
+REGIMES = ("sim", "agc2020")
+PRICES = {
+    "sim": {"fruit": 1.6, "dmfm": 0.065, "heat": 0.09, "elec": 0.3, "co2": 0.3},
+    "agc2020": {"fruit": 1.6, "dmfm": 0.065, "heat": 0.03, "elec": 0.06, "co2": 0.08},
+}
+# The result keys prices move; every other column of a season's two rows is equal.
+PRICED = ("profit_eur_m2", "heat_cost", "elec_cost", "co2_cost", "paper_return")
+UNPRICED = [*IDENTITY, *(k for k in (*ledger.RESULT_KEYS, "valid") if k not in PRICED)]
+# The dual world's runs play at: seed 0 (at "final", the traced run) with its copied manifest's
+# price_regime set to agc2020; seed 1 (at "1024") left at sim, as trained.
+PLAYED_AT = {0: "agc2020", 1: "sim"}
+
+
+def _set_price_regime(run_dir: Path, regime: str) -> None:
+    """run_dir's manifest config with price_regime set to regime (as test_evaluate does), so
+    run_policy plays and grades its seasons at regime; the policy never sees a price."""
+    path = run_dir / "manifest.json"
+    m = json.loads(path.read_text())
+    m["config"]["price_regime"] = regime
+    path.write_text(json.dumps(m, indent=2) + "\n")
+
+
+@pytest.fixture(scope="module")
+def final_run_2013(world, final_run, tmp_path_factory):
+    """A function that, on its first call, builds the dual world and runs one full --final <its
+    2013 row> in it, returning {code, stdout, dir, calls, w}:
+    - w is _world_2013 in a tmp dir of its own, registering both seeds (seed 0 at "final", seed 1
+      at "1024") and the four BASELINES in order, with seed 0's copied manifest at
+      price_regime agc2020 (PLAYED_AT);
+    - calls holds pass-through spies' calls of evaluate.run_policy, evaluate.run_rb and
+      envs.run_baseline, as final_run's; stdout is what --final printed; dir its FINAL_RESULTS dir.
+    Its patches (WEATHER_DIR, SEALS[2013], FINAL_RESULTS, the spies) end with the call; a test that
+    plays a 2013 season again points WEATHER_DIR at w.synthetic13 itself. (2 runs + 4 baselines) x
+    6 scenarios = 36 one-day seasons, about 25 s. A failed attempt is kept and raised again in each
+    test that needs it, so each fails in its own body without replaying."""
+    done = {}
+
+    def run() -> SimpleNamespace:
+        if "error" in done:
+            raise done["error"]
+        if not done:
+            out, calls = io.StringIO(), {}
+            root = tmp_path_factory.mktemp("final_2013")
+            with pytest.MonkeyPatch.context() as mp:
+                try:
+                    w = _world_2013(world, final_run, root, mp, seeds=(0, 1), baselines=BASELINES)
+                    _set_price_regime(w.run_dirs[0], PLAYED_AT[0])
+                    for module, name in [
+                        (evaluate, "run_policy"),
+                        (evaluate, "run_rb"),
+                        (envs, "run_baseline"),
+                    ]:
+                        calls[name] = []
+                        mp.setattr(module, name, _spy(getattr(module, name), calls[name]))
+                    with contextlib.redirect_stdout(out):
+                        code = _main(["--final", w.freg13], w.ledger)
+                except Exception as error:
+                    done["error"] = error
+                    raise
+            done.update(
+                code=code, stdout=out.getvalue(), dir=w.results / w.freg13, calls=calls, w=w
+            )
+        return SimpleNamespace(**done)
+
+    return run
+
+
+def _graded(trace: tuple, regime: str) -> dict:
+    """metrics.episode_metrics on a 1-day season's (states, controls, params) at regime's PRICES."""
+    states, controls, params = trace
+    return metrics.episode_metrics(
+        states, controls, params, season_steps=N_DAY, prices=PRICES[regime]
+    )
+
+
+def _baseline_trace(name: str, s: dict) -> tuple:
+    """A zero_controls or random 1-day season on s (allow_test=True) as (states, controls,
+    params): envs.run_baseline's infos and the raw env's params, as test_evaluate builds it."""
+    infos = envs.run_baseline(name, s, 1, allow_test=True)
+    env = envs.make_raw_env(scenario=s, season_length=1, normalize_actions=False, allow_test=True)
+    params = np.asarray(env.unwrapped.p, dtype=np.float64)
+    env.close()
+    return (*metrics.trace_from_infos(infos), params)
+
+
+def _two_rows(df: pd.DataFrame, split: str, day: int, arm: str, run=None) -> dict[str, dict]:
+    """One 2013 season's seasons.parquet rows (of run, for the learning arm) by price_regime,
+    asserting there are exactly two, one per regime."""
+    rows = df[(df["split"] == split) & (df["start_day"] == day) & (df["arm"] == arm)]
+    if run is not None:
+        rows = rows[rows["run"] == run]
+    records = rows.to_dict("records")
+    regimes = sorted(str(r.get("price_regime")) for r in records)
+    assert regimes == sorted(REGIMES), f"{arm} {run} {split} day {day}: rows at {regimes}"
+    return {r["price_regime"]: r for r in records}
+
+
+def _scores_2013(df: pd.DataFrame, split: str, arm: str, key: str, regime: str) -> np.ndarray:
+    """_scores on regime's rows alone: runs x scenarios of key (seeds ascending; a baseline one
+    run)."""
+    return _scores(df[df["price_regime"] == regime], split, arm, key)
+
+
+def test_a_2013_final_plays_each_season_once_and_grades_it_at_both_regimes(final_run_2013):
+    """Done when (#72, played once, two rows per season): --final <the dual world's 2013 row>
+    returns 0, and
+    - its spies saw each (run or baseline, scenario) played exactly once, on the 2013 seal's 6
+      scenarios only (3 sites x days 45 and 49), each a 1-day season with allow_test=True:
+      run_policy for seed 0 at "final" and seed 1 at "1024", run_rb for rb_default's and
+      rb_tuned's params, run_baseline for zero_controls and random, 12 calls each; every run_rb
+      and run_baseline call at price_regime sim (a baseline plays at sim);
+    - seasons.parquet has the 9 identity columns, then price_regime, then the result keys
+      (RESULT_KEYS plus valid), and exactly two rows per season, one at sim and one at agc2020:
+      (2 runs + 4 baselines) x 3 splits x 2 scenarios x 2 regimes = 72 rows;
+    - a season's two rows are equal in every column prices don't move (identity, yield, violation
+      hours, in-bounds %, solver_failures, steps, valid, and paper_reward_sum, the play's own);
+    - its agc2020 row's costs are its sim row's at agc2020's prices, and its profit follows (the
+      arithmetic below), within 1e-9 EUR/m2; its sim row's profit is yield x 1.6 less its costs.
+    Non-vacuous: some season heats (sim heat_cost > 0), and some season's agc2020 profit differs
+    from its sim profit by more than 1e-6 EUR/m2."""
+    final = final_run_2013()
+    w, calls = final.w, final.calls
+
+    assert final.code == 0
+    seal = [(site, day) for site in SITES_2013.values() for day in DAYS]
+    every = [*calls["run_policy"], *calls["run_rb"], *calls["run_baseline"]]
+    assert {c["scenario"]["growth_year"] for c in every} == {2013}
+    assert {(c["season_length"], c["allow_test"]) for c in every} == {(1, True)}
+    policy = sorted(
+        (str(c["run_dir"]), c["checkpoint"], c["scenario"]["location"], c["scenario"]["start_day"])
+        for c in calls["run_policy"]
+    )
+    assert policy == sorted(
+        (str(w.run_dirs[seed]), CHECKPOINTS[seed], *s) for seed in (0, 1) for s in seal
+    )
+    rb_params = {"rb_default": RB_DEFAULT, "rb_tuned": rule_based.load_rb_params("tuned")}
+    rb = sorted(  # a call with neither's params is dropped, so the comparison below fails
+        (b, c["scenario"]["location"], c["scenario"]["start_day"])
+        for c in calls["run_rb"]
+        for b, params in rb_params.items()
+        if c["params"] == params
+    )
+    assert len(calls["run_rb"]) == 12
+    assert rb == sorted((b, *s) for b in rb_params for s in seal)
+    baselines = sorted(
+        (c["name"], c["scenario"]["location"], c["scenario"]["start_day"])
+        for c in calls["run_baseline"]
+    )
+    assert baselines == sorted((b, *s) for b in ("zero_controls", "random") for s in seal)
+    # The rules never see a price: every baseline plays at sim (the spies bind price_regime's default).
+    assert {c["price_regime"] for c in calls["run_rb"] + calls["run_baseline"]} == {"sim"}
+
+    df = pd.read_parquet(final.dir / "seasons.parquet")
+    assert list(df.columns[: len(IDENTITY) + 1]) == [*IDENTITY, "price_regime"]
+    assert set(df.columns[len(IDENTITY) + 1 :]) == {*ledger.RESULT_KEYS, "valid"}
+    assert len(df) == 72  # (2 runs + 4 baselines) x 3 splits x 2 scenarios x 2 price regimes
+    seasons = {}
+    for row in df.to_dict("records"):
+        seasons.setdefault(tuple(_null(row[c]) for c in IDENTITY), []).append(row)
+    assert len(seasons) == 36
+    heats, moved = [], []
+    for season, rows in seasons.items():
+        assert sorted(r["price_regime"] for r in rows) == sorted(REGIMES), season
+        sim, agc = (next(r for r in rows if r["price_regime"] == g) for g in REGIMES)
+        assert {c: _null(agc[c]) for c in UNPRICED} == {c: _null(sim[c]) for c in UNPRICED}, season
+        # agc2020 over sim: heat 0.03 / 0.09 = 1/3 and electricity 0.06 / 0.30 = 1/5 (EUR/kWh), CO2
+        # 0.08 / 0.30 = 4/15 (EUR/kg); fruit 1.6 EUR/kg in both. So, in EUR/m2, from the sim row:
+        # agc2020 profit = yield x 1.6 - heat_cost / 3 - elec_cost / 5 - co2_cost x 4/15.
+        assert agc["heat_cost"] == pytest.approx(sim["heat_cost"] / 3, rel=0, abs=1e-9), season
+        assert agc["elec_cost"] == pytest.approx(sim["elec_cost"] / 5, rel=0, abs=1e-9), season
+        assert agc["co2_cost"] == pytest.approx(sim["co2_cost"] * 4 / 15, rel=0, abs=1e-9), season
+        want = (
+            sim["yield_kg_m2"] * 1.6
+            - sim["heat_cost"] / 3
+            - sim["elec_cost"] / 5
+            - sim["co2_cost"] * 4 / 15
+        )
+        assert agc["profit_eur_m2"] == pytest.approx(want, rel=0, abs=1e-9), season
+        # sim: yield x 1.6 EUR/kg less its own heat, electricity and CO2 costs [EUR/m2].
+        costs = sim["heat_cost"] + sim["elec_cost"] + sim["co2_cost"]
+        own = sim["yield_kg_m2"] * 1.6 - costs
+        assert sim["profit_eur_m2"] == pytest.approx(own, rel=0, abs=1e-9), season
+        heats.append(sim["heat_cost"] > 0)
+        moved.append(abs(agc["profit_eur_m2"] - sim["profit_eur_m2"]) > 1e-6)
+    assert any(heats), "no season heats, so the heat price is never tested"
+    assert any(moved), "no season's profit moves with the prices"
+
+
+def test_a_2013_seasons_rows_are_its_play_and_the_play_regraded(final_run_2013, monkeypatch):
+    """Done when (#72, one play graded twice): a season's row at the regime it was played at is
+    the library's play of it, key for key and exactly; its other row is the same raw trace graded
+    by metrics.episode_metrics at the other regime's PRICES (written out; 96 season steps),
+    carrying the play's own paper_reward_sum:
+    - seed 0 (manifest agc2020) on london_2013 day 49: its agc2020 row is
+      run_policy(run_dir, "final", s, 1, allow_test=True)'s result; its sim row is that play's
+      trace at sim prices plus the play's paper_reward_sum;
+    - seed 1 (manifest sim) on abbotsford_2013 day 45: its sim row is run_policy(run_dir, "1024",
+      s, 1, allow_test=True)'s result; its agc2020 row the trace at agc2020 prices plus the play's
+      paper_reward_sum;
+    - rb_default (run_rb) and random (run_baseline) on amsterdam_2013 day 45: each row is the
+      play's trace graded at its row's regime, and both rows carry one paper_reward_sum, the
+      play's own reward summed: within rel 1e-6 of one row's paper_return (a baseline's play
+      regime isn't pinned).
+    A --final that took each regime's row from a separate play, or graded the learners at sim
+    whatever their manifest, fails here. Non-vacuous: each learner's two rows differ in profit."""
+    final = final_run_2013()
+    w = final.w
+    df = pd.read_parquet(final.dir / "seasons.parquet")
+    assert "price_regime" in df.columns, "seasons.parquet has no price_regime column"
+    monkeypatch.setattr(scenarios, "WEATHER_DIR", w.synthetic13)
+
+    for seed, split, day in [(0, "london_2013", 49), (1, "abbotsford_2013", 45)]:
+        s = {"location": SITES_2013[split], "growth_year": 2013, "start_day": day}
+        played, _, trace = evaluate.run_policy(
+            w.run_dirs[seed], CHECKPOINTS[seed], s, 1, return_trace=True, allow_test=True
+        )
+        rows = _two_rows(df, split, day, ARM, w.run_ids[seed])
+        play = PLAYED_AT[seed]
+        [other] = [g for g in REGIMES if g != play]
+        assert {k: rows[play][k] for k in played} == played, (seed, play)
+        want = {**_graded(trace, other), "paper_reward_sum": played["paper_reward_sum"]}
+        assert {k: rows[other][k] for k in want} == want, (seed, other)
+        assert rows["sim"]["profit_eur_m2"] != rows["agc2020"]["profit_eur_m2"], seed
+
+    s = {"location": "Amsterdam", "growth_year": 2013, "start_day": 45}
+    _, _, rb_trace = evaluate.run_rb(RB_DEFAULT, s, 1, return_trace=True, allow_test=True)
+    for arm, trace in [("rb_default", rb_trace), ("random", _baseline_trace("random", s))]:
+        rows = _two_rows(df, "amsterdam_2013", 45, arm)
+        for regime in REGIMES:
+            want = _graded(trace, regime)
+            assert {k: rows[regime][k] for k in want} == want, (arm, regime)
+        reward = rows["sim"]["paper_reward_sum"]
+        assert rows["agc2020"]["paper_reward_sum"] == reward, arm
+        played_at = [
+            g for g in REGIMES if reward == pytest.approx(rows[g]["paper_return"], rel=1e-6)
+        ]
+        assert len(played_at) == 1, (arm, reward, played_at)
+
+
+def test_a_2013_per_split_is_stats_on_each_regimes_rows_alone(final_run_2013, tmp_path):
+    """Done when (#72, per_split per regime): per_split.json is {split: {regime: {arm: entry}}},
+    each 2013 split holding exactly sim and agc2020, each of those exactly the residual arm and the
+    four baselines; and each entry is computed on that regime's seasons.parquet rows alone, as
+    test_per_split_is_stats_on_the_seasons computes a 2012 entry, exactly:
+    - iqm, ci_low, ci_high: stats.iqm_ci (2,000 reps, seed 0) on the runs x scenarios profit
+      (the residual arm 2 x 2, seeds ascending; a baseline 1 x 2);
+    - guards: {iqm, ci_low, ci_high} of stats.iqm_ci on each FINAL_GUARDS key's array;
+    - invalid_episodes: that regime's rows with valid False;
+    - prob_improvement: stats.prob_improvement(arm, rb_tuned) on that regime's profit, null for
+      rb_tuned; scored: the registered checkpoints, {} for a baseline.
+    `ledger final-result` on a copy of the dual world's ledger then records it as written.
+    Non-vacuous: some arm's sim and agc2020 profit IQMs differ, so stats on both regimes' rows
+    together, or on one regime's for both, give other numbers."""
+    final = final_run_2013()
+    w = final.w
+    df = pd.read_parquet(final.dir / "seasons.parquet")
+    numbers = final.dir / "per_split.json"
+    per_split = json.loads(numbers.read_text())["per_split"]
+
+    assert set(per_split) == set(SITES_2013)
+    for split in SITES_2013:
+        assert set(per_split[split]) == set(REGIMES), (split, sorted(per_split[split]))
+    differ = []
+    for split in SITES_2013:
+        for regime in REGIMES:
+            assert set(per_split[split][regime]) == {ARM, *BASELINES}, (split, regime)
+            rb_tuned = _scores_2013(df, split, "rb_tuned", PRIMARY, regime)
+            for arm, entry in per_split[split][regime].items():
+                where = (split, regime, arm)
+                profit = _scores_2013(df, split, arm, PRIMARY, regime)
+                assert profit.shape == ((2, 2) if arm == ARM else (1, 2)), where
+                assert (entry["iqm"], entry["ci_low"], entry["ci_high"]) == stats.iqm_ci(profit)
+                guards = {
+                    g: dict(
+                        zip(
+                            ("iqm", "ci_low", "ci_high"),
+                            stats.iqm_ci(_scores_2013(df, split, arm, g, regime)),
+                            strict=True,
+                        )
+                    )
+                    for g in FINAL_GUARDS
+                }
+                assert entry["guards"] == guards, where
+                mine = df[
+                    (df["split"] == split) & (df["arm"] == arm) & (df["price_regime"] == regime)
+                ]
+                invalid = int(np.count_nonzero(~mine["valid"].to_numpy(dtype=bool)))
+                assert entry["invalid_episodes"] == invalid, where
+                want = None if arm == "rb_tuned" else stats.prob_improvement(profit, rb_tuned)
+                assert entry["prob_improvement"] == want, where
+                assert entry["scored"] == (w.checkpoints13 if arm == ARM else {}), where
+        for arm in (ARM, *BASELINES):
+            differ.append(
+                per_split[split]["sim"][arm]["iqm"] != per_split[split]["agc2020"][arm]["iqm"]
+            )
+    assert any(differ), "every arm's sim and agc2020 profit IQMs are equal"
+
+    path = tmp_path / "ledger.jsonl"
+    shutil.copyfile(w.ledger, path)
+    argv = ["final-result", "--final-registered", w.freg13, "--numbers", str(numbers)]
+    assert ledger.main(argv, path=path) == 0
+    [row] = [
+        r for r in ledger.rows(kind="final-result", path=path) if r["final-registered"] == w.freg13
+    ]
+    assert row["per_split"] == per_split
+
+
+def test_a_2013_final_prints_one_line_per_split_regime_and_arm(final_run_2013):
+    """Done when (#72, printed lines name the regime): before its last line (the `next:` ledger
+    command), --final prints exactly one line per 2013 split x price regime x arm (the residual arm
+    and the four baselines), 3 x 2 x 5 = 30, each naming its split, its regime and its arm as words
+    (so rb_tuned isn't found in another arm's name) and not the other regime."""
+    final = final_run_2013()
+    lines = final.stdout.strip().splitlines()
+
+    assert lines[-1].startswith("next: python -m greenleaf_control.ledger final-result"), lines[-1]
+    shown = lines[:-1]
+    assert len(shown) == 30, "\n".join(shown)  # 3 splits x 2 regimes x (1 arm + 4 baselines)
+
+    def word(name: str) -> re.Pattern:
+        return re.compile(rf"(?<!\w){re.escape(name)}(?!\w)")
+
+    for split in SITES_2013:
+        for regime in REGIMES:
+            [other] = [g for g in REGIMES if g != regime]
+            for arm in (ARM, *BASELINES):
+                found = [
+                    line
+                    for line in shown
+                    if all(word(n).search(line) for n in (split, regime, arm))
+                    and not word(other).search(line)
+                ]
+                assert len(found) == 1, (split, regime, arm, found)
+
+
+def _hourly_profit(trace: tuple, regime: str) -> list[float]:
+    """export_replay's hourly profit by hand for a 1-day season's (states, controls, params): hour
+    h is metrics.episode_metrics on the season's first 4h + 4 steps at regime's PRICES (written
+    out), profit_eur_m2 to 4 decimals, 24 hours."""
+    states, controls, params = trace
+    return [
+        round(
+            metrics.episode_metrics(
+                states[: k + 1], controls[:k], params, season_steps=k, prices=PRICES[regime]
+            )["profit_eur_m2"],
+            4,
+        )
+        for k in range(4, N_DAY + 1, 4)
+    ]
+
+
+def test_a_2013_final_writes_one_replay_per_traced_play_naming_its_regime(
+    final_run_2013, monkeypatch
+):
+    """Done when (#72, replays): replays/ holds one file per traced play, not one per graded row:
+    <prefix>_<location>_2013_<start_day>.json for the residual arm's lowest seed (seed 0) and each
+    of the four baselines on the 6 scenarios, 30 files. Each meta.note is "registered final <row>:
+    ..." and names, as a word, the regime its season was played at and not the other; seed 0's
+    (manifest agc2020) names agc2020. Each totals is its season's seasons.parquet row at that
+    regime, key for key and exactly: the play's own result.
+    #72 fix round: the hourly running profit is graded at the play's regime too, so a replay's last
+    hour is its totals: hourly.profit[-1] == round(totals.profit_eur_m2, 4) for every replay, seed
+    0's at agc2020 included; and hourly.profit is the prefix grading at the play regime's PRICES
+    (_hourly_profit), checked on seed 0's london_2013 day 49 (agc2020, replayed with run_policy)
+    and rb_default's amsterdam_2013 day 45 (sim, replayed with run_rb). Non-vacuous: seed 0's
+    prefixes at sim and at agc2020 differ."""
+    final = final_run_2013()
+    w = final.w
+    df = pd.read_parquet(final.dir / "seasons.parquet")
+    want = {
+        f"{prefix}_{site}_2013_{day}.json": (prefix, split, day)
+        for prefix in TRACED
+        for split, site in SITES_2013.items()
+        for day in DAYS
+    }
+    assert len(want) == 30  # (1 traced run + 4 baselines) x 3 splits x 2 scenarios
+
+    assert _listing(final.dir / "replays") == sorted(want)
+    for name, (prefix, split, day) in want.items():
+        payload = json.loads((final.dir / "replays" / name).read_text(encoding="utf-8"))
+        note = payload["meta"]["note"]
+        assert note.startswith(f"registered final {w.freg13}: "), (name, note)
+        named = [g for g in REGIMES if re.search(rf"(?<!\w){g}(?!\w)", note)]
+        assert len(named) == 1, (name, note)
+        if prefix == ARM:
+            assert named == [PLAYED_AT[0]], (name, note)
+        rows = _two_rows(df, split, day, prefix, w.run_ids[0] if prefix == ARM else None)
+        totals = payload["totals"]
+        assert {k: rows[named[0]][k] for k in totals} == totals, name
+        # export_replay rounds each hour's profit to 4 decimals; its last hour is the whole season.
+        last = payload["hourly"]["profit"][-1]
+        assert last == round(totals["profit_eur_m2"], 4), (name, named[0], last)
+
+    monkeypatch.setattr(scenarios, "WEATHER_DIR", w.synthetic13)
+    s = {"location": "London", "growth_year": 2013, "start_day": 49}
+    _, _, seed0 = evaluate.run_policy(
+        w.run_dirs[0], CHECKPOINTS[0], s, 1, return_trace=True, allow_test=True
+    )
+    s = {"location": "Amsterdam", "growth_year": 2013, "start_day": 45}
+    _, _, rb = evaluate.run_rb(RB_DEFAULT, s, 1, return_trace=True, allow_test=True)
+    for name, trace, regime in [
+        (f"{ARM}_London_2013_49.json", seed0, PLAYED_AT[0]),
+        ("rb_default_Amsterdam_2013_45.json", rb, "sim"),
+    ]:
+        payload = json.loads((final.dir / "replays" / name).read_text(encoding="utf-8"))
+        assert payload["hourly"]["profit"] == _hourly_profit(trace, regime), (name, regime)
+    assert _hourly_profit(seed0, "sim") != _hourly_profit(seed0, "agc2020")
+
+
+def test_a_2013_final_scores_rb_tuned_agc2020_like_the_other_baselines(
+    world, final_run, tmp_path, monkeypatch
+):
+    """Done when (#72, rb_tuned_agc2020 among the 2013 final's baselines): a 2013 row registers
+    rb_tuned_agc2020 beside rb_default and rb_tuned (_world_2013, seed 0 at "final"), and --final
+    scores it like them. rule_based.CONFIGS points at a tmp copy of configs/ whose
+    rule_based_tuned_agc2020.yml holds the default params with three setpoints moved (as
+    test_evaluate's rb_tuned_agc2020 test writes it); SEALS[2013] is cut to day 49 per split, so 3
+    scenarios. --final returns 0, and:
+    - evaluate.run_rb (a pass-through spy) plays those params once per scenario, allow_test=True;
+    - seasons.parquet holds its two rows per season, sim and agc2020, each the play's trace
+      (run_rb with those params on london_2013 day 49; the three sites' 2013.csv are one copy)
+      graded at that row's regime, exactly;
+    - per_split.json holds it in every (split, regime), scored {} and prob_improvement a number,
+      and `ledger final-result` records the file.
+    Non-vacuous: its seasons aren't rb_default's (the moved setpoints are what it plays)."""
+    baselines = ("rb_default", "rb_tuned", "rb_tuned_agc2020")
+    w = _world_2013(world, final_run, tmp_path, monkeypatch, baselines=baselines)
+    configs = tmp_path / "configs"
+    shutil.copytree(rule_based.CONFIGS, configs)
+    tuned = {**RB_DEFAULT, "temp_setpoint_day": 21.25, "co2_day": 937.5, "lamps_off": 16.5}
+    text = yaml.safe_dump({"GreenLightEnv": tuned}, sort_keys=False)
+    (configs / "rule_based_tuned_agc2020.yml").write_text(text)
+    monkeypatch.setattr(rule_based, "CONFIGS", configs)
+    cut = {
+        split: [{"location": site, "growth_year": 2013, "start_day": 49}]
+        for split, site in SITES_2013.items()
+    }
+    monkeypatch.setattr(scenarios, "TEST_2013", cut)
+    monkeypatch.setitem(scenarios.SEALS, 2013, cut)
+    play, calls = evaluate.run_rb, []
+    monkeypatch.setattr(evaluate, "run_rb", _spy(play, calls))
+
+    assert _main(["--final", w.freg13], w.ledger) == 0
+
+    mine = [c for c in calls if c["params"] == tuned]
+    assert sorted(c["scenario"]["location"] for c in mine) == sorted(SITES_2013.values())
+    assert all(c["allow_test"] for c in mine)
+    out = w.results / w.freg13
+    df = pd.read_parquet(out / "seasons.parquet")
+    _, _, trace = play(tuned, cut["london_2013"][0], 1, return_trace=True, allow_test=True)
+    moved = []
+    for split in SITES_2013:
+        rows = _two_rows(df, split, 49, "rb_tuned_agc2020")
+        for regime in REGIMES:
+            want = _graded(trace, regime)
+            assert {k: rows[regime][k] for k in want} == want, (split, regime)
+        rb_default = _two_rows(df, split, 49, "rb_default")["sim"]
+        moved.append(any(rows["sim"][k] != rb_default[k] for k in ("yield_kg_m2", *PRICED)))
+    assert any(moved), "rb_tuned_agc2020 plays every season as rb_default does"
+    per_split = json.loads((out / "per_split.json").read_text())["per_split"]
+    for split in SITES_2013:
+        for regime in REGIMES:
+            entry = per_split[split][regime]["rb_tuned_agc2020"]
+            assert entry["scored"] == {}, (split, regime)
+            assert isinstance(entry["prob_improvement"], float), (split, regime)
+    argv = [
+        "final-result",
+        "--final-registered",
+        w.freg13,
+        "--numbers",
+        str(out / "per_split.json"),
+    ]
+    assert ledger.main(argv, path=w.ledger) == 0
+
+
+# A row's rb_* baselines whose config yml is missing: (the row's seal, the baseline whose yml is
+# removed from the tmp configs/ copy). The 2013 rows register rb_default, rb_tuned and
+# rb_tuned_agc2020; the 2012 row is the module's (the four BASELINES).
+MISSING_RB_CONFIG = [
+    pytest.param(2013, "rb_tuned_agc2020", id="2013-rb-tuned-agc2020"),
+    pytest.param(2013, "rb_default", id="2013-rb-default"),
+    pytest.param(2013, "rb_tuned", id="2013-rb-tuned"),
+    pytest.param(2012, "rb_tuned", id="2012-rb-tuned"),
+]
+
+
+@pytest.mark.parametrize(("seal", "missing"), MISSING_RB_CONFIG)
+def test_a_final_refuses_a_registered_rb_baseline_without_its_config_before_any_env(
+    seal, missing, world, final_run, tmp_path, monkeypatch, capsys
+):
+    """Done when (#72 fix round, a registered rb_* baseline needs its params on disk):
+    rule_based.CONFIGS points at a tmp copy of configs/ holding rule_based_tuned_agc2020.yml (the
+    default params with three setpoints moved) but without the missing baseline's
+    rule_based_<name>.yml. --final <the row> is refused before any env is built (_no_env_built) and before any weather is read (no new
+    2012 or 2013 read, the tripwire silent), as parser.error's SystemExit with code 2 naming the
+    missing file's path (and no other config's), with no FINAL_RESULTS/<row>/ made (FINAL_RESULTS
+    as it was) and the ledger byte-identical. Otherwise the final opens the seal, plays seasons and
+    only then fails on load_rb_params, leaving an interrupted final that can never be rerun.
+    - 2013, rb_tuned_agc2020: the case the fix round names (_world_2013, seed 0 at "final");
+    - 2013, rb_default and rb_tuned: any registered rb_* baseline, the same way;
+    - 2012, rb_tuned: the 2012 row (_copy_world) too."""
+    if seal == 2013:
+        baselines = ("rb_default", "rb_tuned", "rb_tuned_agc2020")
+        w = _world_2013(world, final_run, tmp_path, monkeypatch, baselines=baselines)
+        row = w.freg13
+    else:
+        w = _copy_world(world, tmp_path, monkeypatch)
+        row = w.freg_id
+    configs = tmp_path / "configs"
+    shutil.copytree(rule_based.CONFIGS, configs)
+    tuned = {**RB_DEFAULT, "temp_setpoint_day": 21.25, "co2_day": 937.5, "lamps_off": 16.5}
+    text = yaml.safe_dump({"GreenLightEnv": tuned}, sort_keys=False)
+    (configs / "rule_based_tuned_agc2020.yml").write_text(text)
+    gone = configs / f"rule_based_{missing.removeprefix('rb_')}.yml"
+    gone.unlink()
+    monkeypatch.setattr(rule_based, "CONFIGS", configs)
+    present = sorted(configs.glob("rule_based_*.yml"))
+    assert present and gone not in present, present
+    results, ledger_bytes = _tree(w.results), w.ledger.read_bytes()
+    n_2012, n_2013, n_trips = len(world.reads), len(world.reads_2013), len(world.trips)
+    _no_env_built(monkeypatch)
+    capsys.readouterr()
+
+    with pytest.raises(SystemExit) as excinfo:
+        _main(["--final", row], w.ledger)
+
+    assert excinfo.value.code == 2, "a refusal is parser.error's exit 2"
+    text = _refusal(excinfo, capsys)
+    assert str(gone) in text, text
+    assert not any(str(p) in text for p in present), text
+    assert not (w.results / row).exists()
+    assert _tree(w.results) == results
+    assert w.ledger.read_bytes() == ledger_bytes
+    assert world.reads[n_2012:] == [] and world.reads_2013[n_2013:] == []
+    assert world.trips[n_trips:] == []
 
 
 def test_the_full_final_touches_nothing_real_and_writes_no_ledger_row(world, final_run):

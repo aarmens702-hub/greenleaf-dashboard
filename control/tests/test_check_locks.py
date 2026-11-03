@@ -7,6 +7,10 @@ No test runs it on this repo (CI clones at depth 1), and none writes the real le
 Issue #71 counts final-results per seal: a final-registered row's seal (absent means 2012) is the
 seal its final-result spends. An unknown seal, a per_split whose keys aren't that seal's splits,
 or a second final-result for one seal is a violation; one final-result per seal is clean.
+
+Issue #72 nests a 2013 final-result's per_split by price regime ({split: {regime: {arm: entry}}});
+the ledger refuses a flat one, so the 2013 finals here are written nested. check_locks reads only
+per_split's split keys, which nesting leaves as they were.
 """
 
 import json
@@ -40,6 +44,7 @@ REGISTRATION = {
 DIAGNOSTICS = {"min_approx_kl": 0.002, "final_entropy": -1.5, "final_explained_variance": 0.8}
 SPLITS = ("amsterdam_2012", "london_2012", "abbotsford_2012")  # scenarios.TEST's keys
 SPLITS_2013 = ("amsterdam_2013", "london_2013", "abbotsford_2013")  # scenarios.TEST_2013's (#71)
+REGIMES = ("sim", "agc2020")  # metrics.PRICE_REGIMES' keys: a 2013 split's per_split keys (#72)
 SECOND_FINAL = "final-result-0badc0de"
 FOREIGN_SEAL = "final-registered-0badc0de"  # #71: a hand-written final-registered row
 
@@ -139,10 +144,11 @@ def _result(path: Path, registered: dict, run: dict) -> dict:
     )
 
 
-def _per_split(scored: dict, splits=SPLITS) -> dict:
+def _per_split(scored: dict, splits=SPLITS, regimes=None) -> dict:
     """A final-result's per_split: each test split (the 2012 seal's unless splits says otherwise)
     holds arm a, scored at scored ({run row_id: checkpoint}), and the two baselines, scored at
-    none."""
+    none. With regimes (#72, a 2013 final), each split holds each regime, and each regime those
+    arms."""
 
     def entry(arm: str, at: dict) -> dict:
         return {
@@ -156,7 +162,13 @@ def _per_split(scored: dict, splits=SPLITS) -> dict:
         }
 
     arms = {"a": scored, "rb_default": {}, "rb_tuned": {}}
-    return {split: {arm: entry(arm, at) for arm, at in arms.items()} for split in splits}
+
+    def graded() -> dict:
+        return {arm: entry(arm, at) for arm, at in arms.items()}
+
+    if regimes is None:
+        return {split: graded() for split in splits}
+    return {split: {regime: graded() for regime in regimes} for split in splits}
 
 
 def _final_register(path: Path, **seal) -> tuple[dict, dict]:
@@ -176,12 +188,14 @@ def _final_register(path: Path, **seal) -> tuple[dict, dict]:
 
 def _final(path: Path, **seal) -> tuple[dict, dict]:
     """Register the final evaluation at the last result's selected checkpoints and spend its seal
-    (2012's, or seal=2013's with the 2013 splits) once; return (final-registered, final-result)."""
+    (2012's, or seal=2013's with the 2013 splits, each nested by price regime, #72) once; return
+    (final-registered, final-result)."""
     freg, checkpoints = _final_register(path, **seal)
-    splits = SPLITS_2013 if seal.get("seal") == 2013 else SPLITS
-    fres = ledger.final_result(
-        final_registered=freg["row_id"], per_split=_per_split(checkpoints, splits), path=path
-    )
+    if seal.get("seal") == 2013:
+        per_split = _per_split(checkpoints, SPLITS_2013, regimes=REGIMES)
+    else:
+        per_split = _per_split(checkpoints)
+    fres = ledger.final_result(final_registered=freg["row_id"], per_split=per_split, path=path)
     return freg, fres
 
 
@@ -373,8 +387,9 @@ def test_two_final_results_exit_1_naming_the_second(tmp_path, monkeypatch):
 def test_a_2013_final_after_the_spent_2012_seal_is_clean(tmp_path, monkeypatch):
     """Each test year is its own seal: after a clean experiment, the 2012 final (no seal) is
     registered and spent and committed, then a seal-2013 final of the same checkpoints is
-    registered and spent with the 2013 splits and committed. Two final-results, one per seal, each
-    naming an earlier final-registered row with its fingerprints: exit 0, one summary line."""
+    registered and spent with the 2013 splits (each nested by price regime, #72) and committed. Two
+    final-results, one per seal, each naming an earlier final-registered row with its fingerprints:
+    exit 0, one summary line."""
     repo = _make_repo(tmp_path, monkeypatch)
     path = repo / LEDGER
     _clean_history(repo, path)

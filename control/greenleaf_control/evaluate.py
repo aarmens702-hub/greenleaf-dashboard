@@ -16,7 +16,8 @@ break the seal before any env is built, then scores the row's runs at their regi
 and its baselines on its seal's splits, and writes FINAL_RESULTS/<row>/
 (stamp.json, seasons.parquet, per_split.json) for `ledger final-result` to record, then replays/:
 export_replay's hourly JSON of every season of each arm's lowest registered seed and of every
-baseline, from the seasons it scored. make_raw_env
+baseline, from the seasons it scored. A 2013 final plays each season once and grades it at every
+price regime: two seasons.parquet rows per season and a per_split nested by regime. make_raw_env
 refuses TEST weather too. run_rb and run_policy pass allow_test through (default False); only the
 --final path (_final) sets it.
 """
@@ -227,6 +228,34 @@ def _score(
     return scored if return_trace else scored[0]
 
 
+def _regraded(result: dict, trace: tuple, regime: str, season_steps: int) -> dict:
+    """A played season's raw trace (states, controls, params) graded by metrics at regime's prices,
+    plus the play's own paper_reward_sum: a play quantity, the reward at the regime it was played
+    at, which grading at another regime doesn't change."""
+    states, controls, params = trace
+    graded = metrics.episode_metrics(
+        states, controls, params, season_steps=season_steps, prices=metrics.PRICE_REGIMES[regime]
+    )
+    return {**graded, "paper_reward_sum": result["paper_reward_sum"]}
+
+
+def _season_rows(season: dict, scored: tuple, played_at: str | None, season_steps: int) -> list:
+    """A --final play's seasons.parquet rows, season its identity columns. A 2012 final's
+    (played_at None): one row, its result. A later seal's (PROTOCOL §8): one row per price regime,
+    price_regime after the identity, the play's own result at played_at and its trace regraded at
+    each other regime."""
+    result = scored[0]
+    if played_at is None:
+        return [{**season, **result}]
+    rows = []
+    for regime in metrics.PRICE_REGIMES:
+        graded = (
+            result if regime == played_at else _regraded(result, scored[2], regime, season_steps)
+        )
+        rows.append({**season, "price_regime": regime, **graded})
+    return rows
+
+
 def _by_run(seasons: list[dict], split: str, arm: str, key: str) -> np.ndarray:
     """runs x scenarios of key for one arm on one split: runs as scored (by seed; a baseline is one
     run), scenarios in the split's order."""
@@ -247,9 +276,9 @@ def _shown(ci: dict) -> str:
 def _final(row_id: str, ledger_path: Path, parser: argparse.ArgumentParser) -> int:
     """evaluate --final <row>: the refusals in order, before any env, weather read or write; then
     every registered run at its checkpoint and every baseline on each of its seal's splits, once to
-    FINAL_RESULTS/<row>/, with replays/ of the traced seasons last. Writes no ledger row; prints the
-    command that records per_split.json, or raises with it after the replays if a traced season
-    ended early (it gets no replay)."""
+    FINAL_RESULTS/<row>/ (a 2013 final graded at every price regime, PROTOCOL §8), with replays/ of
+    the traced seasons last. Writes no ledger row; prints the command that records per_split.json,
+    or raises with it after the replays if a traced season ended early (it gets no replay)."""
     rows = ledger.rows(path=ledger_path)
     finals = [r for r in rows if r["kind"] == "final-registered"]
     row = next((r for r in finals if r["row_id"] == row_id), None)
@@ -282,6 +311,18 @@ def _final(row_id: str, ledger_path: Path, parser: argparse.ArgumentParser) -> i
         parser.error(
             f"--final {row_id}: {FINAL_RESULTS} is not empty: it holds {', '.join(stray)}, no spent"
             " seal's final; an earlier final already opened the test weather in this checkout"
+        )
+    # A registered rb_* baseline plays rule_based_<name>.yml, read only when its first season
+    # plays: a missing one would fail a final that has already opened its seal's test weather.
+    rules = {
+        b: rule_based.CONFIGS / f"rule_based_{b.removeprefix('rb_')}.yml"
+        for b in row["baselines"]
+        if b.startswith("rb_")
+    }
+    absent = [f"{b} has no {path}" for b, path in rules.items() if not path.is_file()]
+    if absent:
+        parser.error(
+            f"--final {row_id}: a registered baseline's rules are not on disk: {'; '.join(absent)}"
         )
     seal_splits = scenarios.SEALS[seal]
     scenarios.require_weather([s for split in seal_splits.values() for s in split])
@@ -335,6 +376,16 @@ def _final(row_id: str, ledger_path: Path, parser: argparse.ArgumentParser) -> i
             "checkpoint": c,
             "commit": trained["commit"],
         }
+    # A later seal's final plays each season once and grades it at every price regime (PROTOCOL
+    # §8): a run plays at its manifest's regime, as run_policy does, and a baseline at sim (the
+    # rules never see a price). A 2012 final grades each at its play's regime alone. Either way a
+    # replay's hourly counters are at its play's regime, as its totals are.
+    dual = seal != 2012
+    played_at = {}  # run row_id -> the regime it plays at
+    for _, run, _ in learning:
+        config = json.loads((Path(run["run_dir"]) / "manifest.json").read_text())["config"]
+        played_at[run["row_id"]] = config.get("price_regime", "sim")
+    full = SEASON_LENGTH * export_replay.N_DAY  # a season's steps, raw.N
 
     out = FINAL_RESULTS / row_id
     out.mkdir(parents=True, exist_ok=False)
@@ -352,49 +403,61 @@ def _final(row_id: str, ledger_path: Path, parser: argparse.ArgumentParser) -> i
                     s,
                     SEASON_LENGTH,
                     record_steps=trace,
-                    return_trace=trace,
+                    return_trace=trace or dual,
                     allow_test=True,
                 )
                 identity = {"arm": arm, "run": run["row_id"], "seed": run["seed"], "checkpoint": c}
-                seasons.append({**identity, **where, **scored[0]})
+                played = played_at[run["row_id"]]
+                seasons += _season_rows(
+                    {**identity, **where}, scored, played if dual else None, full
+                )
                 if trace:
-                    replays.append((arm, provenance[arm], split, s, scored))
+                    replays.append((arm, provenance[arm], split, s, played, scored))
             for b in row["baselines"]:
                 scored = _score(b, s, return_trace=True, allow_test=True)
                 identity = {"arm": b, "run": None, "seed": None, "checkpoint": None}
-                seasons.append({**identity, **where, **scored[0]})
-                replays.append((b, None, split, s, scored))
+                seasons += _season_rows(
+                    {**identity, **where}, scored, "sim" if dual else None, full
+                )
+                replays.append((b, None, split, s, "sim", scored))
     with (out / "seasons.parquet").open("xb") as f:
         pd.DataFrame(seasons).to_parquet(f)
 
     per_split = {}
     for split in seal_splits:
-        rb_tuned = _by_run(seasons, split, "rb_tuned", FINAL_PRIMARY)
-        per_split[split] = {}
-        for arm in [*sorted(arms), *row["baselines"]]:
-            primary = _by_run(seasons, split, arm, FINAL_PRIMARY)
-            numbers = {
-                **_ci(primary),
-                "guards": {g: _ci(_by_run(seasons, split, arm, g)) for g in FINAL_GUARDS},
-                "invalid_episodes": sum(
-                    not s["valid"] for s in seasons if s["split"] == split and s["arm"] == arm
-                ),
-                "prob_improvement": None
-                if arm == "rb_tuned"
-                else stats.prob_improvement(primary, rb_tuned),
-                "scored": arms.get(arm, {}),
-            }
-            per_split[split][arm] = numbers
-            guards = "  ".join(f"{g} {_shown(numbers['guards'][g])}" for g in FINAL_GUARDS)
-            p = numbers["prob_improvement"]
-            line = (
-                f"{split}  {arm}  {FINAL_PRIMARY} {_shown(numbers)}  {guards}"
-                f"  P(improvement) {'null' if p is None else f'{p:.3f}'}"
-                f"  n_runs {len(primary)}  invalid_episodes {numbers['invalid_episodes']}"
-            )
-            if arm in arms and len(primary) < 5:
-                line += f"  {NO_CLAIM}"
-            print(line)
+        # A later seal's split holds each price regime, with stats on that regime's rows alone; a
+        # 2012 final's rows carry no price_regime, so its one pass (regime None) takes them all.
+        for regime in metrics.PRICE_REGIMES if dual else [None]:
+            graded = [season for season in seasons if season.get("price_regime") == regime]
+            entries = per_split.setdefault(split, {})
+            if regime is not None:
+                entries = entries.setdefault(regime, {})
+            label = split if regime is None else f"{split}  {regime}"
+            rb_tuned = _by_run(graded, split, "rb_tuned", FINAL_PRIMARY)
+            for arm in [*sorted(arms), *row["baselines"]]:
+                primary = _by_run(graded, split, arm, FINAL_PRIMARY)
+                numbers = {
+                    **_ci(primary),
+                    "guards": {g: _ci(_by_run(graded, split, arm, g)) for g in FINAL_GUARDS},
+                    "invalid_episodes": sum(
+                        not s["valid"] for s in graded if s["split"] == split and s["arm"] == arm
+                    ),
+                    "prob_improvement": None
+                    if arm == "rb_tuned"
+                    else stats.prob_improvement(primary, rb_tuned),
+                    "scored": arms.get(arm, {}),
+                }
+                entries[arm] = numbers
+                guards = "  ".join(f"{g} {_shown(numbers['guards'][g])}" for g in FINAL_GUARDS)
+                p = numbers["prob_improvement"]
+                line = (
+                    f"{label}  {arm}  {FINAL_PRIMARY} {_shown(numbers)}  {guards}"
+                    f"  P(improvement) {'null' if p is None else f'{p:.3f}'}"
+                    f"  n_runs {len(primary)}  invalid_episodes {numbers['invalid_episodes']}"
+                )
+                if arm in arms and len(primary) < 5:
+                    line += f"  {NO_CLAIM}"
+                print(line)
     text = json.dumps({"per_split": per_split}, sort_keys=True, indent=2, allow_nan=False)
     numbers_path = out / "per_split.json"
     with numbers_path.open("x") as f:
@@ -405,9 +468,9 @@ def _final(row_id: str, ledger_path: Path, parser: argparse.ArgumentParser) -> i
         f" --final-registered {row_id} --numbers {numbers_path}"
     )
 
-    full, short = SEASON_LENGTH * export_replay.N_DAY, []
+    short = []
     (out / "replays").mkdir()
-    for name, run, split, s, (result, frame, (states, controls, params)) in replays:
+    for name, run, split, s, played, (result, frame, (states, controls, params)) in replays:
         if len(frame) != full:  # a solver failure ended it early: no replay of a partial season
             short.append(f"{name} {split} day {s['start_day']}: {len(frame)} of {full} steps")
             continue
@@ -422,10 +485,13 @@ def _final(row_id: str, ledger_path: Path, parser: argparse.ArgumentParser) -> i
             stamp=replay_stamp,
             split=split,
             run=run,
+            prices=metrics.PRICE_REGIMES[played],
         )
         named = (
             name if run is None else f"{name} seed {run['seed']} at checkpoint {run['checkpoint']}"
         )
+        if dual:  # a later seal's: totals are the row at the regime it played at
+            named += f", played at {played} prices"
         payload["meta"]["note"] = f"registered final {row_id}: {named}"
         path = out / "replays" / f"{name}_{s['location']}_{s['growth_year']}_{s['start_day']}.json"
         with path.open("x", encoding="utf-8") as f:
