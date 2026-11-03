@@ -591,3 +591,47 @@ Paths are relative to `control/`. Scenario dicts are `{"location": str, "growth_
 - `main(argv=None, *, ledger_path=ledger.LEDGER) -> int`; CLI `python -m greenleaf_control.site_build --out DIR
   [--force]` (`--out` required). Prints one line per file group (the site files, `<n> replays`, `index.json`,
   `results.json`) and `<files> files, <bytes> bytes`; returns 0.
+
+## `greenleaf_control.prices` (#68, exploratory; plays no season, writes no ledger row)
+- **Re-prices recorded seasons only:** profit is linear in each price, so a season's recorded `yield_kg_m2`,
+  `heat_cost`, `elec_cost` and `co2_cost` (at `metrics.PRICES`) give its profit at other prices exactly. No env,
+  `evaluate`, `report`, `selection` or `export_replay` is imported; no weather file is opened; the 2012 seal is not
+  reopened (the test seasons are the final's recorded ones). Every output says "exploratory, re-priced recorded
+  seasons".
+- `REGIMES`: `sim` (a copy of `metrics.PRICES`) and `agc2020` (heat 0.03 €/kWh and CO₂ 0.08 €/kg (its ≤ 12 kg/m²
+  tier) from the 2nd Autonomous Greenhouse Challenge's 2020 net-profit scoring (Hemming et al. 2020, Sensors
+  20(22):6430); electricity 0.06 €/kWh, the unweighted mean of its 0.08 on-peak (07:00-23:00) and 0.04 off-peak
+  tariffs, flat, not time-of-use; fruit 1.6 €/kg and dmfm 0.065 are the simulator's), the numbers #67 puts in
+  `metrics.PRICE_REGIMES`. `PAIRS`: (ppo, rb_default), (ppo,
+  residual_w05), (zero_controls, rb_default), (rb_tuned, rb_default), (residual_w05, rb_tuned).
+- `reprice(seasons, prices) -> np.ndarray`: `yield × fruit − heat_cost × heat/0.09 − elec_cost × elec/0.30 −
+  co2_cost × co2/0.30` per row. A `dmfm` other than `metrics.PRICES["dmfm"]` is a ValueError.
+- `load_seasons(*, ledger_path=ledger.LEDGER) -> pd.DataFrame`: one row per recorded season (`split, controller,
+  seed, location, growth_year, start_day, yield_kg_m2, heat_cost, elec_cost, co2_cost, profit_eur_m2,
+  viol_hours_{co2,temp,rh}, valid, run, source`; `seed` float, NaN for a baseline). Validation: the rows of
+  `control/results/analysis/validation/scores.parquet` whose label `site_build._validation_arms` maps, `controller` =
+  the final's arm id. The 2012 splits: every row of `control/results/final/<final-registered row>/seasons.parquet`,
+  found from the ledger's one `final-result` row, random included. No `final-result` row: ValueError naming it.
+- `tables(seasons) -> {"regimes", "sweep", "crossovers"}`, per split present. A controller's matrix is its runs (by
+  seed) × scenarios (`scenarios.SPLITS` order), as `report._matrix`.
+  - `regimes`: `split, regime, rank, controller, n_runs, profit_{iqm,lo,hi}, gain_rb_tuned_{iqm,lo,hi},
+    gain_rb_default_{iqm,lo,hi}, viol_hours_iqm, yield_iqm`: `stats.iqm_ci` of the profit matrix and of it minus the
+    baseline's 1 × S row; rank 1 the highest profit IQM in its split and regime; Σ hours (co2 + temp + rh) and yield
+    IQMs are price-free.
+  - `sweep`: `split, sweep, x, heat, elec, co2, controller, profit_iqm` (rliable's point IQM). `lambda`: x in
+    `linspace(0, 1, 41)`, heat, elec and co2 moved x of the way from agc2020 to sim; `elec`: x = 0.02 to 0.40 €/kWh
+    in 0.01 steps, heat and co2 at agc2020's. Fruit and dmfm fixed.
+  - `crossovers`: `split, sweep, controller, versus, x, note`, one row per sign change along each sweep of each pair's
+    difference, x linearly interpolated between the two grid points; none is one row, x NaN, note `none in range`.
+    The difference is the paired-gain IQM against rb_default or rb_tuned, the difference of point IQMs for (ppo,
+    residual_w05).
+- `main(argv=None, *, ledger_path=ledger.LEDGER) -> int`; CLI `python -m greenleaf_control.prices [--out DIR]`, `--out`
+  defaulting to `control/results/analysis/prices`.
+  - Loads, then checks every row (random included): `reprice` at sim within 1e-9 €/m² of the recorded
+    `profit_eur_m2`, else ValueError naming the split, controller, run, seed and start day with both values. Drops
+    random, then refuses (ValueError) an invalid season of a kept controller. Everything is computed before `out` is
+    made; a refusal writes nothing.
+  - Writes `regimes.csv`, `sweep.csv`, `crossovers.csv` (full precision), `summary.md` (line 1 names the command and
+    says "exploratory, re-priced recorded seasons"; no timestamp or out path; the electricity-only crossovers beside
+    Eurostat's non-household electricity prices, an annotation) and `sweep.png` (profit IQM vs λ per controller, one
+    panel per 2012 split, `site_build.CONTROLLERS` display names, every text ≥ 9 pt); returns 0.

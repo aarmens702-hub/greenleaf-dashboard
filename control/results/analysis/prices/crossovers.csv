@@ -1,0 +1,41 @@
+split,sweep,controller,versus,x,note
+validation,lambda,ppo,rb_default,0.31094910035841083,controller ahead above x
+validation,lambda,ppo,residual_w05,0.659357882510788,controller ahead above x
+validation,lambda,zero_controls,rb_default,0.45939824426489184,controller ahead above x
+validation,lambda,rb_tuned,rb_default,0.19173309094217775,controller ahead above x
+validation,lambda,residual_w05,rb_tuned,,none in range
+validation,elec,ppo,rb_default,0.14562656356822792,controller ahead above x
+validation,elec,ppo,residual_w05,0.3627428508884445,controller ahead above x
+validation,elec,zero_controls,rb_default,0.23719760282592814,controller ahead above x
+validation,elec,rb_tuned,rb_default,0.10405253814323621,controller ahead above x
+validation,elec,residual_w05,rb_tuned,,none in range
+amsterdam_2012,lambda,ppo,rb_default,0.2927220426479689,controller ahead above x
+amsterdam_2012,lambda,ppo,residual_w05,0.5372643334111759,controller ahead above x
+amsterdam_2012,lambda,zero_controls,rb_default,0.3828020862656755,controller ahead above x
+amsterdam_2012,lambda,rb_tuned,rb_default,0.17963864955519201,controller ahead above x
+amsterdam_2012,lambda,residual_w05,rb_tuned,,none in range
+amsterdam_2012,elec,ppo,rb_default,0.1386093269813607,controller ahead above x
+amsterdam_2012,elec,ppo,residual_w05,0.28055570507339816,controller ahead above x
+amsterdam_2012,elec,zero_controls,rb_default,0.20435278088087738,controller ahead above x
+amsterdam_2012,elec,rb_tuned,rb_default,0.10103201327266029,controller ahead above x
+amsterdam_2012,elec,residual_w05,rb_tuned,,none in range
+london_2012,lambda,ppo,rb_default,0.31678111637825296,controller ahead above x
+london_2012,lambda,ppo,residual_w05,0.6431251873101086,controller ahead above x
+london_2012,lambda,zero_controls,rb_default,0.45674676623093985,controller ahead above x
+london_2012,lambda,rb_tuned,rb_default,0.1783177373320915,controller ahead above x
+london_2012,lambda,residual_w05,rb_tuned,,none in range
+london_2012,elec,ppo,rb_default,0.14540716205764553,controller ahead above x
+london_2012,elec,ppo,residual_w05,0.3433177935288153,controller ahead above x
+london_2012,elec,zero_controls,rb_default,0.2379011068124291,controller ahead above x
+london_2012,elec,rb_tuned,rb_default,0.10023751164272796,controller ahead above x
+london_2012,elec,residual_w05,rb_tuned,,none in range
+abbotsford_2012,lambda,ppo,rb_default,0.2754444038098375,controller ahead above x
+abbotsford_2012,lambda,ppo,residual_w05,0.5093777986084564,controller ahead above x
+abbotsford_2012,lambda,zero_controls,rb_default,0.3765525795844049,controller ahead above x
+abbotsford_2012,lambda,rb_tuned,rb_default,0.19177926044878157,controller ahead above x
+abbotsford_2012,lambda,residual_w05,rb_tuned,,none in range
+abbotsford_2012,elec,ppo,rb_default,0.129022367931275,controller ahead above x
+abbotsford_2012,elec,ppo,residual_w05,0.23750532834125118,controller ahead above x
+abbotsford_2012,elec,zero_controls,rb_default,0.18763446200920417,controller ahead above x
+abbotsford_2012,elec,rb_tuned,rb_default,0.1025974688701645,controller ahead above x
+abbotsford_2012,elec,residual_w05,rb_tuned,,none in range
