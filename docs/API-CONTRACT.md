@@ -635,3 +635,52 @@ Paths are relative to `control/`. Scenario dicts are `{"location": str, "growth_
     says "exploratory, re-priced recorded seasons"; no timestamp or out path; the electricity-only crossovers beside
     Eurostat's non-household electricity prices, an annotation) and `sweep.png` (profit IQM vs λ per controller, one
     panel per 2012 split, `site_build.CONTROLLERS` display names, every text ≥ 9 pt); returns 0.
+
+## `greenleaf_control.rule_family` (#69, exploratory; VALIDATION weather only, writes no ledger row)
+- **Plays the rule family on VALIDATION weather (Amsterdam 2010, start days 45, 59, 75); nothing trains and nothing
+  is selected.** Every season is played once at sim and re-priced at agc2020 with `prices.reprice` and
+  `metrics.PRICE_REGIMES`. VALIDATION selected the agents' checkpoints, so the comparison is in-sample for them; every
+  output says "VALIDATION weather; exploratory analysis; nothing trains or is selected". Only `Amsterdam/2010.csv`
+  is read.
+- `OUT = control/results/analysis/rule_family` (both commands' default `--out`); `VALIDATION_SCORES =
+  control/results/analysis/validation/scores.parquet`, read at call time. `LABELS`: `ppo #33/0221`, `ppo_paper
+  #31/2d02`, `residual_w05 #36/f2fd`, `lag_b100 #39/6d92`, `rb_default`, `rb_tuned` → their controller ids.
+- `sample_settings(n, seed) -> list[dict]`: `[load_rb_params("default"), load_rb_params("tuned")]`, then `n` draws
+  from one `np.random.default_rng(seed)`: the defaults overlaid with one `rng.uniform(lo, hi)` per
+  `tune_rb.TUNE_SPACE` key, in its order. A setting's id is its index.
+- `skip_reason(scenario, season_length) -> str | None`: a reason naming day 365 when `start_day + season_length ≥
+  365` (upstream's loader reads the weather 0.5 day past a season's end, so a season ending on day 365 already opens
+  the next year's file), else None.
+- `compare(frontier, points) -> pd.DataFrame`: `points` (`controller, label, regime, profit_iqm, yield_iqm,
+  viol_hours_iqm`) plus `best_setting, best_profit, gap, n_qualifying, note`: among `frontier`'s valid settings with
+  `yield_kg_m2 ≥ yield_iqm` and `viol_hours ≤ viol_hours_iqm` (both within 1e-9), the one with the highest
+  `profit_<regime>`; `gap = profit_iqm − best_profit`. None qualifying: NA, NaN, NaN, 0, `no setting qualifies`.
+  `best` is in-sample too (a maximum over the qualifying settings on the same 3 VALIDATION seasons, optimistic for
+  the rules, more so as `n_qualifying` grows); `gap` is descriptive, not an out-of-sample estimate.
+- `main(argv=None) -> int`; CLI `python -m greenleaf_control.rule_family {frontier,horizon}`. `--jobs J` (default 1):
+  1 plays every season in the calling process through `evaluate.run_rb` / `envs.run_baseline`, looked up at call
+  time; more uses J spawned worker processes, results in task order, so any `--jobs` writes the same bytes.
+  Everything is played, checked and computed before `--out` is made: every played season and every recorded season
+  of a `LABELS` entry must re-price at sim to its recorded `profit_eur_m2` within 1e-9 €/m², and no recorded one may
+  be invalid, else ValueError and nothing is written.
+  - `frontier [--n 1000] [--seed 0] [--season-length 60]`: every setting of `sample_settings(n, seed)` on the 3
+    seasons via `evaluate.run_rb(params, scenario, season_length)`; a season length with a `skip_reason` (ending on
+    or past day 365) for any season is a ValueError naming 365, before anything is played or written.
+    Writes `frontier_seasons.csv` (`setting, start_day, profit_eur_m2, yield_kg_m2, heat_cost, elec_cost, co2_cost,
+    viol_hours_{co2,temp,rh}, valid`; an invalid season is flagged, never dropped), `frontier.csv` (`setting, valid,
+    profit_sim, profit_agc2020, yield_kg_m2, viol_hours, heat_cost, elec_cost, co2_cost`: means over the 3 seasons,
+    Σ hours = co2 + temp + rh, valid = all 3 valid; an invalid setting stays, excluded from `compare`),
+    `frontier_summary.csv` (one row per `LABELS` entry × regime: rliable's IQM over the label's runs × seasons of
+    re-priced profit and of yield, Σ hours = the sum of the 3 per-constraint IQMs, then `compare`'s columns),
+    `frontier.md` (line 1 the command with `--n`, `--seed`, `--season-length`; in-sample; the excluded count; best
+    in-sample and optimistic for the rules, gap descriptive; zero_controls and random left out, and why; the hours
+    column named "Σ per-constraint IQMs") and `frontier.png` (per regime, valid settings as grey points at (fruit,
+    profit), each label's IQM as a marker; the footer says in-sample and "Σ hours not shown").
+  - `horizon [--lengths 60 120 180 240 300]`: rb_default and rb_tuned (`evaluate.run_rb`) and zero_controls
+    (`envs.run_baseline`, graded by `metrics` on the raw env's params and N) on each season × length; a cell with a
+    `skip_reason` is never played. Writes `horizon.csv` (`controller, start_day, length, profit_sim, profit_agc2020,
+    yield_kg_m2, viol_hours, valid, note`; a skipped cell has NaN numbers and its reason in `note`), `horizon.md`
+    (line 1 the command with `--lengths`; the skip reasons; profit, fruit and Σ hours tables) and `horizon.png`
+    (profit vs season length per controller, a line per start day, per regime).
+  - Figures: `Figure(layout="constrained")`, 200 dpi, every text ≥ 9 pt, `site_build.CONTROLLERS` display names, one
+    panel per regime titled with its name. No clock time or out path in the `.md` files. Returns 0.
