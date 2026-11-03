@@ -819,7 +819,7 @@ def main(argv: list[str] | None = None) -> int:
         run = export_replay._season(str(pick["run_dir"]), SEASON, pick)
         sides = (
             ("rb_tuned", "Tuned rules", rb_tuned, pick["rb_record"]),
-            (f"{pick['arm']} {pick['id']}", "Rules + co-pilot", run, pick["record"]),
+            (f"{pick['arm']} {pick['id']}", "Rules + residual agent", run, pick["record"]),
         )
         for side, _, (_, got, _), want in sides:
             off = [
@@ -900,8 +900,8 @@ def main(argv: list[str] | None = None) -> int:
         low, high = metrics.BOUNDS["temp"]
         caption = (
             f"air temperature, blue {TEMP_SCALE[0]:g} °C to rust {TEMP_SCALE[1]:g} °C, one cell an"
-            f" hour; safe range {low:g} to {high:g} °C.\nCo-pilot: {pick['id']}, {pick['arm']} seed"
-            f" {pick['seed']}, checkpoint {pick['checkpoint']}"
+            f" hour; safe range {low:g} to {high:g} °C.\nResidual agent: {pick['id']},"
+            f" {pick['arm']} seed {pick['seed']}, checkpoint {pick['checkpoint']}"
         )
         replay_rows = [pick["id"], pick["result"], pick["decision"], E1_RESULT]
         run_name = (

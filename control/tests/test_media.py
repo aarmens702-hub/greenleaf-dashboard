@@ -358,7 +358,7 @@ REPLAY_NAMES = (
     "duel_replay",
 )
 REPLAY_FILES = ("duel_replay.gif", "duel_replay.mp4", "hero.png")
-TOP, BOTTOM = "Tuned rules", "Rules + co-pilot"  # the panels' headings, top to bottom
+TOP, BOTTOM = "Tuned rules", "Rules + residual agent"  # the panels' headings, top to bottom (#64)
 STRIPES_TITLE = "2 days of greenhouse air, hour by hour"
 # A caption and footer the renderer tests pass in: no decimal number, so none is mistaken for a
 # total.
@@ -2722,7 +2722,7 @@ def test_main_replay_plays_the_picked_run_and_names_it_everywhere(sources, tmp_p
         out / name for name in REPLAY_FILES
     ]
     top, bottom = duel["panels"]
-    assert "tuned rules" in top["heading"].lower() and "co-pilot" in bottom["heading"].lower()
+    assert "tuned rules" in top["heading"].lower() and "residual agent" in bottom["heading"].lower()
     for panel, season in ((top, rb), (bottom, run)):
         pd.testing.assert_frame_equal(panel["frame"], season["frame"], check_exact=True)
         assert _keys(panel["result"]) == _record(season["result"]), panel["heading"]
@@ -2740,6 +2740,7 @@ def test_main_replay_plays_the_picked_run_and_names_it_everywhere(sources, tmp_p
     assert _whole(said, 59), said
     for part in (rid, "1750000"):
         assert part in caption, (part, caption)
+    assert f"Residual agent: {rid}" in caption, caption  # #64: the caption's line, not "Co-pilot: "
     for n in (107, 10, 36, 15, 34):
         assert _whole(caption, n), (n, caption)
     foot = " ".join(duel["footer"].split())

@@ -2,7 +2,7 @@
 
 ## The pitch
 At the RBC × BCCAI × SFU hackathon, GreenLeaf warned growers before their plants got stressed, and placed 2nd.
-GreenLeaf 2.0 acts on those warnings. It is an AI co-pilot that runs a tomato greenhouse on top of the grower's own
+GreenLeaf 2.0 acts on those warnings. It is a residual RL agent that runs a tomato greenhouse on top of the grower's own
 rules. It looks for extra profit and is never allowed to break the plants' climate limits more often than the grower
 does.
 
