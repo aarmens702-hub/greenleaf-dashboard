@@ -13,11 +13,12 @@ from gl_gym.components.rule_based import RuleBasedController
 from gl_gym.core.types import StepContext
 
 CONFIGS = Path(__file__).resolve().parents[1] / "configs"
-NAMES = ("default", "tuned")
+# tuned_agc2020 is tune_rb --price-regime agc2020's params (PROTOCOL §3, equal effort per regime).
+NAMES = ("default", "tuned", "tuned_agc2020")
 
 
 def load_rb_params(name: str) -> dict:
-    """The controller's parameters from configs/rule_based_<name>.yml; name is "default" or "tuned"."""
+    """The controller's parameters from configs/rule_based_<name>.yml; name is one of NAMES."""
     if name not in NAMES:
         raise ValueError(f"unknown rule-based params {name!r}; expected one of {NAMES}")
     return yaml.safe_load((CONFIGS / f"rule_based_{name}.yml").read_text())["GreenLightEnv"]

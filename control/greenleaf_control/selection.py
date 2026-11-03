@@ -19,7 +19,8 @@ results/validation/<row>.json):
   that isn't a RESULT_KEYS entry, and a selected.json not made on VALIDATION in 60-day seasons.
 - Each run that didn't crash is scored on VALIDATION: a learning run from its chosen checkpoint's
   per_scenario results (its selected.json, or select_checkpoint's), rb_tuned with evaluate.run_rb
-  on its run dir's rule_based_tuned.yml.
+  on its run dir's rule_based_tuned.yml at the arms' price regime. A registration whose arms mix
+  price regimes (an arm naming none is sim) is refused before anything is scored.
 - per_arm[arm] is stats.iqm_ci of the primary and each guard on the runs (by seed) x VALIDATION
   array, null with no run to score, and invalid_episodes; selected maps each learning run to its
   checkpoint. crashed and spend_usd are the ledger's to add.
@@ -218,11 +219,15 @@ def _read(method: str, run_dir: Path) -> dict | None:
     return selected
 
 
-def _seasons(method: str, run_dir: Path, read: dict | None) -> tuple[list[dict], str | None]:
-    """A run's VALIDATION seasons, in order, and its checkpoint (None for rb_tuned)."""
+def _seasons(
+    method: str, run_dir: Path, read: dict | None, price_regime: str
+) -> tuple[list[dict], str | None]:
+    """A run's VALIDATION seasons, in order, and its checkpoint (None for rb_tuned, played and
+    graded at price_regime; a learning run's are at its manifest's)."""
     if method == "rb_tuned":
         seasons = [
-            evaluate.run_rb(read, s, evaluate.SEASON_LENGTH)[0] for s in scenarios.VALIDATION
+            evaluate.run_rb(read, s, evaluate.SEASON_LENGTH, price_regime=price_regime)[0]
+            for s in scenarios.VALIDATION
         ]
         return seasons, None
     if read is None:
@@ -256,6 +261,14 @@ def main(argv: list[str] | None = None, *, ledger_path: Path = ledger.LEDGER) ->
     if out.exists():
         raise FileExistsError(f"{out} already exists; a numbers file is written once")
     reg, runs = _registration(args.registered, ledger_path)
+    # PROTOCOL §4: a registration's arms are graded at one price regime; an arm naming none is sim.
+    regimes = sorted({arm["config"].get("price_regime", "sim") for arm in reg["arms"]})
+    if len(regimes) != 1:
+        raise ValueError(
+            f"{reg['row_id']}: its arms mix price regimes {regimes} (an arm that names no"
+            " price_regime is sim); one registration compares its arms at one price_regime"
+        )
+    [price_regime] = regimes
     ends = ledger._run_ends(ledger.rows(path=ledger_path), reg["row_id"])  # the result's crashed
     methods = {arm["name"]: arm["method"] for arm in reg["arms"]}
     # Every selected.json and rb_tuned's params, checked before a season is played or a file written.
@@ -269,7 +282,9 @@ def main(argv: list[str] | None = None, *, ledger_path: Path = ledger.LEDGER) ->
     for name, arm_runs in runs.items():
         by_run = []
         for run in arm_runs:
-            seasons, checkpoint = _seasons(methods[name], Path(run["run_dir"]), read[run["row_id"]])
+            seasons, checkpoint = _seasons(
+                methods[name], Path(run["run_dir"]), read[run["row_id"]], price_regime
+            )
             by_run.append(seasons)
             if checkpoint is not None:
                 selected[run["row_id"]] = checkpoint

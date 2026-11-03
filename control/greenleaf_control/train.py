@@ -56,7 +56,7 @@ VECNORMALIZE = {"norm_obs": True, "norm_reward": True, "clip_obs": 10.0, "clip_r
 # make_env's co-pilot scale (PROTOCOL §3), recorded in the manifest, not set here.
 RESIDUAL_SCALE = inspect.signature(envs.make_env).parameters["residual_scale"].default
 # The run-shaping flags' CLI defaults; a registered run must be at one its arm doesn't name.
-SEASON_LENGTH, N_ENVS, PENALTY_WEIGHT, RB = 60, 4, 1.0, "tuned"
+SEASON_LENGTH, N_ENVS, PENALTY_WEIGHT, RB, PRICE_REGIME = 60, 4, 1.0, "tuned", "sim"
 # configs/ppo.yml's policy_kwargs strings, mapped explicitly; any other string raises.
 FROM_YML = {
     "optimizer_class": {"adam": torch.optim.Adam},
@@ -91,7 +91,8 @@ def build_vec_env(
     """The run's env stack, env i = make_env(method, seed=seed + i), VecNormalize training.
 
     scenario and season_length override the config's weather and season (for evaluation).
-    allow_test passes through to make_env; only evaluate --final sets it.
+    allow_test passes through to make_env; only evaluate --final sets it. The envs are priced at
+    the config's price_regime, sim for a config without one (every run recorded before v3).
     """
     # The residual arms' recorded scale; the other arms don't use one, so make_env's default stands.
     scale = config.get("residual_scale")
@@ -106,6 +107,7 @@ def build_vec_env(
             rb_params=config.get("rb_params"),
             **({} if scale is None else {"residual_scale": scale}),
             allow_test=allow_test,
+            price_regime=config.get("price_regime", PRICE_REGIME),
         )
         for i in range(n_envs)
     ]
@@ -269,6 +271,7 @@ def _registration(
         "rb": RB if method in RESIDUAL else None,  # --rb is ignored outside the residual arms
         "penalty_weight": 0.0 if method == "residual_lag" else PENALTY_WEIGHT,  # lag forces w = 0
         "budget_frac": None,  # residual_lag requires --budget-frac, so its arm must name it
+        "price_regime": PRICE_REGIME,
     }
     same = [a for a in row["arms"] if a["method"] == method]
     differs = [
@@ -330,6 +333,12 @@ def _parser() -> argparse.ArgumentParser:
         default=RB,
         help=f"the residual arms' RB params (default {RB})",
     )
+    p.add_argument(
+        "--price-regime",
+        choices=list(envs.REWARD_PRICES),
+        default=PRICE_REGIME,
+        help=f"the reward's prices, PROTOCOL §1 (default {PRICE_REGIME})",
+    )
     mode = p.add_mutually_exclusive_group(required=True)
     mode.add_argument(
         "--smoke", action="store_true", help="20,000 steps, 2-day seasons, no ledger row"
@@ -381,6 +390,7 @@ def main(argv: list[str] | None = None, *, ledger_path: Path = ledger.LEDGER) ->
         "rb": args.rb if residual else None,
         "rb_params": rule_based.load_rb_params(args.rb) if residual else None,
         "residual_scale": RESIDUAL_SCALE if residual else None,
+        "price_regime": args.price_regime,
         "vecnormalize": {**VECNORMALIZE, "gamma": _ppo_yml()["gamma"]},
     }
     if args.smoke:

@@ -26,7 +26,8 @@ Paths are relative to `control/`. Scenario dicts are `{"location": str, "growth_
 - `constraint_costs(info: dict) -> np.ndarray` of shape (3,), in CONSTRAINTS order.
 
 ## `greenleaf_control.rule_based`
-- `load_rb_params(name: str) -> dict`: `name` is `"default"` or `"tuned"` (`configs/rule_based_<name>.yml`).
+- `load_rb_params(name: str) -> dict`: `name` is one of `NAMES = ("default", "tuned", "tuned_agc2020")`
+  (`configs/rule_based_<name>.yml`; `tuned_agc2020` is `tune_rb --price-regime agc2020`'s).
 - `make_controller(params: dict) -> RuleBasedController`
 - `rb_action(raw_env, controller) -> np.ndarray`: float32, shape (6,), clipped to [0, 1]; computed from the current
   step's state (StepContext built from `raw_env.unwrapped`).
@@ -34,10 +35,15 @@ Paths are relative to `control/`. Scenario dicts are `{"location": str, "growth_
 ## `greenleaf_control.envs` (scorer file)
 - `METHODS = ("ppo_paper", "ppo", "residual", "residual_lag")`
 - `BASELINES = ("zero_controls", "random", "rb_default", "rb_tuned")`
+- `REWARD_PRICES = {"sim": {}, "agc2020": {"fruit_price": 1.6, "heating_price": 0.03, "elec_price": 0.06,
+  "co2_price": 0.08}}`: PROTOCOL §1's price regimes in upstream's reward kwarg names, written apart from
+  `metrics.PRICE_REGIMES`.
 - `make_raw_env(*, scenario: dict | None = None, sampler_kwargs: dict | None = None, season_length: int = 60,
-  normalize_actions: bool, penalty_weight: float = 1.0, season_progress: bool = False, allow_test: bool = False)
-  -> gym.Env`
+  normalize_actions: bool, penalty_weight: float = 1.0, season_progress: bool = False, allow_test: bool = False,
+  price_regime: str = "sim") -> gym.Env`
   - Always uses `ConstraintCostReward` and `weather_data_dir=WEATHER_DIR`.
+  - `reward_kwargs` = upstream's registered ones, then `REWARD_PRICES[price_regime]` over them, then
+    `penalty_weight`; `sim` overrides nothing. An unknown `price_regime` raises ValueError naming it.
   - A fixed `scenario` uses the fixed sampler; `sampler_kwargs` uses the random one.
   - Refuses a TEST scenario unless `allow_test=True` is passed. Only `evaluate --final` sets it True (plus the
     reset-only weather test). `make_env`, `run_baseline`, `train.build_vec_env`, `evaluate.run_rb` and `run_policy`
@@ -48,8 +54,9 @@ Paths are relative to `control/`. Scenario dicts are `{"location": str, "growth_
     then `SeasonProgress` if asked).
   - Every step's info carries `x_prev` and `x`: float64 copies of the raw state before and after the step.
 - `make_env(method: str, *, seed: int, scenario: dict | None = None, season_length: int = 60, penalty_weight: float = 1.0,
-  rb_params: dict | None = None, residual_scale: float = 0.15, allow_test: bool = False) -> gym.Env`
-  - `allow_test` passes through to `make_raw_env`; only `evaluate --final` sets it.
+  rb_params: dict | None = None, residual_scale: float = 0.15, allow_test: bool = False, price_regime: str = "sim")
+  -> gym.Env`
+  - `allow_test` passes through to `make_raw_env`; only `evaluate --final` sets it. `price_regime` passes through too.
   - Returns a flat `Box` observation.
   - `ppo_paper`: PAPER, normalized rate actions, upstream observations.
   - `ppo`: TRAIN sampler, normalized rate actions, plus season progress.
@@ -63,15 +70,19 @@ Paths are relative to `control/`. Scenario dicts are `{"location": str, "growth_
 - `class SeasonProgress(gym.ObservationWrapper)`: appends `timestep / N` in [0, 1].
 - `class SolverFailureFlag(gym.Wrapper)`: sets `info["solver_failure"] = bool(truncated)` (nothing truncates for time;
   a season ends terminated after exactly N steps).
-- `run_baseline(name: str, scenario: dict, season_length: int = 60, *, allow_test: bool = False) -> list[dict]`: a full
-  episode's per-step info dicts for a BASELINES entry (`random` is seeded by the scenario's start day). `allow_test`
-  passes through to `make_raw_env`; only `evaluate --final` sets it.
+- `run_baseline(name: str, scenario: dict, season_length: int = 60, *, allow_test: bool = False,
+  price_regime: str = "sim") -> list[dict]`: a full episode's per-step info dicts for a BASELINES entry (`random` is
+  seeded by the scenario's start day). `allow_test` and `price_regime` pass through to `make_raw_env`; only
+  `evaluate --final` sets `allow_test`.
 
 ## `greenleaf_control.metrics` (scorer file; never imports `rewards`)
 - `episode_metrics(states: np.ndarray, controls: np.ndarray, params: np.ndarray, *, dt: float = 900.0,
   season_steps: int, prices: dict = PRICES, bounds: dict = BOUNDS) -> dict`
   - `states` has shape (T + 1, nx); `controls` has shape (T, 6).
   - `prices` and `bounds` default to the module constants `PRICES` and `BOUNDS` (`docs/PROTOCOL.md` §1).
+- `PRICE_REGIMES = {"sim": PRICES, "agc2020": {"fruit": 1.6, "dmfm": 0.065, "heat": 0.03, "elec": 0.06,
+  "co2": 0.08}}` (PROTOCOL §1); `PRICES` is `sim`, upstream's prices. A season at regime r is graded with
+  `prices=PRICE_REGIMES[r]`.
   - Keys per `docs/PROTOCOL.md` §4, plus `steps` and `valid`.
 - `trace_from_infos(infos: list[dict]) -> tuple[np.ndarray, np.ndarray]`: collects an episode's states
   (`infos[0]["x_prev"]`, then each step's `x`) and controls (each step's `controls`), both float64.
@@ -151,8 +162,8 @@ Paths are relative to `control/`. Scenario dicts are `{"location": str, "growth_
 
 ## `greenleaf_control.train`
 - `python -m greenleaf_control.train --method M --seed S [--penalty-weight W] [--budget-frac B] [--timesteps N]
-  [--season-length D] [--n-envs 4] [--runs-dir runs] [--rb {tuned,default}] (--smoke | --registered <row>)
-  [--remote JSON]`
+  [--season-length D] [--n-envs 4] [--runs-dir runs] [--rb {default,tuned,tuned_agc2020}]
+  [--price-regime {sim,agc2020}] (--smoke | --registered <row>) [--remote JSON]`
 - `--smoke` caps timesteps at 20,000 and the season at 2 days, writes under `runs/smoke/`, and records no ledger row.
 - Without `--smoke`, `--registered` is required, and the arm and seed must be in that registration.
 - `--remote JSON` (set only by `modal_app.train_remote`) is `{"stamp": <code_stamp>, "registered": <the registered
@@ -164,6 +175,8 @@ Paths are relative to `control/`. Scenario dicts are `{"location": str, "growth_
   - Without it, a registered run outside a git repo refuses before any run dir.
 - `--rb` picks the residual arms' RB params (`configs/rule_based_<rb>.yml`, default `tuned`); the resolved params are
   stored in the manifest as `config["rb_params"]`.
+- `--price-regime` (default `sim`; another name is argparse's refusal) prices the training envs' reward and is stored
+  as `config["price_regime"]`, always present. A registered run's arm that names no `price_regime` is a `sim` arm.
 - **Outputs:**
   - checkpoints `ckpt_<steps>.zip` + `vecnorm_<steps>.pkl` every 250,000 steps, and `ckpt_final.zip` +
     `vecnorm_final.pkl`;
@@ -178,13 +191,15 @@ Paths are relative to `control/`. Scenario dicts are `{"location": str, "growth_
   allow_test: bool = False) -> VecNormalize`: `SubprocVecEnv` (`DummyVecEnv` for one env) → `VecMonitor` →
   `VecLagrangianReward` (residual_lag only) → `VecNormalize`, env i = `make_env(method, seed=seed + i, ...)` from the
   manifest's config; `scenario` and `season_length` override the config's (for evaluation). `allow_test` passes
-  through to `make_env`; only `evaluate --final` sets it.
+  through to `make_env`; only `evaluate --final` sets it. The envs are built at `config.get("price_regime", "sim")`,
+  so a config recorded before v3 builds `sim`.
 - `build_model(config: dict, venv) -> PPO`: `configs/ppo.yml`'s PPO on cpu, seeded, with only `log_std_init` changed
   (-1.0 for the residual arms).
 
 ## `greenleaf_control.evaluate`
 - `run_rb(params: dict, scenario: dict, season_length: int = 60, record_steps: bool = False,
-  return_trace: bool = False, *, allow_test: bool = False) -> tuple[dict, pd.DataFrame | None]`
+  return_trace: bool = False, *, allow_test: bool = False, price_regime: str = "sim")
+  -> tuple[dict, pd.DataFrame | None]`: plays the env at `price_regime` and grades the season at it.
 - `run_policy(run_dir: Path, checkpoint: str, scenario: dict, season_length: int = 60, record_steps: bool = False,
   return_trace: bool = False, *, allow_test: bool = False) -> tuple[dict, pd.DataFrame | None]`
   - Rebuilds the training stack with `train.build_vec_env(manifest["config"], 1, scenario=..., season_length=...)`
@@ -192,24 +207,32 @@ Paths are relative to `control/`. Scenario dicts are `{"location": str, "growth_
     `VecNormalize.load(run_dir/"vecnorm_<checkpoint>.pkl", <that stack>)`, sets `training = False` and
     `norm_reward = False` before reset, then `PPO.load(run_dir/"ckpt_<checkpoint>.zip", device="cpu")` and
     deterministic predict until the season ends.
+  - Takes no `price_regime`: the stack is built and the season graded at the manifest's
+    `config.get("price_regime", "sim")`.
 - **`return_trace`** (both, default False): with True, `(result, frame, (states, controls, params))`: the same
   season's raw trace that metrics graded (no second season).
 - **`allow_test`** (both): passes through, `run_rb` to `make_raw_env` and `run_policy` to `train.build_vec_env`;
   default False, and only `evaluate --final` sets it.
-- **Result dict** (both): `metrics.episode_metrics(...)` graded with the env's own `p` and `season_steps = N`, plus
+- **Result dict** (both): `metrics.episode_metrics(...)` graded with the env's own `p`, `season_steps = N` and
+  `prices = metrics.PRICE_REGIMES[<the season's regime>]`, plus
   `paper_reward_sum` = Σ `info["paper_reward"]` in step order with `+=` (a reproduction check, not a graded metric).
 - **`main(argv=None, *, ledger_path=ledger.LEDGER)`**; `ledger_path` is the ledger `--final` reads.
-- **CLI, scoring:** `--controller {zero_controls|random|rb_default|rb_tuned|<run_dir>}`
+- **CLI, scoring:** `--controller {zero_controls|random|rb_default|rb_tuned|rb_tuned_agc2020|<run_dir>}`
   `--split {train_eval|validation|paper|<the three test splits>} --out <parquet>`, all three required (argparse's
-  message) when there is no `--final`.
+  message) when there is no `--final`; `[--price-regime {sim,agc2020}]`.
+  - `BASELINES = (*envs.BASELINES, "rb_tuned_agc2020")`, the CLI's baselines; `rb_tuned_agc2020` plays
+    `load_rb_params("tuned_agc2020")`.
+  - `--price-regime` (default `sim`) plays and grades a baseline at that regime. With a run dir it is refused (the
+    manifest's regime stands), and so it is with `--final`.
   - The three test splits are refused as sealed (PROTOCOL §8) without `--final`.
   - `--out` must not exist (created exclusively). One row per scenario in split order, 60-day seasons. Identity
     columns `controller, checkpoint` (None for a baseline, `final` for a run dir), `split, location, growth_year,
-    start_day, season_length`, then the result keys.
+    start_day, season_length, price_regime` (a baseline's `--price-regime`, `sim` when unflagged; a run dir's
+    manifest's `config.get("price_regime", "sim")`), then the result keys.
   - `<run_dir>` is a directory holding `manifest.json`, scored at its `final` checkpoint. `zero_controls` and
     `random` go through `envs.run_baseline`, `rb_*` through `run_rb`.
-- **CLI, the final:** `--final <final-registered row>`, with no `--controller`, `--split` or `--out` (refused,
-  naming the flag).
+- **CLI, the final:** `--final <final-registered row>`, with no `--controller`, `--split`, `--out` or
+  `--price-regime` (refused, naming the flag).
   - **Refuses, in this order**, before any env is built, any weather is read or any file is written: (1) any
     `final-result` in the ledger (the seal is spent); (2) a row that isn't a `final-registered` row, or isn't the
     newest one (names the newer); (3) `manifest.fingerprints()` unequal to the row's (names the keys); (4) a
@@ -323,12 +346,15 @@ Paths are relative to `control/`. Scenario dicts are `{"location": str, "growth_
     - any run without a `run-end`;
     - a registered arm × seed never run;
     - an arm × seed with more than one run that didn't crash;
-    - an existing `selected.json` that isn't VALIDATION at 60 days.
+    - an existing `selected.json` that isn't VALIDATION at 60 days;
+    - arms that mix price regimes (an arm whose config names no `price_regime` is `sim`); the message names
+      `price_regime` and the regimes.
   - **Scored**, per arm and registered seed (sorted): the run whose run-end isn't `crashed` (a crashed run beside a
     finished rerun scores the rerun).
     - A learning arm uses its `selected.json`, or `select_checkpoint(run_dir)`: the chosen checkpoint's
       `per_scenario`, with no second evaluation.
-    - `rb_tuned` uses `evaluate.run_rb(<run_dir>/rule_based_tuned.yml["GreenLightEnv"], s, 60)` for s in VALIDATION.
+    - `rb_tuned` uses `evaluate.run_rb(<run_dir>/rule_based_tuned.yml["GreenLightEnv"], s, 60,
+      price_regime=<the arms' regime>)` for s in VALIDATION, so it is graded like for like.
   - **Writes** `{per_arm, selected}` (sorted keys, indent 2, no NaN):
     - `per_arm[arm]` = {iqm, ci_low, ci_high, guards: {g: {iqm, ci_low, ci_high}}, invalid_episodes};
     - each is `stats.iqm_ci` on the runs (by seed) × VALIDATION array, all null when no run was scored;
@@ -351,45 +377,50 @@ Paths are relative to `control/`. Scenario dicts are `{"location": str, "growth_
     thScrSpNight, thScrDeadZone, lamps_on, lamps_off, lamps_off_sun. Every other key stays at
     `configs/rule_based_default.yml`'s value.
   - `InvalidSeason(RuntimeError)`: a season metrics marks invalid.
-  - `rb_return(params, scenarios, season_length=60) -> float`: the mean over scenarios of
-    `evaluate.run_rb(params, s, season_length)[0]["paper_return"]` (metrics', not `paper_reward_sum`). An invalid
-    season raises `InvalidSeason` and is never scored.
+  - `rb_return(params, scenarios, season_length=60, *, price_regime="sim") -> float`: the mean over scenarios of
+    `evaluate.run_rb(params, s, season_length, price_regime=price_regime)[0]["paper_return"]` (metrics', not
+    `paper_reward_sum`). An invalid season raises `InvalidSeason` and is never scored.
   - **Tuning:**
     - Optuna `TPESampler(seed=--seed)`, maximizing; trial 0 is enqueued at the default setpoints.
-    - Every trial is scored by `rb_return(params, scenarios.TRAIN_EVAL, season_length)`. TRAIN_EVAL is hard-wired.
+    - Every trial is scored by `rb_return(params, scenarios.TRAIN_EVAL, season_length, price_regime=--price-regime)`.
+      TRAIN_EVAL is hard-wired.
     - `optimize(..., n_jobs=--jobs, catch=(InvalidSeason,))`: an invalid-season trial is FAIL and never scored; any
       other exception crashes the run.
     - The tuned params are the best COMPLETE trial's. With none, the run crashes and writes no yml.
     - Deterministic at `--jobs 1` only.
   - `main(argv=None, *, ledger_path=ledger.LEDGER) -> int`; CLI `--trials N --seed S [--jobs 1] [--runs-dir runs]
-    (--smoke | --registered <row>)`.
+    [--price-regime {sim,agc2020}] (--smoke | --registered <row>)`.
   - `--smoke`: min(N, 2) trials on 1-day seasons into `<runs-dir>/smoke/tune_rb-<UTC stamp>-<hex>`. No ledger row;
     configs are untouched.
   - `--registered <row>`, refused before anything is written unless all of these hold:
-    - the row has exactly one arm of method `rb_tuned`, whose config is exactly `{"trials": N}`;
+    - the row has exactly one arm of method `rb_tuned`, whose config is exactly `{"trials": N}`, optionally with a
+      `price_regime`;
+    - `--price-regime` is the arm's `price_regime` (`sim` if it names none);
     - `--trials N`;
     - scenarios exactly `["validation"]`, the split the result is scored on (PROTOCOL §2, §9);
     - seeds `[0]` and `--seed 0`;
     - timesteps 0;
     - `--jobs 1`;
-    - `configs/rule_based_tuned.yml` doesn't exist yet.
+    - its configs file doesn't exist yet: `configs/rule_based_tuned.yml` for `sim`,
+      `configs/rule_based_tuned_<regime>.yml` (e.g. `rule_based_tuned_agc2020.yml`) otherwise.
   - Then a registered run plays N trials on 60-day seasons into `<runs-dir>/<row>/<arm>/seed0`:
     - a `run` row before the trials;
     - after them, a `run-end`: finished, or crashed and re-raised; timesteps 0; `solver_failures` = the count of
       FAIL trials (trials, not steps; null if the tune raised); `cost_usd` and diagnostics null;
-    - then `configs/rule_based_tuned.yml`, written once.
+    - then that configs file, written once; a tune at another regime never touches `rule_based_tuned.yml`.
   - **Run dir outputs:**
-    - `manifest.json`: config `{method: "rb_tuned", seed, trials, jobs, season_length, tuned_on: "train_eval",
-      tune_space, run_dir}`;
+    - `manifest.json`: config `{method: "rb_tuned", seed, trials, jobs, season_length, price_regime,
+      tuned_on: "train_eval", tune_space, run_dir}`;
     - `trials.csv`: Optuna's `trials_dataframe()`, with state COMPLETE/FAIL and `params_<key>`;
-    - `rule_based_tuned.yml`: `{"GreenLightEnv": defaults with the best trial's 12 setpoints}`, as
-      `load_rb_params("tuned")` reads it.
+    - `rule_based_tuned.yml` (this name at every regime; selection reads it): `{"GreenLightEnv": defaults with the
+      best trial's 12 setpoints}`, as `load_rb_params` reads it.
 - `run_grid`: `main(argv=None, *, ledger_path=ledger.LEDGER) -> int`. Module constants `CPU=4.0`, `MEMORY_MB=8192`,
   `TIMEOUT_S=14400`, `USD_PER_CORE_S=0.0000131`, `USD_PER_GIB_S=0.00000222`, `PRICES_AS_OF="2026-10-28"`
   (modal.com/pricing; one core = 2 vCPU).
   - `--registered <row> --backend {local,modal} [--parallel 2]`:
     - Before any launch, refuses an unknown row, a method not in `envs.METHODS`, a config key outside `CONFIG_KEYS`
-      (train's `penalty_weight, budget_frac, season_length, n_envs, rb`) and any scenario in `scenarios.TEST`.
+      (train's `penalty_weight, budget_frac, season_length, n_envs, rb, price_regime`) and any scenario in
+      `scenarios.TEST`.
     - Then runs `python -m greenleaf_control.train --method M [--<key> V ...] --seed S --timesteps T --registered
       <row>` once per arm × seed, `--parallel` at a time, and exits 1 naming the arm and seed of any failure.
     - Locally, run_grid writes no ledger row; each train run records its own.

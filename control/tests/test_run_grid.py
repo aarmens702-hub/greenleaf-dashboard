@@ -661,6 +661,32 @@ def test_registered_local_reports_a_failed_run_and_exits_nonzero(tmp_path, monke
     assert not any("ppo_low_w" in line for line in failures), text
 
 
+def test_registered_local_passes_an_arms_price_regime_to_train(tmp_path, monkeypatch):
+    """#67: price_regime is a config key an arm may name (run_grid.CONFIG_KEYS), as train takes
+    --price-regime. A registration of ppo_low_w (no regime) and an arm identical but for
+    {"price_regime": "agc2020"} is not refused, and hands _run_local four argvs: the agc2020 arm's
+    two carry --price-regime agc2020, which train's own parser reads as price_regime "agc2020"; the
+    other arm's two leave it at train's default, "sim"."""
+    from greenleaf_control import run_grid
+
+    assert "price_regime" in run_grid.CONFIG_KEYS
+    agc = {
+        "name": "agc",
+        "method": "ppo",
+        "config": {**ARMS[0]["config"], "price_regime": "agc2020"},
+    }
+    path, row = _registered(tmp_path, arms=[ARMS[0], agc])
+    calls = _fake_launch(monkeypatch, run_grid)
+
+    argv = ["--registered", row["row_id"], "--backend", "local"]
+    assert run_grid.main(argv, ledger_path=path) == 0
+
+    [(argvs, _)] = calls
+    assert len(argvs) == 4
+    by_flag = sorted(("--price-regime" in a, _train_args(a)["price_regime"]) for a in argvs)
+    assert by_flag == [(False, "sim"), (False, "sim"), (True, "agc2020"), (True, "agc2020")]
+
+
 REGISTERED_REFUSALS = [
     pytest.param({}, "registered-deadbeef", "registered-deadbeef", id="no-such-row"),
     pytest.param(

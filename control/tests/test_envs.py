@@ -42,6 +42,7 @@ import numpy as np
 import pandas as pd
 import pytest
 from gl_gym.components.weather import FixedWeatherSampler, RandomWeatherSampler
+from gl_gym.core.types import RewardContext
 from gymnasium.utils.env_checker import check_env
 from hypothesis import given, settings
 from hypothesis import strategies as st
@@ -244,7 +245,8 @@ def test_methods_and_baselines_are_the_contract_tuples():
 def test_signatures_match_the_contract():
     """make_raw_env is keyword-only with the contract's defaults (normalize_actions has none);
     make_env and run_baseline take allow_test keyword-only, default False (issue #41), so with
-    the default they can never open a TEST scenario."""
+    the default they can never open a TEST scenario. All three take price_regime keyword-only,
+    default "sim" (issue #67), so every earlier call keeps upstream's registered prices."""
     import greenleaf_control.envs as envs
 
     empty = inspect.Parameter.empty
@@ -258,6 +260,7 @@ def test_signatures_match_the_contract():
         "penalty_weight": 1.0,
         "season_progress": False,
         "allow_test": False,
+        "price_regime": "sim",
     }
     make = inspect.signature(envs.make_env).parameters
     assert {name: p.default for name, p in make.items()} == {
@@ -269,17 +272,21 @@ def test_signatures_match_the_contract():
         "rb_params": None,
         "residual_scale": 0.15,
         "allow_test": False,
+        "price_regime": "sim",
     }
     assert make["seed"].kind is inspect.Parameter.KEYWORD_ONLY
     assert make["allow_test"].kind is inspect.Parameter.KEYWORD_ONLY
+    assert make["price_regime"].kind is inspect.Parameter.KEYWORD_ONLY
     baseline = inspect.signature(envs.run_baseline).parameters
     assert {name: p.default for name, p in baseline.items()} == {
         "name": empty,
         "scenario": empty,
         "season_length": 60,
         "allow_test": False,
+        "price_regime": "sim",
     }
     assert baseline["allow_test"].kind is inspect.Parameter.KEYWORD_ONLY
+    assert baseline["price_regime"].kind is inspect.Parameter.KEYWORD_ONLY
 
 
 @pytest.mark.parametrize("method", METHODS)
@@ -1006,6 +1013,242 @@ def test_make_raw_env_reads_weather_dir_at_call_time(tmp_path, monkeypatch):
     monkeypatch.setattr(scenarios, "WEATHER_DIR", tmp_path)
     env = envs.make_raw_env(scenario=scenarios.PAPER, season_length=1, normalize_actions=False)
     assert env.unwrapped.weather_repository.weather_data_dir == tmp_path
+
+
+# --- Price regimes (issue #67, PROTOCOL v3) -----------------------------------------------------
+
+# Upstream's registered reward kwargs (gl_gym/__init__.py:33-40): elec 0.3 EUR/kWh, heating
+# 0.09 EUR/kWh, CO2 0.3 EUR/kg, fruit 1.6 EUR/kg, dmfm 0.065, pen_lamp 0.1. sim keeps them all.
+REGISTERED_REWARD_KW = dict(gym.spec(ENV_ID).kwargs["reward_kwargs"])
+# agc2020 overrides only upstream's four price kwargs, with AGC2's 2020 tariffs (Hemming et al.
+# 2020, Sensors 20(22):6430, §2): heat 0.03 EUR/kWh, electricity 0.06 EUR/kWh, CO2 0.08 EUR/kg,
+# fruit 1.6 EUR/kg unchanged. dmfm and pen_lamp stay upstream's.
+REGIME_PRICES = {
+    "sim": {},
+    "agc2020": {"fruit_price": 1.6, "heating_price": 0.03, "elec_price": 0.06, "co2_price": 0.08},
+}
+ZERO_U = (0.0,) * 6
+FULL_COST_U = (1.0, 1.0, 0.0, 0.0, 1.0, 0.0)  # boiler, CO2 dosing and lamps at full
+# p[154] = 0.328 mg/m2/s max fruit growth x 900 s = 295.2 mg DM/m2: the max-profit step.
+MAX_GROWTH = 295.2
+
+
+def _reward_kwargs(env) -> dict:
+    """The reward kwargs gym.make built the raw env's ConstraintCostReward with."""
+    return dict(env.unwrapped.spec.kwargs["reward_kwargs"])
+
+
+def _ctx(co2, temp, rh, *, p, u=ZERO_U, growth=0.0):
+    """A RewardContext at indoor (co2 ppm, temp C, rh %), with x[25] - x_prev[25] = growth, built
+    as the env's step() builds one (as tests/test_rewards.py does)."""
+    x_prev = np.zeros(N_STATES)
+    x = np.zeros(N_STATES)
+    x[25] = growth  # x[25] is fruit dry matter [mg/m2]
+    return RewardContext(
+        t=0,
+        dt=900,
+        Np=0,
+        x_prev=x_prev,
+        x=x,
+        u=np.asarray(u, dtype=np.float64),
+        p=p,
+        d=np.zeros((1, 10)),
+        hour_of_day=12.0,
+        day_of_year=59.0,
+        obs={"IndoorClimateObservations": np.array([co2, temp, rh, 40.0], dtype=np.float32)},
+        constraints_low=np.array([300.0, 15.0, 50.0]),
+        constraints_high=np.array([1600.0, 34.0, 85.0]),
+    )
+
+
+@pytest.mark.parametrize("weight", [1.0, 0.25])
+@pytest.mark.parametrize("regime", ["sim", "agc2020"])
+def test_make_raw_env_overrides_only_the_four_price_kwargs(regime, weight):
+    """make_raw_env(price_regime=r) builds ConstraintCostReward with upstream's registered reward
+    kwargs, r's four prices over them (none for sim), and the asked penalty_weight: under agc2020,
+    elec 0.06, heating 0.03, co2 0.08 and fruit 1.6, with dmfm 0.065 and pen_lamp 0.1 kept. The
+    reward's own price models hold the same four prices."""
+    import greenleaf_control.envs as envs
+
+    env = envs.make_raw_env(
+        scenario=scenarios.PAPER,
+        season_length=1,
+        normalize_actions=False,
+        penalty_weight=weight,
+        price_regime=regime,
+    )
+    want = {**REGISTERED_REWARD_KW, **REGIME_PRICES[regime], "penalty_weight": weight}
+    assert _reward_kwargs(env) == want
+    reward = env.unwrapped.reward_fn
+    assert isinstance(reward, ConstraintCostReward)
+    assert reward.penalty_weight == weight
+    assert {
+        "fruit_price": reward.fruit_price_model.price,
+        "heating_price": reward.heating_price_model.price,
+        "elec_price": reward.elec_price_model.price,
+        "co2_price": reward.co2_price_model.price,
+    } == {k: want[k] for k in ("fruit_price", "heating_price", "elec_price", "co2_price")}
+
+
+@pytest.mark.parametrize("method", METHODS)
+def test_make_env_threads_the_price_regime(method):
+    """make_env(method, price_regime="agc2020") builds each method's raw env at agc2020's prices,
+    keeping its own penalty weight (residual_lag's forced 0.0, the asked 1.0 otherwise)."""
+    env = _make(method, price_regime="agc2020")
+    weight = 0.0 if method == "residual_lag" else 1.0
+    assert _reward_kwargs(env) == {
+        **REGISTERED_REWARD_KW,
+        **REGIME_PRICES["agc2020"],
+        "penalty_weight": weight,
+    }
+
+
+AGC2020_STEP = [
+    # Under agc2020, per full step: heat 130 W/m2 x 0.25 h = 0.0325 kWh/m2 x 0.03 EUR/kWh = 0.000975;
+    # elec 116 W/m2 x 0.25 h = 0.029 kWh/m2 x 0.06 EUR/kWh = 0.00174; CO2 5 mg/m2/s x 900 s =
+    # 0.0045 kg/m2 x 0.08 EUR/kg = 0.00036 EUR/m2. min_profit = -(0.000975 + 0.00174 + 0.00036) =
+    # -0.003075; max_profit = 295.2 mg/m2 x 1e-6 / 0.065 x 1.6 EUR/kg = 0.0072665 (unchanged);
+    # span 0.0103415. No controls, no growth: 0.003075 / 0.0103415 = 0.2973467
+    pytest.param((800.0, 22.0, 70.0), ZERO_U, 0.0, 0.2973467, 0.2973467, id="zero"),
+    # boiler only: (-0.000975 + 0.003075) / 0.0103415 = 0.2030661
+    pytest.param((800.0, 22.0, 70.0), (1, 0, 0, 0, 0, 0), 0.0, 0.2030661, 0.2030661, id="boiler"),
+    # lamps only: (-0.00174 + 0.003075) / 0.0103415 = 0.1290920
+    pytest.param((800.0, 22.0, 70.0), (0, 0, 0, 0, 1, 0), 0.0, 0.1290920, 0.1290920, id="lamps"),
+    # CO2 only: (-0.00036 + 0.003075) / 0.0103415 = 0.2625354
+    pytest.param((800.0, 22.0, 70.0), (0, 1, 0, 0, 0, 0), 0.0, 0.2625354, 0.2625354, id="co2"),
+    # boiler, CO2 and lamps at full, no growth: profit = min_profit, so 0
+    pytest.param((800.0, 22.0, 70.0), FULL_COST_U, 0.0, 0.0, 0.0, id="full_cost"),
+    # no controls, max growth: profit = max_profit, so 1
+    pytest.param((800.0, 22.0, 70.0), ZERO_U, MAX_GROWTH, 1.0, 1.0, id="max_growth"),
+    # full costs and max growth: (0.0072665 - 0.003075 + 0.003075) / 0.0103415 = 0.7026532
+    pytest.param((800.0, 22.0, 70.0), FULL_COST_U, MAX_GROWTH, 0.7026532, 0.7026532, id="full_max"),
+    # 36 C, no controls: scaled profit 0.2973467; the paper reward subtracts (36 - 34) / 15 C:
+    # 0.2973467 - 0.1333333 = 0.1640134
+    pytest.param((800.0, 36.0, 70.0), ZERO_U, 0.0, 0.2973467, 0.1640134, id="hot"),
+]
+
+
+@pytest.mark.parametrize(("obs", "u", "growth", "scaled", "paper"), AGC2020_STEP)
+def test_agc2020_reward_on_one_hand_built_step_matches_hand_values(obs, u, growth, scaled, paper):
+    """Done when (#67): under agc2020, one hand-built step's upstream scaled profit equals the
+    hand-computed value. The reward is the one make_raw_env(price_regime="agc2020") built, fed a
+    RewardContext built by hand on the env's own params: its scaled_profit, and its paper_reward
+    (upstream's reward), at agc2020's prices. rel 1e-6 because p[154] = 0.328 is float32."""
+    import greenleaf_control.envs as envs
+
+    env = envs.make_raw_env(
+        scenario=scenarios.PAPER, season_length=1, normalize_actions=False, price_regime="agc2020"
+    )
+    p = np.asarray(env.unwrapped.p, dtype=np.float64)
+    _, info = env.unwrapped.reward_fn.compute_reward(_ctx(*obs, p=p, u=u, growth=growth))
+    assert info["scaled_profit"] == pytest.approx(scaled, rel=1e-6, abs=1e-12)
+    assert info["paper_reward"] == pytest.approx(paper, rel=1e-6, abs=1e-12)
+
+
+@pytest.mark.parametrize(
+    ("key", "expected"),
+    [
+        # 0.0325 kWh/m2 x 0.03 EUR/kWh
+        ("heat_cost", 0.000975),
+        # 0.029 kWh/m2 x 0.06 EUR/kWh
+        ("elec_cost", 0.00174),
+        # 0.0045 kg/m2 x 0.08 EUR/kg
+        ("co2_cost", 0.00036),
+        # 295.2 mg DM/m2 x 1e-6 / 0.065 = 0.0045415 kg FFW/m2 x 1.6 EUR/kg (fruit price unchanged)
+        ("revenue", 0.0072664615),
+        # 0.0072664615 revenue - (0.000975 + 0.00174 + 0.00036) costs = 0.0041914615
+        ("profit", 0.0041914615),
+    ],
+)
+def test_agc2020_money_keys_on_one_hand_built_step_match_hand_values(key, expected):
+    """The full-cost, max-growth step's money keys at agc2020's prices, from the reward
+    make_raw_env(price_regime="agc2020") built."""
+    import greenleaf_control.envs as envs
+
+    env = envs.make_raw_env(
+        scenario=scenarios.PAPER, season_length=1, normalize_actions=False, price_regime="agc2020"
+    )
+    p = np.asarray(env.unwrapped.p, dtype=np.float64)
+    ctx = _ctx(800.0, 22.0, 70.0, p=p, u=FULL_COST_U, growth=MAX_GROWTH)
+    _, info = env.unwrapped.reward_fn.compute_reward(ctx)
+    assert info[key] == pytest.approx(expected, rel=1e-6)
+
+
+def test_price_regime_sim_is_todays_env_bit_for_bit():
+    """With sim, everything scores as today: make_raw_env(price_regime="sim") has exactly the
+    default env's reward kwargs, and over a 1-day PAPER season driven by one seeded action sequence
+    (absolute controls, default_rng(7)) every step's observation, reward, flags and info are the
+    default env's, compared exactly (arrays with array_equal)."""
+    import greenleaf_control.envs as envs
+
+    kw = {"scenario": scenarios.PAPER, "season_length": 1, "normalize_actions": False}
+    today = envs.make_raw_env(**kw)
+    sim = envs.make_raw_env(**kw, price_regime="sim")
+    assert _reward_kwargs(sim) == _reward_kwargs(today)
+    obs, _ = today.reset(seed=0)
+    sim_obs, _ = sim.reset(seed=0)
+    np.testing.assert_array_equal(sim_obs, obs)
+    for k, a in enumerate(np.random.default_rng(7).uniform(0, 1, (N_DAY, 6)).astype(np.float32)):
+        obs, reward, terminated, truncated, info = today.step(a)
+        sim_obs, sim_reward, sim_terminated, sim_truncated, sim_info = sim.step(a)
+        np.testing.assert_array_equal(sim_obs, obs)
+        assert (sim_reward, sim_terminated, sim_truncated) == (reward, terminated, truncated), k
+        assert sim_info.keys() == info.keys(), k
+        for key, value in info.items():
+            if isinstance(value, np.ndarray):
+                np.testing.assert_array_equal(sim_info[key], value, err_msg=f"{key} at step {k}")
+            else:
+                assert sim_info[key] == value, (key, k)
+    assert terminated
+
+
+@pytest.mark.parametrize("build", ["make_raw_env", "make_env", "run_baseline"])
+def test_an_unknown_price_regime_raises_valueerror(build):
+    """An unknown regime name is refused, naming it, by each env builder: a typo can't silently
+    fall back to sim's prices."""
+    import greenleaf_control.envs as envs
+
+    calls = {
+        "make_raw_env": lambda: envs.make_raw_env(
+            scenario=scenarios.PAPER,
+            season_length=1,
+            normalize_actions=False,
+            price_regime="agc2021",
+        ),
+        "make_env": lambda: envs.make_env("ppo", seed=0, season_length=1, price_regime="agc2021"),
+        "run_baseline": lambda: envs.run_baseline(
+            "zero_controls", scenarios.PAPER, 1, price_regime="agc2021"
+        ),
+    }
+    with pytest.raises(ValueError, match="agc2021"):
+        calls[build]()
+
+
+def test_the_reward_and_the_grader_price_each_regime_the_same():
+    """The reward's prices (envs, in upstream's kwarg names) and the grader's (metrics, which never
+    imports envs) are kept apart by design, so this cross-check holds them together: envs.REWARD_PRICES
+    and metrics.PRICE_REGIMES name exactly sim and agc2020, and for each the env make_raw_env builds
+    prices fruit, dmfm, heat, electricity and CO2 exactly as the grader does."""
+    import greenleaf_control.envs as envs
+    from greenleaf_control import metrics
+
+    assert set(envs.REWARD_PRICES) == set(metrics.PRICE_REGIMES) == {"sim", "agc2020"}
+    for regime, prices in metrics.PRICE_REGIMES.items():
+        kw = _reward_kwargs(
+            envs.make_raw_env(
+                scenario=scenarios.PAPER,
+                season_length=1,
+                normalize_actions=False,
+                price_regime=regime,
+            )
+        )
+        assert {
+            "fruit": kw["fruit_price"],
+            "dmfm": kw["dmfm"],
+            "heat": kw["heating_price"],
+            "elec": kw["elec_price"],
+            "co2": kw["co2_price"],
+        } == prices, regime
 
 
 # --- Determinism --------------------------------------------------------------------------------

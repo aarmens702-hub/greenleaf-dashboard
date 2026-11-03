@@ -50,6 +50,7 @@ was collected.
 
 import inspect
 import json
+import re
 import shutil
 import subprocess
 import sys
@@ -62,7 +63,7 @@ import pytest
 import yaml
 from gl_gym.components.rule_based import RuleBasedController
 
-from greenleaf_control import evaluate, ledger, manifest, rule_based, scenarios
+from greenleaf_control import evaluate, ledger, manifest, metrics, rule_based, scenarios
 
 # greenleaf_control.tune_rb is imported inside each test body, so while it is missing each test
 # FAILS rather than ERRORs at collection.
@@ -71,6 +72,7 @@ CONTROL = Path(__file__).resolve().parents[1]
 REAL_LEDGER = CONTROL / "ledger" / "ledger.jsonl"
 REAL_RUNS = CONTROL / "runs"
 REAL_TUNED = CONTROL / "configs" / "rule_based_tuned.yml"
+REAL_TUNED_AGC2020 = CONTROL / "configs" / "rule_based_tuned_agc2020.yml"
 
 
 def _stat(path: Path) -> tuple[int, int] | None:
@@ -85,6 +87,7 @@ def _listing(path: Path) -> list[str] | None:
 REAL_LEDGER_BEFORE = _stat(REAL_LEDGER)
 REAL_RUNS_BEFORE = _listing(REAL_RUNS)
 REAL_TUNED_BEFORE = _stat(REAL_TUNED)
+REAL_TUNED_AGC2020_BEFORE = _stat(REAL_TUNED_AGC2020)
 
 PAPER = scenarios.PAPER
 RB_DEFAULT = rule_based.load_rb_params("default")
@@ -104,7 +107,15 @@ TUNE_SPACE = {
     "lamps_off_sun": (200, 600),  # W/m² of sun above which the lamps switch off
 }
 SMOKE_TRIALS = 2
-CLI_FLAGS = ("--trials", "--jobs", "--seed", "--runs-dir", "--smoke", "--registered")
+CLI_FLAGS = (
+    "--trials",
+    "--jobs",
+    "--seed",
+    "--runs-dir",
+    "--smoke",
+    "--registered",
+    "--price-regime",  # #67: sim (default) or agc2020
+)
 # E1's registration shape (orchestrator default): one rb_tuned arm of 200 trials, seed 0, its
 # result scored on validation (it is tuned on TRAIN_EVAL regardless). ledger.register needs every
 # registered field; timesteps is 0 (nothing trains).
@@ -225,13 +236,16 @@ def _make_repo(tmp_path: Path, monkeypatch) -> Path:
     return repo
 
 
-def _recorder(monkeypatch, tune_rb) -> list[tuple[dict, list, int]]:
+def _recorder(monkeypatch, tune_rb, regimes: list | None = None) -> list[tuple[dict, list, int]]:
     """tune_rb.rb_return replaced by one that records (params, scenarios, season_length) and
-    returns a number that depends on the params (the closer co2_day to 900 ppm, the higher)."""
+    returns a number that depends on the params (the closer co2_day to 900 ppm, the higher). Each
+    call's price_regime (#67; "sim" if not passed) is appended to regimes, if given."""
     calls = []
 
-    def rb_return(params, scenarios, season_length=60):
+    def rb_return(params, scenarios, season_length=60, *, price_regime="sim"):
         calls.append((dict(params), list(scenarios), season_length))
+        if regimes is not None:
+            regimes.append(price_regime)
         return -abs(float(params["co2_day"]) - 900.0)
 
     monkeypatch.setattr(tune_rb, "rb_return", rb_return)
@@ -245,7 +259,7 @@ def _invalid_when(monkeypatch, tune_rb, fails) -> list[int]:
     Returns [the number of calls so far], updated as it is called."""
     count = [0]
 
-    def rb_return(params, scenarios, season_length=60):
+    def rb_return(params, scenarios, season_length=60, *, price_regime="sim"):
         i, count[0] = count[0], count[0] + 1
         if fails(i):
             raise tune_rb.InvalidSeason(f"invalid season (faked) on call {i}")
@@ -429,8 +443,8 @@ def test_rb_return_raises_on_an_invalid_season(bad, monkeypatch):
     assert invalid_season is not RuntimeError
     real_run_rb = evaluate.run_rb
 
-    def run_rb(params, scenario, season_length=60, record_steps=False):
-        result, frame = real_run_rb(params, scenario, season_length, record_steps)
+    def run_rb(params, scenario, season_length=60, record_steps=False, **kwargs):
+        result, frame = real_run_rb(params, scenario, season_length, record_steps, **kwargs)
         return ({**result, **bad} if scenario == scenarios.TRAIN_EVAL[0] else result), frame
 
     monkeypatch.setattr(evaluate, "run_rb", run_rb)
@@ -713,7 +727,7 @@ def test_registered_e1_row_passes_the_checks_and_a_crash_is_recorded(tmp_path, m
     crashed. configs gets no tuned yml."""
     import greenleaf_control.tune_rb as tune_rb
 
-    def rb_return(params, scenarios, season_length=60):
+    def rb_return(params, scenarios, season_length=60, *, price_regime="sim"):
         raise RuntimeError("a crash that isn't an invalid season")
 
     monkeypatch.setattr(tune_rb, "rb_return", rb_return)
@@ -936,6 +950,203 @@ def test_a_tune_with_no_complete_trial_crashes_and_writes_no_yml(tmp_path, monke
     assert json.loads((run_dir / "manifest.json").read_text())["status"] == "crashed"
 
 
+# --- Price regimes (issue #67, part B) ---------------------------------------------------------
+
+# AGC2's 2020 tariffs (PROTOCOL v3; Hemming et al. 2020, §2), written out so the objective checks
+# below don't read metrics' own table: heat 0.03 EUR/kWh, electricity 0.06 EUR/kWh, CO2
+# 0.08 EUR/kg, fruit and dmfm unchanged.
+AGC2020 = {"fruit": 1.6, "dmfm": 0.065, "heat": 0.03, "elec": 0.06, "co2": 0.08}
+# An agc2020 tune's registration: E1's shape, its rb_tuned arm naming the regime.
+E8_RB = {
+    **E1,
+    "arms": [
+        {
+            "name": "rb_tuned",
+            "method": "rb_tuned",
+            "config": {"trials": 5, "price_regime": "agc2020"},
+        }
+    ],
+}
+
+
+def _paper_return_at(params: dict, scenario: dict, prices: dict | None) -> float:
+    """The controller's 1-day season on scenario as today's (sim) env plays it, its raw trace
+    graded at prices (metrics' default, sim, if None). The controller never reads the reward, so
+    the season is the same under either regime."""
+    _, _, (states, controls, p) = evaluate.run_rb(params, scenario, 1, return_trace=True)
+    kwargs = {} if prices is None else {"prices": prices}
+    return metrics.episode_metrics(states, controls, p, season_steps=96, **kwargs)["paper_return"]
+
+
+def test_rb_return_under_agc2020_is_the_agc2020_paper_return():
+    """rb_return(default params, [PAPER], 1, price_regime="agc2020") is the 1-day PAPER season's
+    paper_return graded at AGC2020's prices (written out above), rel 1e-12; it is not the sim
+    objective's value (rb_return without a regime)."""
+    import greenleaf_control.tune_rb as tune_rb
+
+    want = _paper_return_at(RB_DEFAULT, PAPER, AGC2020)
+
+    got = tune_rb.rb_return(RB_DEFAULT, [PAPER], 1, price_regime="agc2020")
+
+    assert got == pytest.approx(want, rel=1e-12, abs=0)
+    assert got != pytest.approx(tune_rb.rb_return(RB_DEFAULT, [PAPER], 1), rel=1e-3)
+
+
+@pytest.mark.parametrize(
+    ("flags", "regime"),
+    [([], "sim"), (["--price-regime", "sim"], "sim"), (["--price-regime", "agc2020"], "agc2020")],
+    ids=["unflagged-sim", "sim", "agc2020"],
+)
+def test_every_trial_is_scored_under_the_tunes_price_regime(flags, regime, tmp_path, monkeypatch):
+    """--price-regime {sim,agc2020} (default sim) is the objective's: with rb_return recorded, a
+    smoke tune passes price_regime=<regime> on every call (2 trials), and the manifest config
+    records it ("sim" when unflagged). Smoke writes nothing in configs."""
+    import greenleaf_control.tune_rb as tune_rb
+
+    regimes = []
+    _recorder(monkeypatch, tune_rb, regimes)
+    configs = _configs(tmp_path, monkeypatch)
+    runs = tmp_path / "runs"
+
+    assert tune_rb.main([*_smoke_argv(runs), *flags], ledger_path=tmp_path / "l.jsonl") == 0
+
+    assert regimes == [regime] * SMOKE_TRIALS
+    m = json.loads((_out_dir(runs) / "manifest.json").read_text())
+    assert m["config"]["price_regime"] == regime
+    assert _listing(configs) == ["rule_based_default.yml"]
+
+
+def test_an_agc2020_smoke_tunes_the_mean_agc2020_paper_return_on_train_eval(tmp_path, monkeypatch):
+    """(B) The real objective under agc2020 (nothing faked): trial 0, the defaults, scores the mean
+    over TRAIN_EVAL's nine 1-day seasons of paper_return at AGC2020's prices, recomputed here by
+    grading each season's raw trace at the prices written out (rel 1e-12: the mean's summation
+    order is the tuner's), not the sim objective's mean. Twenty-seven 1-day seasons, about 4 s."""
+    import greenleaf_control.tune_rb as tune_rb
+
+    configs = _configs(tmp_path, monkeypatch)
+    runs = tmp_path / "runs"
+    argv = [*_smoke_argv(runs), "--price-regime", "agc2020"]
+
+    assert tune_rb.main(argv, ledger_path=tmp_path / "l.jsonl") == 0
+
+    trials = pd.read_csv(_out_dir(runs) / "trials.csv")
+    want = np.mean([_paper_return_at(RB_DEFAULT, s, AGC2020) for s in scenarios.TRAIN_EVAL])
+    sim = np.mean([_paper_return_at(RB_DEFAULT, s, None) for s in scenarios.TRAIN_EVAL])
+    assert trials["value"].iloc[0] == pytest.approx(want, rel=1e-12, abs=0)
+    assert trials["value"].iloc[0] != pytest.approx(sim, rel=1e-3)
+    assert _listing(configs) == ["rule_based_default.yml"]
+
+
+def test_registered_agc2020_tune_writes_its_own_yml_and_never_touches_rule_based_tuned_yml(
+    tmp_path, monkeypatch
+):
+    """(B) A registered tune of an arm {"trials": 5, "price_regime": "agc2020"} at --trials 5
+    --price-regime agc2020 (rb_return recorded, run_rb tripped; CONFIGS a tmp copy that already
+    holds an earlier sim tune's rule_based_tuned.yml, as the real configs/ does since E1) returns
+    0 and:
+    - scores every trial under agc2020, and its manifest config records price_regime agc2020;
+    - writes the tuned params to CONFIGS/rule_based_tuned_agc2020.yml ({"GreenLightEnv": every
+      default key, the setpoints the best trial's}), and an identical copy to the run dir's
+      rule_based_tuned.yml, where selection reads an rb_tuned run's params;
+    - leaves CONFIGS/rule_based_tuned.yml's bytes as they were;
+    - and load_rb_params("tuned_agc2020") returns the new params.
+    """
+    import greenleaf_control.tune_rb as tune_rb
+
+    regimes = []
+    _recorder(monkeypatch, tune_rb, regimes)
+    _no_season(monkeypatch, tune_rb)
+    _make_repo(tmp_path, monkeypatch)
+    configs = _configs(tmp_path, monkeypatch)
+    sim_tuned = configs / "rule_based_tuned.yml"
+    sim_tuned.write_text("# an earlier sim tune's params\nGreenLightEnv: {}\n")
+    sim_before = sim_tuned.read_bytes()
+    runs, ledger_path = tmp_path / "runs", tmp_path / "l.jsonl"
+    row = ledger.register(**E8_RB, path=ledger_path)
+
+    argv = [*_registered_argv(row["row_id"], runs, trials="5"), "--price-regime", "agc2020"]
+    assert tune_rb.main(argv, ledger_path=ledger_path) == 0
+
+    assert regimes == ["agc2020"] * 5
+    run_dir = runs / row["row_id"] / "rb_tuned" / "seed0"
+    m = json.loads((run_dir / "manifest.json").read_text())
+    assert (m["config"]["price_regime"], m["status"]) == ("agc2020", "finished")
+    assert _listing(configs) == [
+        "rule_based_default.yml",
+        "rule_based_tuned.yml",
+        "rule_based_tuned_agc2020.yml",
+    ]
+    assert sim_tuned.read_bytes() == sim_before
+    data = yaml.safe_load((configs / "rule_based_tuned_agc2020.yml").read_text())
+    assert list(data) == ["GreenLightEnv"]
+    tuned = data["GreenLightEnv"]
+    assert set(tuned) == set(RB_DEFAULT)
+    trials = pd.read_csv(run_dir / "trials.csv")
+    best = trials.loc[trials["value"].idxmax()]
+    for key in TUNE_SPACE:
+        assert tuned[key] == pytest.approx(best[f"params_{key}"], rel=1e-12, abs=0), key
+    assert yaml.safe_load((run_dir / "rule_based_tuned.yml").read_text()) == data
+    assert rule_based.load_rb_params("tuned_agc2020") == tuned
+    assert _stat(REAL_TUNED) == REAL_TUNED_BEFORE
+
+
+def test_registered_agc2020_tune_refuses_to_overwrite_its_yml(tmp_path, monkeypatch, capsys):
+    """Write-once, per regime: with CONFIGS/rule_based_tuned_agc2020.yml already there, the agc2020
+    registration run exactly as registered is refused before any trial (Study.optimize, rb_return
+    and run_rb all trip), its text naming rule_based_tuned_agc2020.yml (and not argparse's
+    "unrecognized arguments"). The file's bytes are unchanged, --runs-dir gets nothing and the
+    ledger no row."""
+    import greenleaf_control.tune_rb as tune_rb
+
+    _no_trial(monkeypatch, tune_rb)
+    _make_repo(tmp_path, monkeypatch)
+    configs = _configs(tmp_path, monkeypatch)
+    tuned = configs / "rule_based_tuned_agc2020.yml"
+    tuned.write_text("# an earlier agc2020 tune's params\nGreenLightEnv: {}\n")
+    tuned_before = tuned.read_bytes()
+    runs, ledger_path = tmp_path / "runs", tmp_path / "l.jsonl"
+    row = ledger.register(**E8_RB, path=ledger_path)
+    before = ledger_path.read_bytes()
+
+    argv = [*_registered_argv(row["row_id"], runs, trials="5"), "--price-regime", "agc2020"]
+    with pytest.raises((SystemExit, ValueError)) as excinfo:
+        tune_rb.main(argv, ledger_path=ledger_path)
+    text = _refusal(excinfo, capsys)
+    assert "rule_based_tuned_agc2020.yml" in text, text
+    assert "unrecognized" not in text, text
+    assert tuned.read_bytes() == tuned_before
+    assert _listing(runs) in (None, [])
+    assert ledger_path.read_bytes() == before
+
+
+def test_registered_tune_must_run_at_its_arms_price_regime(tmp_path, monkeypatch, capsys):
+    """A registered tune is exactly its registration: an arm naming price_regime agc2020 run without
+    --price-regime (so at the default, sim), and an arm naming none (sim) run with --price-regime
+    agc2020, are each refused before any trial, naming price_regime (not argparse's "unrecognized
+    arguments"), with nothing written in --runs-dir or configs and no ledger row added."""
+    import greenleaf_control.tune_rb as tune_rb
+
+    _no_trial(monkeypatch, tune_rb)
+    _make_repo(tmp_path, monkeypatch)
+    configs = _configs(tmp_path, monkeypatch)
+    runs = tmp_path / "runs"
+    cases = [(E8_RB, []), (_e1_with(5), ["--price-regime", "agc2020"])]
+    for i, (registration, flags) in enumerate(cases):
+        ledger_path = tmp_path / f"l{i}.jsonl"
+        row = ledger.register(**registration, path=ledger_path)
+        before = ledger_path.read_bytes()
+        argv = [*_registered_argv(row["row_id"], runs, trials="5"), *flags]
+
+        with pytest.raises((SystemExit, ValueError)) as excinfo:
+            tune_rb.main(argv, ledger_path=ledger_path)
+        text = _refusal(excinfo, capsys)
+        assert re.search(r"price[_-]regime", text), (flags, text)
+        assert "unrecognized" not in text, (flags, text)
+        assert _listing(runs) in (None, [])
+        assert _listing(configs) == ["rule_based_default.yml"]
+        assert ledger_path.read_bytes() == before
+
+
 @pytest.mark.parametrize(
     "mode",
     [
@@ -976,18 +1187,22 @@ def test_cli_runs_as_a_module_and_lists_its_flags(tmp_path):
 
 
 def test_signatures_match_the_contract_and_nothing_real_was_written():
-    """rb_return(params, scenarios, season_length=60) and main(argv=None, *,
-    ledger_path=ledger.LEDGER), as train.main.
+    """rb_return(params, scenarios, season_length=60, *, price_regime="sim") and main(argv=None, *,
+    ledger_path=ledger.LEDGER), as train.main. price_regime (#67) is defaulted, so every earlier
+    call scores at sim, as before.
 
     This test runs last in the module and checks the real ledger's size and mtime, the listing of
-    control/runs/, and configs/rule_based_tuned.yml (absent until E1) are as they were when the
-    module was collected.
+    control/runs/, and configs/rule_based_tuned.yml and rule_based_tuned_agc2020.yml are as they
+    were when the module was collected.
     """
     import greenleaf_control.tune_rb as tune_rb
 
     rb = inspect.signature(tune_rb.rb_return).parameters
-    assert list(rb) == ["params", "scenarios", "season_length"]
+    assert list(rb) == ["params", "scenarios", "season_length", "price_regime"]
     assert rb["season_length"].default == 60
+    assert rb["price_regime"].kind is inspect.Parameter.KEYWORD_ONLY
+    assert rb["price_regime"].default == "sim"
+    assert _stat(REAL_TUNED_AGC2020) == REAL_TUNED_AGC2020_BEFORE
     main = inspect.signature(tune_rb.main).parameters
     assert list(main) == ["argv", "ledger_path"]
     assert main["argv"].default is None

@@ -122,6 +122,24 @@ def test_load_rb_params_default_is_upstream_flat_dict():
     assert params == RB_DEFAULT
 
 
+def test_load_rb_params_tuned_agc2020_reads_its_own_file(tmp_path, monkeypatch):
+    """(B, issue #67) load_rb_params("tuned_agc2020") unwraps configs/rule_based_tuned_agc2020.yml,
+    the agc2020 tune's params, and "tuned" still reads rule_based_tuned.yml. CONFIGS is pointed at
+    a tmp dir holding both, with different co2_day setpoints, so neither name can read the other's
+    file."""
+    import greenleaf_control.rule_based as rule_based
+
+    sim = {**RB_DEFAULT, "co2_day": 900.0}
+    agc = {**RB_DEFAULT, "co2_day": 650.0}
+    for name, params in (("tuned", sim), ("tuned_agc2020", agc)):
+        text = yaml.safe_dump({"GreenLightEnv": params}, sort_keys=False)
+        (tmp_path / f"rule_based_{name}.yml").write_text(text)
+    monkeypatch.setattr(rule_based, "CONFIGS", tmp_path)
+
+    assert rule_based.load_rb_params("tuned_agc2020") == agc
+    assert rule_based.load_rb_params("tuned") == sim
+
+
 def test_make_controller_round_trips_params():
     """make_controller(params) is RuleBasedController(**params): every key lands on the attribute
     of the same name, including a value changed from the default."""

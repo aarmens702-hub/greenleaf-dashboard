@@ -46,6 +46,7 @@ import numpy as np
 import pandas as pd
 import pytest
 import torch
+import yaml
 from gl_gym.environments.utils import co2dens2ppm, vaporPres2rh
 from stable_baselines3 import PPO
 from stable_baselines3.common.vec_env import DummyVecEnv, VecEnvWrapper, VecMonitor, VecNormalize
@@ -82,7 +83,9 @@ U_RB_COLS = [f"u_rb_{c.removeprefix('u_')}" for c in U_COLS]
 COST_COLS = [f"cost_{c}" for c in CONSTRAINTS]
 RB_FRAME = ["t", "co2", "temp", "rh", *U_COLS, "profit", *COST_COLS]
 RESIDUAL_FRAME = ["t", "co2", "temp", "rh", *U_COLS, *U_RB_COLS, "profit", *COST_COLS]
-# A --out row's identity columns; the rest are the result dict's keys.
+# A --out row's identity columns; the rest are the result dict's keys. price_regime (#67) is the
+# regime the row was played and graded at: --price-regime's for a baseline (sim unflagged), the
+# manifest's for a run dir (sim if it records none).
 ROW_KEYS = {
     "controller",
     "checkpoint",
@@ -91,9 +94,15 @@ ROW_KEYS = {
     "growth_year",
     "start_day",
     "season_length",
+    "price_regime",
 }
 TEST_SPLITS = ("amsterdam_2012", "london_2012", "abbotsford_2012")
-CLI_FLAGS = ("--controller", "--split", "--out", "--final")
+CLI_FLAGS = ("--controller", "--split", "--out", "--final", "--price-regime")
+# Issue #67, PROTOCOL v3's price regimes, written out so the grading checks below don't read
+# metrics' own table: sim is upstream's registered prices (every result before v3); agc2020 is
+# AGC2's 2020 tariffs, heat 0.03 EUR/kWh, electricity 0.06 EUR/kWh, CO2 0.08 EUR/kg.
+SIM = {"fruit": 1.6, "dmfm": 0.065, "heat": 0.09, "elec": 0.3, "co2": 0.3}
+AGC2020 = {"fruit": 1.6, "dmfm": 0.065, "heat": 0.03, "elec": 0.06, "co2": 0.08}
 
 
 @pytest.fixture(scope="module")
@@ -627,9 +636,10 @@ def test_run_rb_and_run_policy_refuse_a_test_scenario(split, residual_run):
 def test_cli_scores_a_baseline_on_paper_into_one_parquet_row(tmp_path):
     """evaluate --controller zero_controls --split paper --out x.parquet returns 0 and writes one
     row (PAPER is one scenario): the identity columns (controller, checkpoint, split, location,
-    growth_year, start_day, season_length) plus the result dict's keys, nothing else. Known
-    answers: seasons are 60 days, so 5,760 steps; zero controls never fail the solver on PAPER
-    (the golden zero_controls season), so valid. About 4 s."""
+    growth_year, start_day, season_length, price_regime) plus the result dict's keys, nothing
+    else. Known answers: seasons are 60 days, so 5,760 steps; zero controls never fail the solver
+    on PAPER (the golden zero_controls season), so valid; with no --price-regime the season is
+    played and graded at sim (#67), so its row's price_regime is "sim". About 4 s."""
     import greenleaf_control.evaluate as evaluate
 
     out = tmp_path / "x.parquet"
@@ -639,6 +649,7 @@ def test_cli_scores_a_baseline_on_paper_into_one_parquet_row(tmp_path):
     result_keys = set(_graded(envs.run_baseline("zero_controls", PAPER, 1), PAPER, 1))
     assert set(df.columns) == ROW_KEYS | result_keys
     [row] = df.to_dict("records")
+    assert row.get("price_regime") == "sim"
     assert (row["controller"], row["split"], row["season_length"]) == ("zero_controls", "paper", 60)
     assert (row["location"], row["growth_year"], row["start_day"]) == ("Amsterdam", 2010, 59)
     assert row["steps"] == 60 * N_DAY
@@ -742,6 +753,246 @@ def test_cli_runs_as_a_module_and_lists_its_flags_and_every_split(tmp_path):
     assert result.returncode == 0, result.stderr
     missing = [word for word in (*CLI_FLAGS, *scenarios.SPLITS) if word not in result.stdout]
     assert not missing, f"--help doesn't list {missing}"
+
+
+# --- Price regimes (issue #67, PROTOCOL v3) -----------------------------------------------------
+
+
+def _graded_at(trace: tuple, prices: dict) -> dict:
+    """episode_metrics on a season's raw (states, controls, params) at the given prices, its
+    season_steps the trace's own length."""
+    states, controls, params = trace
+    return metrics.episode_metrics(
+        states, controls, params, season_steps=len(controls), prices=prices
+    )
+
+
+def _baseline_trace(name: str, scenario: dict, days: int) -> tuple:
+    """A baseline's season as today's (sim) env plays it, as (states, controls, params)."""
+    states, controls = metrics.trace_from_infos(envs.run_baseline(name, scenario, days))
+    p = envs.make_raw_env(
+        scenario=scenario, season_length=days, normalize_actions=False
+    ).unwrapped.p
+    return states, controls, np.asarray(p, dtype=np.float64)
+
+
+@pytest.mark.usefixtures("no_2012_reads")
+def test_run_rb_under_the_sim_regime_is_todays_run_rb():
+    """With sim, everything scores as today: run_rb(default params, PAPER, 1, price_regime="sim")
+    == run_rb(default params, PAPER, 1), key for key, exactly."""
+    import greenleaf_control.evaluate as evaluate
+
+    got, _ = evaluate.run_rb(RB_DEFAULT, PAPER, 1, price_regime="sim")
+    assert got == evaluate.run_rb(RB_DEFAULT, PAPER, 1)[0]
+
+
+@pytest.mark.usefixtures("no_2012_reads")
+def test_run_rb_under_agc2020_grades_its_season_at_agc2020_prices():
+    """run_rb(default params, PAPER, 1, price_regime="agc2020") plays the env at agc2020's prices
+    and grades the season at them.
+
+    Known answer: the controller reads the state, never the reward, and prices don't enter the
+    model, so the agc2020 season is today's season step for step (its raw trace equals the sim
+    run's exactly). So every metric is episode_metrics on that trace at AGC2020's prices (written
+    out above), exactly, and paper_reward_sum, the agc2020 env's own reward summed, is that
+    paper_return to rel 1e-6 (upstream's float32 observations). Non-vacuous: profit and
+    paper_reward_sum both differ from the sim season's."""
+    import greenleaf_control.evaluate as evaluate
+
+    sim, _, sim_trace = evaluate.run_rb(RB_DEFAULT, PAPER, 1, return_trace=True)
+    got, _, trace = evaluate.run_rb(RB_DEFAULT, PAPER, 1, return_trace=True, price_regime="agc2020")
+
+    for ours, theirs in zip(trace, sim_trace, strict=True):
+        np.testing.assert_array_equal(ours, theirs)
+    want = _graded_at(sim_trace, AGC2020)
+    assert {k: got[k] for k in want} == want
+    assert got["paper_reward_sum"] == pytest.approx(want["paper_return"], rel=1e-6)
+    assert got["profit_eur_m2"] != pytest.approx(sim["profit_eur_m2"], abs=1e-3)
+    assert got["paper_reward_sum"] != pytest.approx(sim["paper_reward_sum"], rel=1e-3)
+
+
+@pytest.mark.usefixtures("no_2012_reads")
+def test_run_policy_grades_with_the_manifests_price_regime(residual_run, tmp_path):
+    """Done when (#67): run_policy on a manifest with price_regime agc2020 grades with agc2020
+    prices, and a manifest without the key (every run recorded before v3) loads as sim.
+
+    The residual smoke run is copied three times, its manifest's config with price_regime removed,
+    set to "sim" and set to "agc2020", and each copy's final checkpoint plays the 1-day PAPER
+    season. Known answer: the policy never sees a price (its observation is the crop, controls,
+    climate, weather, time, progress and the RB's action; VecNormalize is frozen with norm_reward
+    False), so the three seasons are one raw trace, exactly. Each result is episode_metrics on that
+    trace at its regime's prices (written out above: sim for the first two), exactly, and its
+    paper_reward_sum, the rebuilt env's own reward, is that paper_return to rel 1e-6, so the env
+    was rebuilt at the manifest's regime too. Non-vacuous: agc2020's profit and paper_reward_sum
+    differ from sim's."""
+    import greenleaf_control.evaluate as evaluate
+
+    regimes = {"absent": None, "sim": "sim", "agc2020": "agc2020"}
+    seasons = {}
+    for name, regime in regimes.items():
+        run_dir = tmp_path / name
+        shutil.copytree(residual_run, run_dir)
+        m = json.loads((run_dir / "manifest.json").read_text())
+        m["config"].pop("price_regime", None)
+        if regime is not None:
+            m["config"]["price_regime"] = regime
+        (run_dir / "manifest.json").write_text(json.dumps(m, indent=2) + "\n")
+        result, _, trace = evaluate.run_policy(run_dir, "final", PAPER, 1, return_trace=True)
+        seasons[name] = (result, trace)
+
+    _, (states, controls, _) = seasons["absent"]
+    assert len(controls) == N_DAY
+    for name, (result, trace) in seasons.items():
+        np.testing.assert_array_equal(trace[0], states, err_msg=name)
+        np.testing.assert_array_equal(trace[1], controls, err_msg=name)
+        want = _graded_at(trace, AGC2020 if name == "agc2020" else SIM)
+        assert {k: result[k] for k in want} == want, name
+        assert result["paper_reward_sum"] == pytest.approx(want["paper_return"], rel=1e-6), name
+    agc, sim = seasons["agc2020"][0], seasons["sim"][0]
+    assert agc["profit_eur_m2"] != pytest.approx(sim["profit_eur_m2"], abs=1e-3)
+    assert agc["paper_reward_sum"] != pytest.approx(sim["paper_reward_sum"], rel=1e-3)
+
+
+@pytest.mark.parametrize("controller", ["rb_default", "zero_controls", "random"])
+@pytest.mark.usefixtures("no_2012_reads")
+def test_cli_scores_a_baseline_under_the_asked_price_regime(controller, tmp_path, monkeypatch):
+    """`evaluate --controller <baseline> --split validation --price-regime agc2020` plays and
+    grades each VALIDATION season under agc2020. evaluate.SEASON_LENGTH is patched to 1 day, so
+    the three seasons are 96 steps each.
+
+    Known answer: no baseline reads the reward, so each season is today's (sim) season of
+    envs.run_baseline(controller, s, 1), step for step; each row is that season graded at
+    AGC2020's prices (written out above), every metric exactly, and paper_reward_sum, the agc2020
+    env's reward, is its paper_return to rel 1e-6. Every row records the regime it was graded at:
+    price_regime "agc2020". Non-vacuous: each row's paper_return differs from the sim grading of
+    the same season."""
+    import greenleaf_control.evaluate as evaluate
+
+    monkeypatch.setattr(evaluate, "SEASON_LENGTH", 1)
+    out = tmp_path / "x.parquet"
+
+    assert evaluate.main(_argv(controller, "validation", out, "--price-regime", "agc2020")) == 0
+
+    rows = pd.read_parquet(out).to_dict("records")
+    assert len(rows) == len(scenarios.VALIDATION)
+    for row, s in zip(rows, scenarios.VALIDATION, strict=True):
+        assert row.get("price_regime") == "agc2020", s
+        assert (row["location"], row["growth_year"], row["start_day"]) == (
+            s["location"],
+            s["growth_year"],
+            s["start_day"],
+        )
+        trace = _baseline_trace(controller, s, 1)
+        want = _graded_at(trace, AGC2020)
+        assert {k: row[k] for k in want} == want, s
+        assert row["paper_reward_sum"] == pytest.approx(want["paper_return"], rel=1e-6), s
+        assert want["paper_return"] != pytest.approx(_graded_at(trace, SIM)["paper_return"])
+
+
+@pytest.mark.usefixtures("no_2012_reads")
+def test_cli_scores_rb_tuned_agc2020_from_its_own_config(tmp_path, monkeypatch):
+    """(B, #67) `evaluate --controller rb_tuned_agc2020 --split validation --price-regime agc2020`
+    plays the rule-based controller with rule_based.load_rb_params("tuned_agc2020"), the agc2020
+    tune's configs/rule_based_tuned_agc2020.yml (CONFIGS pointed at a tmp dir holding one: the
+    default params with three setpoints moved), and grades it under agc2020. SEASON_LENGTH is
+    patched to 1 day.
+
+    Known answer: each row is evaluate.run_rb(those params, s, 1)'s raw trace (today's, sim; the
+    controller never reads the reward) graded at AGC2020's prices, every metric exactly, its
+    controller is "rb_tuned_agc2020" and its price_regime "agc2020". Non-vacuous: on some
+    VALIDATION day the moved setpoints change the season (its profit differs from the default
+    params')."""
+    import greenleaf_control.evaluate as evaluate
+
+    configs = tmp_path / "configs"
+    configs.mkdir()
+    tuned = {**RB_DEFAULT, "temp_setpoint_day": 21.25, "co2_day": 937.5, "lamps_off": 16.5}
+    text = yaml.safe_dump({"GreenLightEnv": tuned}, sort_keys=False)
+    (configs / "rule_based_tuned_agc2020.yml").write_text(text)
+    monkeypatch.setattr(rule_based, "CONFIGS", configs)
+    monkeypatch.setattr(evaluate, "SEASON_LENGTH", 1)
+    out = tmp_path / "x.parquet"
+
+    argv = _argv("rb_tuned_agc2020", "validation", out, "--price-regime", "agc2020")
+    assert evaluate.main(argv) == 0
+
+    rows = pd.read_parquet(out).to_dict("records")
+    assert len(rows) == len(scenarios.VALIDATION)
+    moved = []
+    for row, s in zip(rows, scenarios.VALIDATION, strict=True):
+        assert row["controller"] == "rb_tuned_agc2020"
+        assert row.get("price_regime") == "agc2020", s
+        _, _, trace = evaluate.run_rb(tuned, s, 1, return_trace=True)
+        want = _graded_at(trace, AGC2020)
+        assert {k: row[k] for k in want} == want, s
+        _, _, default_trace = evaluate.run_rb(RB_DEFAULT, s, 1, return_trace=True)
+        moved.append(want["profit_eur_m2"] != _graded_at(default_trace, AGC2020)["profit_eur_m2"])
+    assert any(moved), "the tuned params play every VALIDATION day as the defaults do"
+
+
+@pytest.mark.parametrize(
+    ("recorded", "expected"),
+    [(None, "sim"), ("sim", "sim"), ("agc2020", "agc2020")],
+    ids=["absent", "sim", "agc2020"],
+)
+@pytest.mark.usefixtures("no_2012_reads")
+def test_cli_row_records_a_run_dirs_manifest_price_regime(
+    recorded, expected, residual_run, tmp_path, monkeypatch
+):
+    """(#67) `evaluate --controller <run_dir> --split paper` records the regime the run dir was
+    graded at, its manifest's config.get("price_regime", "sim"): a copy of the residual smoke run
+    whose manifest's config has price_regime removed (every run recorded before v3), set to "sim",
+    or set to "agc2020" writes one row with price_regime "sim", "sim" and "agc2020". SEASON_LENGTH
+    is patched to 1 day (96 steps).
+
+    The row is the identity columns plus run_policy(copy, "final", PAPER, 1)'s result keys, nothing
+    else, and its numbers are that result's exactly (the policy is deterministic and VecNormalize
+    frozen), so the column names the regime the row's numbers were graded at."""
+    import greenleaf_control.evaluate as evaluate
+
+    run_dir = tmp_path / "run"
+    shutil.copytree(residual_run, run_dir)
+    m = json.loads((run_dir / "manifest.json").read_text())
+    m["config"].pop("price_regime", None)
+    if recorded is not None:
+        m["config"]["price_regime"] = recorded
+    (run_dir / "manifest.json").write_text(json.dumps(m, indent=2) + "\n")
+    monkeypatch.setattr(evaluate, "SEASON_LENGTH", 1)
+    out = tmp_path / "x.parquet"
+
+    assert evaluate.main(_argv(str(run_dir), "paper", out)) == 0
+
+    [row] = pd.read_parquet(out).to_dict("records")
+    want, _ = evaluate.run_policy(run_dir, "final", PAPER, 1)
+    assert set(row) == ROW_KEYS | set(want)
+    assert row.get("price_regime") == expected
+    assert (row["controller"], row["checkpoint"]) == (str(run_dir), "final")
+    assert {k: row[k] for k in want} == want
+
+
+@pytest.mark.parametrize("where", ["final", "run_dir"])
+def test_cli_refuses_a_price_regime_for_the_final_and_for_a_run_dir(
+    where, residual_run, tmp_path, monkeypatch, capsys
+):
+    """--price-regime is for baselines only. With --final the registered row's runs carry their
+    regime in their manifests, and a run dir's regime comes from its manifest, so passing it is
+    refused (SystemExit nonzero or ValueError) naming --price-regime, as a known flag (not
+    argparse's "unrecognized arguments"), before any env is built and with no --out written."""
+    import greenleaf_control.evaluate as evaluate
+
+    out = tmp_path / "x.parquet"
+    if where == "final":
+        argv = ["--final", "final-registered-deadbeef", "--price-regime", "agc2020"]
+    else:
+        argv = _argv(str(residual_run), "paper", out, "--price-regime", "agc2020")
+    _no_env_built(monkeypatch, evaluate)
+
+    with pytest.raises((SystemExit, ValueError)) as excinfo:
+        evaluate.main(argv, ledger_path=tmp_path / "ledger.jsonl")
+    text = _refusal(excinfo, capsys)
+    assert "--price-regime" in text or "price_regime" in text, text
+    assert "unrecognized" not in text, text
+    assert not out.exists()
 
 
 # --- From 13a's review --------------------------------------------------------------------------
@@ -890,11 +1141,12 @@ def test_no_module_but_the_final_passes_allow_test_true():
 
 def test_signatures_match_the_contract_and_no_test_wrote_the_real_ledger_or_runs():
     """run_rb(params, scenario, season_length=60, record_steps=False, return_trace=False, *,
-    allow_test=False), run_policy(run_dir, checkpoint, scenario, season_length=60,
-    record_steps=False, return_trace=False, *, allow_test=False) and main(argv=None, *,
-    ledger_path=ledger.LEDGER). return_trace (run_policy's #24, run_rb's #44), allow_test (#41)
-    and ledger_path (#43, the ledger --final reads) are backward-compatible extensions: defaulted,
-    so every earlier call is unchanged.
+    allow_test=False, price_regime="sim"), run_policy(run_dir, checkpoint, scenario,
+    season_length=60, record_steps=False, return_trace=False, *, allow_test=False) and
+    main(argv=None, *, ledger_path=ledger.LEDGER). return_trace (run_policy's #24, run_rb's #44),
+    allow_test (#41), ledger_path (#43, the ledger --final reads) and run_rb's price_regime (#67)
+    are backward-compatible extensions: defaulted, so every earlier call is unchanged. run_policy
+    takes no price_regime: a run's regime is its manifest's.
 
     This test runs last in the module and checks the real ledger's size and mtime, and the
     listing of control/runs/, are as they were when the module was collected.
@@ -909,7 +1161,10 @@ def test_signatures_match_the_contract_and_no_test_wrote_the_real_ledger_or_runs
         "record_steps",
         "return_trace",
         "allow_test",
+        "price_regime",
     ]
+    assert rb["price_regime"].kind is inspect.Parameter.KEYWORD_ONLY
+    assert rb["price_regime"].default == "sim"
     policy = inspect.signature(evaluate.run_policy).parameters
     assert list(policy) == [
         "run_dir",

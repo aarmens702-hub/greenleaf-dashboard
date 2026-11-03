@@ -133,3 +133,31 @@ def test_our_paper_season_metrics(name):
     assert {k: m[k] for k in VIOL_KEYS} == {k: want[k] for k in VIOL_KEYS}
     for k in FLOAT_KEYS:
         assert m[k] == pytest.approx(want[k], rel=1e-6), k
+
+
+@pytest.mark.slow
+def test_rb_default_under_the_sim_price_regime_is_the_golden_season():
+    """Issue #67 (PROTOCOL v3): sim is the price regime every recorded result used, so naming it
+    changes nothing. rb_default's full PAPER season on envs.run_baseline(..., price_regime="sim"),
+    graded by metrics at metrics.PRICE_REGIMES["sim"], gives values.json's pinned rb_default numbers
+    (unchanged): valid, 5,760 steps, viol_hours_<c> exactly, profit_eur_m2, yield_kg_m2 and
+    paper_return at rel 1e-6; and its summed info["paper_reward"] is the default env's exactly
+    (about 8 s: two seasons)."""
+    want = VALUES["ours"]["rb_default"]
+    params = envs.make_raw_env(scenario=scenarios.PAPER, normalize_actions=False).unwrapped.p
+    infos = envs.run_baseline("rb_default", scenarios.PAPER, price_regime="sim")
+    states, controls = metrics.trace_from_infos(infos)
+    m = metrics.episode_metrics(
+        states,
+        controls,
+        np.asarray(params),
+        season_steps=N_SEASON,
+        prices=metrics.PRICE_REGIMES["sim"],
+    )
+    assert m["steps"] == want["steps"]
+    assert m["valid"] is True
+    assert {k: m[k] for k in VIOL_KEYS} == {k: want[k] for k in VIOL_KEYS}
+    for k in FLOAT_KEYS:
+        assert m[k] == pytest.approx(want[k], rel=1e-6), k
+    today = envs.run_baseline("rb_default", scenarios.PAPER)
+    assert sum(info["paper_reward"] for info in infos) == sum(i["paper_reward"] for i in today)

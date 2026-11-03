@@ -14,6 +14,8 @@ co-pilot (ResidualRBWrapper) for the residual arms and always puts SolverFailure
   plus its 0.5-day lookahead runs past the end of the year. make_env and run_baseline pass
   allow_test through; only evaluate --final sets it.
 - Every step's info carries x_prev and x, the raw state before and after the step (for metrics).
+- The reward is priced at a price regime (PROTOCOL §1, REWARD_PRICES), sim unless another is named;
+  make_env and run_baseline pass price_regime through.
 
 metrics.py grades runs from raw states and controls and must never import this module (it
 imports rewards).
@@ -32,6 +34,16 @@ from greenleaf_control.rewards import ConstraintCostReward
 ENV_ID = "gl_gym/GreenLightTomato-v0"
 METHODS = ("ppo_paper", "ppo", "residual", "residual_lag")
 BASELINES = ("zero_controls", "random", "rb_default", "rb_tuned")
+# PROTOCOL §1's price regimes as upstream's reward kwargs, laid over its registered ones: sim keeps
+# them all (fruit 1.6 EUR/kg, heat 0.09 and electricity 0.3 EUR/kWh, CO2 0.3 EUR/kg). agc2020's
+# fruit 1.6 is the simulator's price; only heat, electricity and CO2 are AGC2's 2020 tariffs
+# (Hemming et al. 2020, Sensors 20(22):6430, §2). Its electricity 0.06 is the unweighted mean of
+# AGC2's 0.08 on-peak (07:00-23:00) and 0.04 off-peak tariffs, flat (not time-of-use). Written apart
+# from metrics.PRICE_REGIMES, so the grader stays independent of the reward.
+REWARD_PRICES = {
+    "sim": {},
+    "agc2020": {"fruit_price": 1.6, "heating_price": 0.03, "elec_price": 0.06, "co2_price": 0.08},
+}
 _REFUSED = "TEST weather (sealed, PROTOCOL §8); only make_raw_env(allow_test=True) may open it"
 
 
@@ -184,12 +196,18 @@ def make_raw_env(
     penalty_weight: float = 1.0,
     season_progress: bool = False,
     allow_test: bool = False,
+    price_regime: str = "sim",
 ) -> gym.Env:
-    """Upstream's env on a fixed scenario or a random sampler, with ConstraintCostReward.
+    """Upstream's env on a fixed scenario or a random sampler, with ConstraintCostReward at
+    price_regime's prices (REWARD_PRICES; an unknown name raises).
 
     Ends the season after exactly N steps (decision B) and returns a flat Box observation
     (FlattenObservation, then SeasonProgress if asked). Refuses TEST weather unless allow_test.
     """
+    if price_regime not in REWARD_PRICES:
+        raise ValueError(
+            f"unknown price regime {price_regime!r}; expected one of {tuple(REWARD_PRICES)}"
+        )
     if (scenario is None) == (sampler_kwargs is None):
         raise ValueError("make_raw_env needs exactly one of scenario or sampler_kwargs")
     if scenario is not None:
@@ -213,9 +231,11 @@ def make_raw_env(
         normalize_actions=normalize_actions,
         weather_data_dir=str(scenarios.WEATHER_DIR),
         reward_fn=ConstraintCostReward,
-        # GreenhouseReward has no price defaults, so keep the registered ones.
+        # GreenhouseReward has no price defaults, so keep the registered ones, with the regime's
+        # prices over them (none for sim).
         reward_kwargs={
             **gym.spec(ENV_ID).kwargs["reward_kwargs"],
+            **REWARD_PRICES[price_regime],
             "penalty_weight": penalty_weight,
         },
         weather_scenario_sampler=sampler,
@@ -240,6 +260,7 @@ def make_env(
     rb_params: dict | None = None,
     residual_scale: float = 0.15,
     allow_test: bool = False,
+    price_regime: str = "sim",
 ) -> gym.Env:
     """The env a METHODS entry trains and is evaluated on, reset once with seed (and its action
     space seeded). A given scenario overrides the method's default weather (PAPER or TRAIN)."""
@@ -260,6 +281,7 @@ def make_env(
         penalty_weight=0.0 if method == "residual_lag" else penalty_weight,
         season_progress=method != "ppo_paper",
         allow_test=allow_test,
+        price_regime=price_regime,
     )
     if residual:
         params = rule_based.load_rb_params("tuned") if rb_params is None else rb_params
@@ -271,7 +293,12 @@ def make_env(
 
 
 def run_baseline(
-    name: str, scenario: dict, season_length: int = 60, *, allow_test: bool = False
+    name: str,
+    scenario: dict,
+    season_length: int = 60,
+    *,
+    allow_test: bool = False,
+    price_regime: str = "sim",
 ) -> list[dict]:
     """A full episode's per-step info dicts for a BASELINES entry on a fixed scenario.
 
@@ -285,6 +312,7 @@ def run_baseline(
             season_length=season_length,
             normalize_actions=False,
             allow_test=allow_test,
+            price_regime=price_regime,
         )
     )
     rng = np.random.default_rng(scenario["start_day"])

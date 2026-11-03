@@ -1,7 +1,8 @@
 """Tuning the rule-based controller: its 12 setpoints, Optuna TPE, on TRAIN_EVAL (PROTOCOL §3).
 
 Every trial plays the controller with configs/rule_based_default.yml's params, the trial's 12
-setpoints over them, on each TRAIN_EVAL season and scores the mean metrics paper_return. Trial 0 is
+setpoints over them, on each TRAIN_EVAL season and scores the mean metrics paper_return at
+--price-regime's prices (default sim; PROTOCOL §3 lets the rules be tuned per regime). Trial 0 is
 the defaults. --jobs is Optuna's n_jobs; a run is deterministic at --jobs 1 only. A trial with an
 invalid season is FAIL, never scored, and the tune goes on; the tuned params are the best COMPLETE
 trial's, and a tune with none crashes. Any other exception crashes the run.
@@ -10,8 +11,9 @@ trial's, and a tune with none crashes. Any other exception crashes the run.
   and records no ledger row.
 - --registered <row> runs that row's rb_tuned arm on 60-day seasons into
   <runs-dir>/<row>/<arm>/seed<S>, records its run and run-end rows, and writes the tuned params to
-  configs/rule_based_tuned.yml, once. The row's scenarios are where the result is scored
-  (["validation"]); the tune itself always runs on TRAIN_EVAL.
+  configs/rule_based_tuned.yml (sim) or configs/rule_based_tuned_<regime>.yml, once. The row's
+  scenarios are where the result is scored (["validation"]); the tune itself always runs on
+  TRAIN_EVAL.
 
 Both write manifest.json, trials.csv (Optuna's trials_dataframe) and rule_based_tuned.yml
 ({"GreenLightEnv": params}, as load_rb_params reads it) into the run dir.
@@ -27,7 +29,7 @@ import numpy as np
 import optuna
 import yaml
 
-from greenleaf_control import evaluate, ledger, manifest, rule_based, scenarios, train
+from greenleaf_control import evaluate, ledger, manifest, metrics, rule_based, scenarios, train
 
 # The 12 setpoints and their [lo, hi]; every other controller key stays at its default.
 TUNE_SPACE = {
@@ -53,12 +55,14 @@ class InvalidSeason(RuntimeError):
     """A season metrics marks invalid (a solver failure, or a short season): never scored."""
 
 
-def rb_return(params: dict, scenarios: list[dict], season_length: int = 60) -> float:
-    """The mean metrics paper_return of the controller with params over scenarios; an invalid
-    season raises InvalidSeason: it is never scored."""
+def rb_return(
+    params: dict, scenarios: list[dict], season_length: int = 60, *, price_regime: str = "sim"
+) -> float:
+    """The mean metrics paper_return of the controller with params over scenarios, at
+    price_regime's prices; an invalid season raises InvalidSeason: it is never scored."""
     returns = []
     for s in scenarios:
-        result = evaluate.run_rb(params, s, season_length)[0]
+        result = evaluate.run_rb(params, s, season_length, price_regime=price_regime)[0]
         if not result["valid"]:
             raise InvalidSeason(
                 f"invalid season {s}: solver_failures {result['solver_failures']}, steps"
@@ -68,8 +72,9 @@ def rb_return(params: dict, scenarios: list[dict], season_length: int = 60) -> f
     return float(np.mean(returns))
 
 
-def _tune(trials: int, jobs: int, seed: int, season_length: int) -> optuna.Study:
-    """A seeded TPE study maximizing rb_return on TRAIN_EVAL, trial 0 at the defaults."""
+def _tune(trials: int, jobs: int, seed: int, season_length: int, price_regime: str) -> optuna.Study:
+    """A seeded TPE study maximizing rb_return on TRAIN_EVAL at price_regime, trial 0 at the
+    defaults."""
     defaults = rule_based.load_rb_params("default")
     sampler = optuna.samplers.TPESampler(seed=seed)
     study = optuna.create_study(direction="maximize", sampler=sampler)
@@ -77,18 +82,27 @@ def _tune(trials: int, jobs: int, seed: int, season_length: int) -> optuna.Study
 
     def objective(trial: optuna.Trial) -> float:
         tuned = {key: trial.suggest_float(key, lo, hi) for key, (lo, hi) in TUNE_SPACE.items()}
-        return rb_return({**defaults, **tuned}, scenarios.TRAIN_EVAL, season_length)
+        return rb_return(
+            {**defaults, **tuned}, scenarios.TRAIN_EVAL, season_length, price_regime=price_regime
+        )
 
     # Only an invalid season fails a trial and lets the tune go on; anything else crashes it.
     study.optimize(objective, n_trials=trials, n_jobs=jobs, catch=(InvalidSeason,))
     return study
 
 
+def _tuned_yml(price_regime: str) -> Path:
+    """The configs/ file a registered tune at price_regime writes once, as load_rb_params reads it:
+    rule_based_tuned.yml for sim, rule_based_tuned_<regime>.yml for another regime."""
+    name = "tuned" if price_regime == "sim" else f"tuned_{price_regime}"
+    return rule_based.CONFIGS / f"rule_based_{name}.yml"
+
+
 def _registration(
-    row_id: str, trials: int, seed: int, jobs: int, ledger_path: Path
+    row_id: str, trials: int, seed: int, jobs: int, price_regime: str, ledger_path: Path
 ) -> tuple[dict, dict]:
     """The registered row and its rb_tuned arm; refuses a tune that isn't exactly its
-    registration, and a second registered tune (configs/rule_based_tuned.yml is written once)."""
+    registration, and a second registered tune at its regime (its configs/ yml is written once)."""
     found = [r for r in ledger.rows(kind="registered", path=ledger_path) if r["row_id"] == row_id]
     if not found:
         raise ValueError(f"--registered {row_id}: no registered row with that id in {ledger_path}")
@@ -99,11 +113,11 @@ def _registration(
             f"{row_id}: tune_rb runs exactly one arm of method rb_tuned; its arms are {row['arms']}"
         )
     [arm] = arms
-    extra = sorted(set(arm["config"]) - {"trials"})
+    extra = sorted(set(arm["config"]) - {"trials", "price_regime"})
     if extra:
         raise ValueError(
             f"{row_id}: arm {arm['name']}'s config keys {extra} are not tune_rb's; an rb_tuned"
-            " arm's config is exactly {'trials': N}"
+            " arm's config is exactly {'trials': N}, optionally with a price_regime"
         )
     if trials != arm["config"].get("trials"):
         raise ValueError(
@@ -129,7 +143,13 @@ def _registration(
             f"{row_id}: --jobs {jobs}; a registered tune runs at --jobs 1, the only n_jobs at which"
             " seed 0 is deterministic"
         )
-    tuned = rule_based.CONFIGS / "rule_based_tuned.yml"
+    registered = arm["config"].get("price_regime", "sim")
+    if price_regime != registered:
+        raise ValueError(
+            f"{row_id}: --price-regime {price_regime} differs from arm {arm['name']}'s price_regime"
+            f" {registered} (an arm that names none is sim)"
+        )
+    tuned = _tuned_yml(price_regime)
     if tuned.exists():
         raise ValueError(f"{tuned} already exists: a registered tune writes it once")
     return row, arm
@@ -141,6 +161,12 @@ def _parser() -> argparse.ArgumentParser:
     p.add_argument("--jobs", type=int, default=1, help="Optuna's n_jobs (default 1, deterministic)")
     p.add_argument("--seed", type=int, required=True, help="the TPE sampler's seed")
     p.add_argument("--runs-dir", type=Path, default=train.RUNS, help="default control/runs")
+    p.add_argument(
+        "--price-regime",
+        choices=list(metrics.PRICE_REGIMES),
+        default="sim",
+        help="the prices paper_return is scored at, PROTOCOL §1 (default sim)",
+    )
     mode = p.add_mutually_exclusive_group(required=True)
     mode.add_argument(
         "--smoke", action="store_true", help=f"{SMOKE_DAYS}-day seasons, no ledger row"
@@ -157,7 +183,9 @@ def main(argv: list[str] | None = None, *, ledger_path: Path = ledger.LEDGER) ->
         run_dir = args.runs_dir / "smoke" / f"tune_rb-{stamp}-{secrets.token_hex(4)}"
         row, arm = None, None
     else:
-        row, arm = _registration(args.registered, args.trials, args.seed, args.jobs, ledger_path)
+        row, arm = _registration(
+            args.registered, args.trials, args.seed, args.jobs, args.price_regime, ledger_path
+        )
         trials, season_length = args.trials, SEASON_LENGTH
         run_dir = args.runs_dir / row["row_id"] / arm["name"] / f"seed{args.seed}"
     config = {
@@ -166,6 +194,7 @@ def main(argv: list[str] | None = None, *, ledger_path: Path = ledger.LEDGER) ->
         "trials": trials,
         "jobs": args.jobs,
         "season_length": season_length,
+        "price_regime": args.price_regime,
         "tuned_on": "train_eval",
         "tune_space": TUNE_SPACE,
         "run_dir": str(run_dir),
@@ -189,7 +218,7 @@ def main(argv: list[str] | None = None, *, ledger_path: Path = ledger.LEDGER) ->
                 run_dir=str(run_dir),
                 path=ledger_path,
             )
-        study = _tune(trials, args.jobs, args.seed, season_length)
+        study = _tune(trials, args.jobs, args.seed, season_length, args.price_regime)
         failed = sum(t.state == optuna.trial.TrialState.FAIL for t in study.trials)
         study.trials_dataframe().to_csv(run_dir / "trials.csv", index=False)
         # best_params raises ValueError when no trial is COMPLETE: no tuned params, a crash.
@@ -197,7 +226,7 @@ def main(argv: list[str] | None = None, *, ledger_path: Path = ledger.LEDGER) ->
         text = yaml.safe_dump({"GreenLightEnv": params}, sort_keys=False)
         (run_dir / "rule_based_tuned.yml").write_text(text)
         if row is not None:
-            with (rule_based.CONFIGS / "rule_based_tuned.yml").open("x") as f:  # written once
+            with _tuned_yml(args.price_regime).open("x") as f:  # written once
                 f.write(text)
         status = "finished"
     finally:  # a crash is recorded in the manifest and the run-end, then propagates

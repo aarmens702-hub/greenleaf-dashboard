@@ -628,8 +628,8 @@ def test_rb_tuned_is_scored_with_its_run_dirs_params_on_validation(tmp_path, mon
     """An rb_tuned run (as tune_rb records one: seeds [0], timesteps 0, config {"trials": N}) is
     scored with evaluate.run_rb(params, s, 60) for s in VALIDATION, in order, where params is its run
     dir's rule_based_tuned.yml's GreenLightEnv block: the run's own copy, never configs/
-    (load_rb_params is tripped). It has no checkpoint, so it is not in selected; the ledger accepts
-    the file.
+    (load_rb_params is tripped), graded under the registration's price regime: sim, since no arm
+    names one (#67). It has no checkpoint, so it is not in selected; the ledger accepts the file.
 
     Known answer (run_rb faked): profit (5, 6, 10), viol_hours_temp (1, 2, 3), yield_kg_m2 (2, 2,
     8), the second season invalid. One run, so each IQM is the mean and its CI collapses on it:
@@ -665,8 +665,8 @@ def test_rb_tuned_is_scored_with_its_run_dirs_params_on_validation(tmp_path, mon
     _trip(monkeypatch, selection)
     played = []
 
-    def run_rb(params, scenario, season_length=60, record_steps=False):
-        played.append((dict(params), dict(scenario), season_length))
+    def run_rb(params, scenario, season_length=60, record_steps=False, *, price_regime="sim"):
+        played.append((dict(params), dict(scenario), season_length, price_regime))
         if scenario not in scenarios.VALIDATION:
             raise AssertionError(f"run_rb played {scenario}, not a VALIDATION scenario")
         return dict(seasons[scenarios.VALIDATION.index(scenario)]), None
@@ -676,7 +676,7 @@ def test_rb_tuned_is_scored_with_its_run_dirs_params_on_validation(tmp_path, mon
 
     numbers = _numbers(selection, path, reg["row_id"], out)
 
-    assert played == [(tuned, s, 60) for s in scenarios.VALIDATION]
+    assert played == [(tuned, s, 60, "sim") for s in scenarios.VALIDATION]
     rb = numbers["per_arm"]["rb"]
     assert _ci(rb) == pytest.approx((7.0, 7.0, 7.0))
     assert _ci(rb["guards"]["viol_hours_temp"]) == pytest.approx((2.0, 2.0, 2.0))
@@ -913,15 +913,20 @@ def _rb_tuned_run(path: Path, root: Path, reg: dict, arm: str, seed: int = 0) ->
     return run
 
 
-def _fake_run_rb(monkeypatch, seasons: list[dict]) -> None:
-    """evaluate.run_rb returns seasons[i] for VALIDATION[i] and refuses any other scenario."""
+def _fake_run_rb(monkeypatch, seasons: list[dict]) -> list[str]:
+    """evaluate.run_rb returns seasons[i] for VALIDATION[i] and refuses any other scenario.
 
-    def run_rb(params, scenario, season_length=60, record_steps=False):
+    Returns the price regime of each call, in order, updated as it is called (#67)."""
+    regimes = []
+
+    def run_rb(params, scenario, season_length=60, record_steps=False, *, price_regime="sim"):
+        regimes.append(price_regime)
         if scenario not in scenarios.VALIDATION:
             raise AssertionError(f"run_rb played {scenario}, not a VALIDATION scenario")
         return dict(seasons[scenarios.VALIDATION.index(scenario)]), None
 
     monkeypatch.setattr(evaluate, "run_rb", run_rb)
+    return regimes
 
 
 def _arm_lines(out: str, arms) -> dict[str, str]:
@@ -1005,6 +1010,111 @@ def test_out_defaults_to_results_row_json_and_is_written_once(tmp_path, monkeypa
     _refused(selection, ["--registered", reg["row_id"]], path, capsys)
     assert out.read_bytes() == written
     assert sorted(p.name for p in out.parent.iterdir()) == [out.name]
+
+
+# --- Price regimes (issue #67, PROTOCOL v3) ----------------------------------------------------
+
+
+def _register_configs(path: Path, *, arms: list[tuple[str, str, dict]], seeds) -> dict:
+    """A registration on the tmp ledger whose arms are (name, method, config) as given."""
+    return ledger.register(
+        issue=67,
+        hypothesis="the arms differ in validation profit under one price regime",
+        arms=[{"name": name, "method": method, "config": config} for name, method, config in arms],
+        seeds=list(seeds),
+        timesteps=20_000,
+        scenarios=["validation"],
+        primary=PRIMARY,
+        guards=list(GUARDS),
+        rule="adopt if the profit IQM CI excludes rb_tuned's",
+        budget={"cpu_hours": 1.0, "usd": 0.0, "backend": "local"},
+        path=path,
+    )
+
+
+def _set_manifest_regime(run_dir: Path, regime: str) -> None:
+    """Record price_regime in a learning run's manifest config, as train does for its arm."""
+    m = json.loads((run_dir / "manifest.json").read_text())
+    m["config"]["price_regime"] = regime
+    (run_dir / "manifest.json").write_text(json.dumps(m, indent=2) + "\n")
+
+
+def test_rb_tuned_in_an_agc2020_registration_is_graded_under_agc2020(tmp_path, monkeypatch):
+    """(A) Like for like: in a registration whose arms all name price_regime agc2020 (a ppo arm
+    {"price_regime": "agc2020"} and the rb_tuned arm {"trials": 2, "price_regime": "agc2020"}),
+    the rb_tuned run is scored with evaluate.run_rb(params, s, 60, price_regime="agc2020") for each
+    VALIDATION s, so the baseline is graded at the same prices as the learning arm (whose seasons
+    run_policy grades at its manifest's regime). run_rb is faked and records the regime asked
+    for: agc2020, three times."""
+    selection = _selection(monkeypatch, tmp_path)
+    path = tmp_path / "ledger.jsonl"
+    reg = _register_configs(
+        path,
+        arms=[
+            ("rb", "rb_tuned", {"trials": 2, "price_regime": "agc2020"}),
+            ("alpha", "ppo", {"price_regime": "agc2020"}),
+        ],
+        seeds=(0,),
+    )
+    _rb_tuned_run(path, tmp_path, reg, "rb")
+    _, run_dir = _run(path, tmp_path, reg, "alpha", 0, spec=_spec(_seasons((1, 2, 3))))
+    _set_manifest_regime(run_dir, "agc2020")
+    _trip(monkeypatch, selection)
+    regimes = _fake_run_rb(monkeypatch, _seasons((5, 6, 10)))
+
+    numbers = _numbers(selection, path, reg["row_id"], tmp_path / "numbers.json")
+
+    assert regimes == ["agc2020"] * len(scenarios.VALIDATION)
+    assert _ci(numbers["per_arm"]["rb"]) == pytest.approx((7.0, 7.0, 7.0))  # (5 + 6 + 10) / 3
+
+
+MIXED = [
+    pytest.param(
+        [("alpha", "ppo", {"price_regime": "agc2020"}), ("bravo", "residual", {})],
+        id="ppo-agc2020-and-residual-unnamed-sim",
+    ),
+    pytest.param(
+        [("alpha", "ppo", {"price_regime": "agc2020"}), ("rb", "rb_tuned", {"trials": 2})],
+        id="ppo-agc2020-and-rb-tuned-unnamed-sim",
+    ),
+    pytest.param(
+        [
+            ("alpha", "ppo", {"price_regime": "sim"}),
+            ("rb", "rb_tuned", {"trials": 2, "price_regime": "agc2020"}),
+        ],
+        id="ppo-sim-and-rb-tuned-agc2020",
+    ),
+]
+
+
+@pytest.mark.parametrize("arms", MIXED)
+def test_a_registration_mixing_price_regimes_is_refused(arms, tmp_path, monkeypatch, capsys):
+    """(A) One registration's arms share one price regime, so their numbers compare like for like;
+    an arm that names none is sim. A registration mixing sim and agc2020 is refused before anything
+    is scored or written, with a message naming price_regime and both regimes: no season played
+    (run_policy and run_rb tripped), stats.iqm_ci never called, every file under tmp_path as it
+    was. Every run exists and would otherwise score."""
+    selection = _selection(monkeypatch, tmp_path)
+    path = tmp_path / "ledger.jsonl"
+    reg = _register_configs(path, arms=arms, seeds=(0,))
+    for name, method, config in arms:
+        if method == "rb_tuned":
+            _rb_tuned_run(path, tmp_path, reg, name)
+            continue
+        _, run_dir = _run(
+            path, tmp_path, reg, name, 0, method=method, spec=_spec(_seasons((1, 2, 3)))
+        )
+        _set_manifest_regime(run_dir, config.get("price_regime", "sim"))
+    out = tmp_path / "numbers.json"
+    _trip(monkeypatch, selection)
+    monkeypatch.setattr(stats, "iqm_ci", _tripwire("stats.iqm_ci"))
+    before = _tree(tmp_path)
+
+    said = _refused(selection, ["--registered", reg["row_id"], "--out", str(out)], path, capsys)
+
+    assert re.search(r"price[_ -]regime", said), said
+    assert "agc2020" in said and re.search(r"\bsim\b", said), said
+    assert _tree(tmp_path) == before
 
 
 # --- The contract ------------------------------------------------------------------------------

@@ -84,6 +84,13 @@ ZERO_U = (0.0,) * 6
 FULL_COST_U = (1.0, 1.0, 0.0, 0.0, 1.0, 0.0)  # boiler, CO2 dosing and lamps at full
 # p[154] = 0.328 mg/m2/s max fruit growth x 900 s = 295.2 mg DM/m2: the max-profit step.
 MAX_GROWTH = 295.2
+# Issue #67, PROTOCOL v3's price regimes. sim is upstream's registered prices (above), the regime of
+# every result before v3; agc2020 is the 2nd Autonomous Greenhouse Challenge's 2020 tariffs
+# (Hemming et al. 2020, Sensors 20(22):6430, §2): fruit 1.6 EUR/kg and dmfm 0.065 unchanged, heat
+# 0.03 EUR/kWh, electricity 0.06 EUR/kWh (flat: the mean of 0.08 on-peak and 0.04 off-peak), CO2
+# 0.08 EUR/kg. Written out here, not read from metrics, so the hand values below check its table.
+SIM = {"fruit": 1.6, "dmfm": 0.065, "heat": 0.09, "elec": 0.3, "co2": 0.3}
+AGC2020 = {"fruit": 1.6, "dmfm": 0.065, "heat": 0.03, "elec": 0.06, "co2": 0.08}
 
 
 def _state(ppm: float, temp: float, rh: float, *, day: float = 0.0, fruit: float = 0.0):
@@ -513,6 +520,122 @@ def test_paper_return_matches_hand_values_on_one_step(climates, u, growth, expec
     assert (m["viol_hours_rh"], m["pct_in_bounds_rh"]) == ((0.25, 0.0) if rh_out else (0.0, 100.0))
 
 
+# --- Price regimes (issue #67, PROTOCOL v3) ----------------------------------------------------
+
+
+def test_price_regimes_are_exactly_sim_and_agc2020():
+    """metrics.PRICE_REGIMES is exactly {"sim", "agc2020"} at the prices above. sim is upstream's
+    registered reward kwargs, read here from gl_gym (fruit 1.6, dmfm 0.065, heat 0.09, elec 0.3,
+    co2 0.3), and PRICES, episode_metrics' default, is it: every result before v3 was graded at
+    sim. agc2020 changes only heat (0.03), elec (0.06) and co2 (0.08)."""
+    import greenleaf_control.metrics as metrics
+
+    assert metrics.PRICE_REGIMES == {"sim": SIM, "agc2020": AGC2020}
+    assert metrics.PRICE_REGIMES["sim"] == {
+        "fruit": UPSTREAM_KW["fruit_price"],
+        "dmfm": UPSTREAM_KW["dmfm"],
+        "heat": UPSTREAM_KW["heating_price"],
+        "elec": UPSTREAM_KW["elec_price"],
+        "co2": UPSTREAM_KW["co2_price"],
+    }
+    assert metrics.PRICES == metrics.PRICE_REGIMES["sim"]
+
+
+@pytest.mark.parametrize(
+    ("u", "expected"),
+    [
+        # Boiler only. Per full step under agc2020: 18720 W / 144 m2 = 130 W/m2 x 0.25 h =
+        # 0.0325 kWh/m2 x 0.03 EUR/kWh = 0.000975 EUR/m2; two steps 0.00195. Lamps and CO2 off: 0.
+        ((1.0, 0.0, 0.0, 0.0, 0.0, 0.0), {"heat": 0.00195, "elec": 0.0, "co2": 0.0}),
+        # Lamps only: 116 W/m2 x 0.25 h = 0.029 kWh/m2 x 0.06 EUR/kWh = 0.00174; two steps 0.00348
+        ((0.0, 0.0, 0.0, 0.0, 1.0, 0.0), {"heat": 0.0, "elec": 0.00348, "co2": 0.0}),
+        # CO2 only: 720 mg/s / 144 m2 = 5 mg/m2/s x 900 s = 0.0045 kg/m2 x 0.08 EUR/kg = 0.00036;
+        # two steps 0.00072
+        ((0.0, 1.0, 0.0, 0.0, 0.0, 0.0), {"heat": 0.0, "elec": 0.0, "co2": 0.00072}),
+        # Screens and vents fully on cost nothing under any regime
+        ((0.0, 0.0, 1.0, 1.0, 0.0, 1.0), {"heat": 0.0, "elec": 0.0, "co2": 0.0}),
+    ],
+    ids=["boiler", "lamps", "co2", "screens_and_vents"],
+)
+def test_agc2020_costs_match_a_hand_calculation_on_a_two_step_trace(u, expected):
+    """Each cost term at agc2020's own price, with its control on (a nonzero cost) and with it off
+    (zero), so a term priced at sim's rate, or at another term's, fails here. No fruit growth, so
+    profit is minus the costs."""
+    import greenleaf_control.metrics as metrics
+
+    states, controls = _trace([IN_BAND] * 3, u=u)
+    m = metrics.episode_metrics(
+        states, controls, P, season_steps=2, prices=metrics.PRICE_REGIMES["agc2020"]
+    )
+    costs = {c: m[f"{c}_cost"] for c in ("heat", "elec", "co2")}
+    assert costs == pytest.approx(expected, rel=1e-9, abs=1e-15)
+    assert m["profit_eur_m2"] == pytest.approx(-sum(expected.values()), rel=1e-9, abs=1e-15)
+
+
+@pytest.mark.parametrize(
+    ("regime", "costs", "profit"),
+    [
+        # 6.5e5 mg DM/m2 x 1e-6 = 0.65 kg DM / 0.065 = 10.0 kg FFW/m2 x 1.6 EUR/kg = 16.0 EUR/m2
+        # revenue. sim: 2 full steps x (0.002925 + 0.0087 + 0.00135) = 0.02595, so 15.97405
+        ("sim", {"heat": 0.00585, "elec": 0.0174, "co2": 0.0027}, 15.97405),
+        # agc2020: the same 16.0 revenue (fruit price unchanged), minus 2 full steps x (0.000975 heat
+        # + 0.00174 elec + 0.00036 CO2) = 2 x 0.003075 = 0.00615, so 15.99385
+        ("agc2020", {"heat": 0.00195, "elec": 0.00348, "co2": 0.00072}, 15.99385),
+    ],
+)
+def test_each_regime_prices_the_two_step_full_cost_trace(regime, costs, profit):
+    """Done when (#67): under agc2020, episode_metrics' profit on a hand-built trace equals the
+    hand-computed value. The 2-step trace grows fruit from 0 to 6.5e5 mg DM/m2 with boiler, CO2 and
+    lamps at full: yield 10.0 kg/m2 under either regime, each cost and the profit at the regime's
+    prices. sim is the existing hand value (15.97405), unchanged."""
+    import greenleaf_control.metrics as metrics
+
+    states, controls = _trace([IN_BAND] * 3, fruit=(0.0, 3.0e5, 6.5e5), u=FULL_COST_U)
+    m = metrics.episode_metrics(
+        states, controls, P, season_steps=2, prices=metrics.PRICE_REGIMES[regime]
+    )
+    assert m["yield_kg_m2"] == pytest.approx(10.0, rel=1e-12)
+    assert {c: m[f"{c}_cost"] for c in costs} == pytest.approx(costs, rel=1e-9)
+    assert m["profit_eur_m2"] == pytest.approx(profit, rel=1e-9)
+
+
+@pytest.mark.parametrize(
+    ("climates", "u", "growth", "expected"),
+    [
+        # Under agc2020: min_profit = -(0.000975 heat + 0.00174 elec + 0.00036 CO2) = -0.003075;
+        # max_profit = 295.2 mg/m2 x 1e-6 / 0.065 x 1.6 EUR/kg = 0.0072665 EUR/m2 (unchanged);
+        # span 0.0072665 + 0.003075 = 0.0103415. Profit 0: 0.003075 / 0.0103415 = 0.2973467
+        ((IN_BAND, IN_BAND), ZERO_U, 0.0, 0.2973467),
+        # boiler only: (-0.000975 + 0.003075) / 0.0103415 = 0.0021 / 0.0103415 = 0.2030661
+        ((IN_BAND, IN_BAND), (1.0, 0.0, 0.0, 0.0, 0.0, 0.0), 0.0, 0.2030661),
+        # lamps only: (-0.00174 + 0.003075) / 0.0103415 = 0.001335 / 0.0103415 = 0.1290920
+        ((IN_BAND, IN_BAND), (0.0, 0.0, 0.0, 0.0, 1.0, 0.0), 0.0, 0.1290920),
+        # CO2 only: (-0.00036 + 0.003075) / 0.0103415 = 0.002715 / 0.0103415 = 0.2625354
+        ((IN_BAND, IN_BAND), (0.0, 1.0, 0.0, 0.0, 0.0, 0.0), 0.0, 0.2625354),
+        # full-cost controls, no growth: profit = min_profit, so 0
+        ((IN_BAND, IN_BAND), FULL_COST_U, 0.0, 0.0),
+        # no controls, max growth: profit = max_profit, so 1
+        ((IN_BAND, IN_BAND), ZERO_U, MAX_GROWTH, 1.0),
+        # full costs and max growth: (0.0072665 - 0.003075 + 0.003075) / 0.0103415 = 0.7026532
+        ((IN_BAND, IN_BAND), FULL_COST_U, MAX_GROWTH, 0.7026532),
+        # 36 C, no controls: the violation term is price-free: 0.2973467 - (36 - 34) / 15 = 0.1640134
+        ((IN_BAND, HOT), ZERO_U, 0.0, 0.1640134),
+    ],
+    ids=["zero", "boiler", "lamps", "co2", "full_cost", "max_growth", "full_max_growth", "hot"],
+)
+def test_agc2020_paper_return_matches_hand_values_on_one_step(climates, u, growth, expected):
+    """paper_return's profit scaling uses the regime's prices: its min_profit (full-control costs)
+    is agc2020's, so the same step scores differently than under sim (0.6410110 for the zero step).
+    rel 1e-6 because p[154] = 0.328 is stored as float32 (0.328000009)."""
+    import greenleaf_control.metrics as metrics
+
+    states, controls = _trace(list(climates), fruit=(0.0, growth), u=u)
+    m = metrics.episode_metrics(
+        states, controls, P, season_steps=1, prices=metrics.PRICE_REGIMES["agc2020"]
+    )
+    assert m["paper_return"] == pytest.approx(expected, rel=1e-6, abs=1e-12)
+
+
 # --- Validity ----------------------------------------------------------------------------------
 
 
@@ -614,6 +737,39 @@ def test_one_paper_day_matches_upstream(name):
     states, controls = metrics.trace_from_infos(infos)
     m = metrics.episode_metrics(states, controls, params, season_steps=N_DAY)
     _assert_matches_upstream(m, infos, N_DAY)
+
+
+@pytest.mark.parametrize("name", ["rb_default", "random"])
+def test_one_paper_day_under_agc2020_matches_upstream(name):
+    """Issue #67's cross-check: a 1-day PAPER run of the baseline on the agc2020 env
+    (envs.run_baseline(..., price_regime="agc2020"), whose reward gets AGC2's prices through
+    upstream's reward kwargs), graded by metrics at metrics.PRICE_REGIMES["agc2020"], agrees with
+    upstream's per-step info as on sim: profit to 1e-6, each cost and the yield to rel 1e-9, the
+    violation counts exactly, paper_return to Σ paper_reward at rel 1e-6. rb_default and random,
+    whose boiler, CO2 and lamps are all on at some step, so every price is exercised.
+
+    Non-vacuous: the same season graded at sim's prices misses Σ info["profit"] by more than 1e-6
+    (the env did not run at sim's prices), and its paper_return misses Σ paper_reward."""
+    import greenleaf_control.metrics as metrics
+
+    infos = envs.run_baseline(name, scenarios.PAPER, season_length=1, price_regime="agc2020")
+    params = envs.make_raw_env(
+        scenario=scenarios.PAPER, season_length=1, normalize_actions=False
+    ).unwrapped.p
+    states, controls = metrics.trace_from_infos(infos)
+    m = metrics.episode_metrics(
+        states,
+        controls,
+        np.asarray(params),
+        season_steps=N_DAY,
+        prices=metrics.PRICE_REGIMES["agc2020"],
+    )
+    _assert_matches_upstream(m, infos, N_DAY)
+    for key in ("heat_cost", "elec_cost", "co2_cost"):
+        assert m[key] > 0, key  # every price term fired on this day
+    sim = metrics.episode_metrics(states, controls, np.asarray(params), season_steps=N_DAY)
+    assert sim["profit_eur_m2"] != pytest.approx(sum(i["profit"] for i in infos), abs=1e-6)
+    assert sim["paper_return"] != pytest.approx(sum(i["paper_reward"] for i in infos), rel=1e-6)
 
 
 @pytest.mark.slow

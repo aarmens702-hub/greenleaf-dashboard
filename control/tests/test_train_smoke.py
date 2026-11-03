@@ -130,6 +130,7 @@ CLI_FLAGS = [
     "--registered",
     "--rb",
     "--remote",  # #19a: only train_remote sets it
+    "--price-regime",  # #67: sim (default) or agc2020
 ]
 # One arm, one seed, 2,048 steps: what the registered tests run, or refuse to. The arm names every
 # run-shaping flag the registered argv sets away from its CLI default (--rb is ignored for ppo).
@@ -470,6 +471,11 @@ CLI_REFUSALS = [
     ),
     pytest.param(["--method", "dqn", "--smoke"], "dqn", id="unknown-method"),
     pytest.param(["--method", "residual", "--smoke", "--rb", "best"], "best", id="unknown-rb"),
+    pytest.param(
+        ["--method", "ppo", "--smoke", "--price-regime", "agc2021"],
+        "agc2021",
+        id="unknown-price-regime",
+    ),
 ]
 
 
@@ -477,10 +483,12 @@ CLI_REFUSALS = [
 def test_command_line_refusals(flags, named, tmp_path, monkeypatch, capsys):
     """Done when: train without --smoke and without --registered refuses. So do both together,
     --budget-frac on any arm but residual_lag, residual_lag without it, --penalty-weight on
-    residual_lag (it forces w = 0), an unknown method and an unknown --rb.
+    residual_lag (it forces w = 0), an unknown method, an unknown --rb and an unknown
+    --price-regime (#67).
 
     Each raises SystemExit (argparse, nonzero) or ValueError naming its rule, before anything is
-    written: no file under runs/ and no ledger.
+    written: no file under runs/ and no ledger. None is argparse's "unrecognized arguments": every
+    flag here is one train takes.
     """
     import greenleaf_control.train as train
 
@@ -498,7 +506,9 @@ def test_command_line_refusals(flags, named, tmp_path, monkeypatch, capsys):
 
     with pytest.raises((SystemExit, ValueError)) as excinfo:
         train.main(argv, ledger_path=path)
-    assert named in _refusal(excinfo, capsys)
+    text = _refusal(excinfo, capsys)
+    assert named in text
+    assert "unrecognized" not in text, text
     assert _files(runs) == []
     assert not path.exists()
 
@@ -687,6 +697,14 @@ UNLISTED_FLAGS = [
         "budget_frac",
         id="budget-frac-not-in-the-arm",
     ),
+    # #67: --price-regime defaults to sim, so an arm that names no regime is a sim arm.
+    pytest.param(
+        "ppo",
+        {"penalty_weight": 1.0, "season_length": 1, "n_envs": 1},
+        {"price_regime": "agc2020"},
+        "price_regime",
+        id="price-regime-agc2020-not-the-default-sim",
+    ),
 ]
 
 
@@ -714,6 +732,7 @@ def test_registered_run_refuses_an_unlisted_flag_away_from_its_default(
     reason = _refusal(excinfo, capsys).split("error:")[-1]  # argparse's usage lists every flag
     flag = "--" + key.replace("_", "-")
     assert re.search(rf"\b{key}\b", reason) or flag in reason, reason
+    assert "unrecognized" not in reason, reason  # refused by the registration, not by argparse
     assert _files(runs) == []
     assert ledger.rows(path=path) == [row]
 
@@ -736,6 +755,12 @@ UNLISTED_DEFAULTS = [
         {"budget_frac": 0.5, "rb": "default", "season_length": 1, "n_envs": 1},
         {"penalty_weight": None, "budget_frac": "0.5"},
         id="residual-lag-trains-at-w-0-not-the-default-1",
+    ),
+    pytest.param(
+        "ppo",
+        {"season_length": 1, "n_envs": 1},
+        {"price_regime": "sim"},
+        id="ppo-price-regime-sim-given-is-the-default",
     ),
 ]
 
@@ -762,6 +787,91 @@ def test_registered_run_accepts_unlisted_flags_at_their_defaults(
         ("run", "running"),
         ("run-end", "finished"),
     ]
+
+
+# --- Price regimes (issue #67, PROTOCOL v3) -----------------------------------------------------
+
+# Upstream's four price kwargs per regime (EUR/kg fruit, EUR/kWh heat and power, EUR/kg CO2): sim
+# is upstream's registered prices, agc2020 AGC2's 2020 tariffs (Hemming et al. 2020, §2).
+REGIME_PRICES = {
+    "sim": {"fruit_price": 1.6, "heating_price": 0.09, "elec_price": 0.3, "co2_price": 0.3},
+    "agc2020": {"fruit_price": 1.6, "heating_price": 0.03, "elec_price": 0.06, "co2_price": 0.08},
+}
+
+
+def _prices_of(raw) -> dict:
+    """The four price kwargs a raw env's reward was built with."""
+    kw = raw.spec.kwargs["reward_kwargs"]
+    return {k: kw[k] for k in REGIME_PRICES["sim"]}
+
+
+def _learn_records_prices(monkeypatch) -> dict:
+    """PPO.learn becomes a no-op, as _no_learning, that records the training envs' reward prices."""
+    seen = {}
+
+    def learn(self, total_timesteps, *args, **kwargs):
+        seen["prices"] = [_prices_of(env) for env in self.get_env().get_attr("unwrapped")]
+        self.num_timesteps = total_timesteps
+        return self
+
+    monkeypatch.setattr(PPO, "learn", learn)
+    return seen
+
+
+@pytest.mark.parametrize(
+    ("method", "flags", "regime"),
+    [
+        pytest.param("ppo", [], "sim", id="ppo-unflagged-is-sim"),
+        pytest.param("ppo", ["--price-regime", "sim"], "sim", id="ppo-sim"),
+        pytest.param("ppo", ["--price-regime", "agc2020"], "agc2020", id="ppo-agc2020"),
+        pytest.param("residual", ["--price-regime", "agc2020"], "agc2020", id="residual-agc2020"),
+    ],
+)
+def test_price_regime_reaches_the_manifest_and_the_training_envs(
+    method, flags, regime, tmp_path, monkeypatch
+):
+    """--price-regime {sim,agc2020} (default sim) is the run's config["price_regime"], recorded in
+    manifest.json (so run_policy rebuilds the run at it), and the envs PPO trains on are built at
+    that regime's prices: upstream's registered ones for sim, AGC2's for agc2020. An unflagged run's
+    config carries "sim" explicitly. PPO.learn is a no-op that records the training envs' prices."""
+    import greenleaf_control.train as train
+
+    seen = _learn_records_prices(monkeypatch)
+    runs = tmp_path / "runs"
+
+    assert train.main(_smoke_argv(method, runs, *flags), ledger_path=tmp_path / "l.jsonl") == 0
+
+    config = json.loads((_smoke_dir(runs) / "manifest.json").read_text())["config"]
+    assert config["price_regime"] == regime
+    assert seen["prices"] == [REGIME_PRICES[regime]]
+
+
+def test_registered_run_of_an_agc2020_arm_runs_at_agc2020(tmp_path, monkeypatch, capsys):
+    """An arm whose config names price_regime agc2020 is run with --price-regime agc2020: it returns
+    0, its manifest config says agc2020 and it trains at agc2020's prices. The same cell run without
+    the flag (so at the default, sim) is not that arm: refused first, naming price_regime, before
+    any run dir or run row. PPO.learn is a no-op that records the training envs' prices."""
+    import greenleaf_control.train as train
+
+    seen = _learn_records_prices(monkeypatch)
+    arm = {"penalty_weight": 1.0, "season_length": 1, "n_envs": 1, "price_regime": "agc2020"}
+    path, row = _registered(
+        tmp_path, monkeypatch, arms=[{"name": "a", "method": "ppo", "config": arm}]
+    )
+    runs = tmp_path / "runs"
+
+    with pytest.raises((SystemExit, ValueError)) as excinfo:
+        train.main(_registered_argv(row["row_id"], runs), ledger_path=path)
+    reason = _refusal(excinfo, capsys).split("error:")[-1]
+    assert "price_regime" in reason or "--price-regime" in reason, reason
+    assert _files(runs) == []
+    assert ledger.rows(path=path) == [row]
+
+    argv = _registered_argv(row["row_id"], runs, price_regime="agc2020")
+    assert train.main(argv, ledger_path=path) == 0
+    m = json.loads((runs / row["row_id"] / "a" / "seed0" / "manifest.json").read_text())
+    assert m["config"]["price_regime"] == "agc2020"
+    assert seen["prices"] == [REGIME_PRICES["agc2020"]]
 
 
 def test_residual_lag_lambdas_reach_the_env_stack_the_model_trains_on(tmp_path, monkeypatch):
@@ -1420,6 +1530,27 @@ def test_build_vec_env_scenario_and_season_length_override_the_config(tmp_path):
     assert isinstance(fixed.weather_scenario_sampler, FixedWeatherSampler)
     assert vars(fixed.weather_scenario_sampler) == s
     assert fixed.N == 2 * N_DAY
+
+
+def test_build_vec_env_builds_the_configs_price_regime_and_sim_without_one(tmp_path):
+    """run_policy rebuilds a run's envs from its manifest config with build_vec_env, so the config's
+    price_regime sets the envs' reward prices (#67): "agc2020" builds AGC2's, "sim" upstream's
+    registered ones, and a config with no price_regime key (every run recorded before v3) builds
+    sim."""
+    import greenleaf_control.train as train
+
+    for over, regime in (
+        ({}, "sim"),
+        ({"price_regime": "sim"}, "sim"),
+        ({"price_regime": "agc2020"}, "agc2020"),
+    ):
+        config = _config("ppo", tmp_path, **over)
+        assert ("price_regime" in config) is bool(over)
+        venv = train.build_vec_env(config, 1)
+        try:
+            assert _prices_of(_chain(venv)[-1].envs[0].unwrapped) == REGIME_PRICES[regime], over
+        finally:
+            venv.close()
 
 
 def test_build_functions_match_the_contract_signatures():

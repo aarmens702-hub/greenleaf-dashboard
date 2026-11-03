@@ -49,7 +49,7 @@ USD_PER_S = CPU * USD_PER_CORE_S + MEMORY_MB / 1024 * USD_PER_GIB_S
 RUNS = Path(__file__).resolve().parents[1] / "runs"
 # The train flags an arm's config may set, by their snake_case dests, as train's registration check
 # reads the config; the arm gives --method, the registration --seed and --timesteps.
-CONFIG_KEYS = ("penalty_weight", "budget_frac", "season_length", "n_envs", "rb")
+CONFIG_KEYS = ("penalty_weight", "budget_frac", "season_length", "n_envs", "rb", "price_regime")
 
 
 def _dry(args: argparse.Namespace, ledger_path: Path) -> int:

@@ -1,6 +1,6 @@
 # Evaluation protocol (core)
 
-**Version 2, 2026-10-30.** After E5's pinned λ_co2, a zero-budget constraint in `residual_lag` keeps a fixed multiplier of 1 (§3), and §5 checks budgets only where nonzero. This file decides how every GreenLeaf 2.0 result is scored, so it is a scorer file:
+**Version 3, 2026-11-02.** Prices are a setting, the price regime (§1): `sim`, the regime of every result before v3, or `agc2020`. A season's profit and `paper_return` are graded at one regime and no comparison mixes regimes; a recorded season may be re-graded at another regime, labelled 're-priced' and exploratory unless registered before it was graded (§4). The rules may be tuned per regime (§3). Version 2 (2026-10-30): after E5's pinned λ_co2, a zero-budget constraint in `residual_lag` keeps a fixed multiplier of 1 (§3), and §5 checks budgets only where nonzero. This file decides how every GreenLeaf 2.0 result is scored, so it is a scorer file:
 - changing it needs Aarmen's yes;
 - its hash stamps every ledger row, so results recorded under an older version stop being comparable.
 
@@ -13,8 +13,14 @@ Sources for each rule are in `docs/ARCHITECTURE.md` (Key decisions) and the harn
   the season really ends. A `truncated` episode means a solver failure, counted, never a time limit.
 - **Controls (6):** boiler, CO₂ dosing, thermal screen, roof vents, lamps, blackout screen. Each is in [0, 1].
 - **Climate bounds:** CO₂ 300–1600 ppm; air temperature 15–34 °C; relative humidity 50–85 %.
-- **Prices** (upstream defaults): tomatoes €1.60/kg fresh weight (dry-matter ratio 0.065); heat €0.09/kWh; electricity
-  €0.30/kWh; CO₂ €0.30/kg.
+- **Price regimes:** a run's `price_regime`, recorded in its manifest, prices its reward in training and its grading.
+  A run or registration that names none is `sim`.
+  - `sim` (upstream defaults; the regime of every result before v3): tomatoes €1.60/kg fresh weight (dry-matter ratio
+    0.065); heat €0.09/kWh; electricity €0.30/kWh; CO₂ €0.30/kg.
+  - `agc2020` (the 2nd Autonomous Greenhouse Challenge's 2020 tariffs; Hemming et al. 2020, Sensors 20(22):6430, §2,
+    net-profit scoring): tomatoes €1.60/kg fresh weight (dry-matter ratio 0.065; the crop and its price are the
+    simulator's); heat €0.03/kWh; electricity €0.06/kWh, the unweighted mean of AGC2's €0.08 on-peak (07:00–23:00)
+    and €0.04 off-peak tariffs, flat (not time-of-use); CO₂ €0.08/kg (AGC2's tier up to 12 kg/m²).
 - **Observations:**
   - The `ppo_paper` arm keeps upstream's default modules exactly (it reproduces the paper's fixed-scenario setting).
   - Every other learning arm adds a **season-progress** observation (fraction of the 60 days elapsed), because start
@@ -51,24 +57,30 @@ VALIDATION contains PAPER's season. That is deliberate: PAPER is only a reproduc
 - RL arms use the paper's hyperparameters with no tuning.
 - Any RL hyperparameter search must be registered and matched by RB tuning effort.
 - Every learning arm trains for 2,000,000 steps unless its registration says otherwise.
+- The RB may be tuned per price regime (`tune_rb --price-regime`, the same 200 trials), so learning arms trained at a
+  regime can be compared with rules tuned at it.
 
 ## 4. Metrics (computed by `metrics.py` from raw states and controls, never from the shaped reward)
 Per episode:
 
 | Metric | Definition |
 |---|---|
-| `profit_eur_m2` (primary) | Fruit revenue (growth in fruit dry weight → fresh weight × price) minus heating, electricity and CO₂ costs, summed over the season |
+| `profit_eur_m2` (primary) | Fruit revenue (growth in fruit dry weight → fresh weight × price) minus heating, electricity and CO₂ costs, summed over the season, at the season's price regime |
 | `viol_hours_<c>` | For c in {co2, temp, rh}: steps with the indoor value outside its bounds, × 0.25 h |
 | `pct_in_bounds_<c>` | 100 × (1 − violating steps / steps) |
 | `yield_kg_m2` | Fresh-weight fruit growth over the season |
 | `heat_cost`, `elec_cost`, `co2_cost` | Season totals, €/m² |
-| `paper_return` | Sum of upstream's per-step reward, with our corrected labels; secondary, for comparison with the paper |
+| `paper_return` | Sum of upstream's per-step reward, with our corrected labels, at the season's price regime; secondary, for comparison with the paper |
 | `solver_failures` | Steps where the integrator failed (the upstream truncation) |
 | `steps` | Must equal 5,760 for a valid episode |
 
 - **A cross-check, not shared code:** `metrics.profit_eur_m2` must agree with upstream's summed `profit` info to
   1e-6 on a golden season. They are written independently.
 - An episode with `solver_failures > 0` or `steps < 5,760` is invalid. It's reported, never dropped.
+- **One regime per comparison:** a season is graded at one price regime (§1), and no comparison mixes regimes. A
+  registration's arms share one, and its baselines are graded at it. A controller's trajectory does not depend on
+  prices (only a learner's reward does), so a recorded season may be re-graded at another regime; a re-graded result
+  is labelled 're-priced' and is exploratory unless it was registered before it was graded.
 
 ## 5. Training, checkpoints, selection
 - **Checkpoints:** every 250,000 steps and at the end, each with its frozen VecNormalize stats.

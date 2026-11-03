@@ -47,13 +47,22 @@ FINAL_GUARDS = (
     "solver_failures",
 )
 NO_CLAIM = "n<5: no claim"
+# The CLI's baselines: envs.BASELINES and the rules tune_rb --price-regime agc2020 tuned.
+BASELINES = (*envs.BASELINES, "rb_tuned_agc2020")
 
 
-def _grade(infos: list[dict], raw) -> dict:
-    """metrics.episode_metrics on the season's raw trace with raw's params and N, plus
-    paper_reward_sum (summed in step order, as train's final_eval.json sums paper_return)."""
+def _grade(infos: list[dict], raw, price_regime: str = "sim") -> dict:
+    """metrics.episode_metrics on the season's raw trace with raw's params and N, at price_regime's
+    prices, plus paper_reward_sum (summed in step order, as train's final_eval.json sums
+    paper_return)."""
     states, controls = metrics.trace_from_infos(infos)
-    graded = metrics.episode_metrics(states, controls, np.asarray(raw.p), season_steps=raw.N)
+    graded = metrics.episode_metrics(
+        states,
+        controls,
+        np.asarray(raw.p),
+        season_steps=raw.N,
+        prices=metrics.PRICE_REGIMES[price_regime],
+    )
     # A plain += in step order, as train does: Python 3.12's sum() of floats is compensated, so it
     # can differ from train's paper_return in the last bit.
     paper_reward_sum = 0.0
@@ -90,8 +99,10 @@ def run_rb(
     return_trace: bool = False,
     *,
     allow_test: bool = False,
+    price_regime: str = "sim",
 ) -> tuple:
-    """The rule-based controller with params, one season on the raw env.
+    """The rule-based controller with params, one season on the raw env, played and graded at
+    price_regime's prices.
 
     With return_trace, also the graded season's (states, controls, params) as a third item."""
     env = envs.SolverFailureFlag(
@@ -100,6 +111,7 @@ def run_rb(
             season_length=season_length,
             normalize_actions=False,
             allow_test=allow_test,
+            price_regime=price_regime,
         )
     )
     controller = rule_based.make_controller(params)
@@ -109,7 +121,7 @@ def run_rb(
         _, _, terminated, truncated, info = env.step(rule_based.rb_action(env, controller))
         infos.append(info)
         done = terminated or truncated
-    result = _grade(infos, env.unwrapped)
+    result = _grade(infos, env.unwrapped, price_regime)
     params = np.asarray(env.unwrapped.p, dtype=np.float64)
     env.close()
     frame = _frame(infos) if record_steps else None
@@ -128,7 +140,8 @@ def run_policy(
     *,
     allow_test: bool = False,
 ) -> tuple:
-    """A run's checkpoint, one deterministic season on its training stack with frozen stats.
+    """A run's checkpoint, one deterministic season on its training stack with frozen stats, played
+    and graded at its manifest's price regime (sim if it records none).
 
     With return_trace, also the graded season's (states, controls, params) as a third item."""
     run_dir = Path(run_dir)
@@ -148,7 +161,7 @@ def run_policy(
         infos.append(step_infos[0])
         done = bool(dones[0])
     raw = venv.unwrapped.envs[0].unwrapped
-    result = _grade(infos, raw)
+    result = _grade(infos, raw, config.get("price_regime", "sim"))
     params = np.asarray(raw.p, dtype=np.float64)
     venv.close()
     frame = _frame(infos) if record_steps else None
@@ -158,11 +171,17 @@ def run_policy(
 
 
 def _score(
-    controller: str, scenario: dict, *, return_trace: bool = False, allow_test: bool = False
+    controller: str,
+    scenario: dict,
+    *,
+    return_trace: bool = False,
+    allow_test: bool = False,
+    price_regime: str = "sim",
 ) -> dict | tuple:
-    """One 60-day season of a BASELINES entry or a run dir's final checkpoint: its result, or with
-    return_trace (result, frame, (states, controls, params)) from that same season."""
-    if controller in ("rb_default", "rb_tuned"):
+    """One 60-day season of a BASELINES entry (played and graded at price_regime) or a run dir's
+    final checkpoint (at its manifest's): its result, or with return_trace (result, frame, (states,
+    controls, params)) from that same season."""
+    if controller in ("rb_default", "rb_tuned", "rb_tuned_agc2020"):
         params = rule_based.load_rb_params(controller.removeprefix("rb_"))
         scored = run_rb(
             params,
@@ -171,17 +190,25 @@ def _score(
             record_steps=return_trace,
             return_trace=return_trace,
             allow_test=allow_test,
+            price_regime=price_regime,
         )
         return scored if return_trace else scored[0]
     if controller in envs.BASELINES:  # zero_controls, random
-        infos = envs.run_baseline(controller, scenario, SEASON_LENGTH, allow_test=allow_test)
+        infos = envs.run_baseline(
+            controller,
+            scenario,
+            SEASON_LENGTH,
+            allow_test=allow_test,
+            price_regime=price_regime,
+        )
         env = envs.make_raw_env(
             scenario=scenario,
             season_length=SEASON_LENGTH,
             normalize_actions=False,
             allow_test=allow_test,
+            price_regime=price_regime,
         )
-        result = _grade(infos, env.unwrapped)  # the model's params and N
+        result = _grade(infos, env.unwrapped, price_regime)  # the model's params and N
         params = np.asarray(env.unwrapped.p, dtype=np.float64)
         env.close()
         if return_trace:
@@ -404,7 +431,7 @@ def _parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="python -m greenleaf_control.evaluate")
     p.add_argument(
         "--controller",
-        help=f"one of {', '.join(envs.BASELINES)}, or a run dir (its final checkpoint)",
+        help=f"one of {', '.join(BASELINES)}, or a run dir (its final checkpoint)",
     )
     p.add_argument(
         "--split",
@@ -413,10 +440,16 @@ def _parser() -> argparse.ArgumentParser:
     )
     p.add_argument("--out", type=Path, help="the parquet to write; must not exist")
     p.add_argument(
+        "--price-regime",
+        choices=list(metrics.PRICE_REGIMES),
+        help="a baseline's prices, PROTOCOL §1 (default sim); a run dir's are its manifest's",
+    )
+    p.add_argument(
         "--final",
         metavar="ROW",
         help="the newest final-registered row: score its runs and baselines once on the test"
-        " splits into control/results/final/<ROW>/ (takes no --controller, --split or --out)",
+        " splits into control/results/final/<ROW>/ (takes no --controller, --split, --out or"
+        " --price-regime)",
     )
     return p
 
@@ -426,7 +459,11 @@ def main(argv: list[str] | None = None, *, ledger_path: Path = ledger.LEDGER) ->
     args = parser.parse_args(argv)
     flags = {"--controller": args.controller, "--split": args.split, "--out": args.out}
     if args.final is not None:
-        given = [flag for flag, value in flags.items() if value is not None]
+        given = [
+            flag
+            for flag, value in {**flags, "--price-regime": args.price_regime}.items()
+            if value is not None
+        ]
         if given:
             parser.error(f"--final takes no {', '.join(given)}: it scores its row as registered")
         return _final(args.final, ledger_path, parser)
@@ -440,12 +477,21 @@ def main(argv: list[str] | None = None, *, ledger_path: Path = ledger.LEDGER) ->
         )
     if args.out.exists():
         parser.error(f"--out {args.out} already exists; a result is written once")
-    baseline = args.controller in envs.BASELINES
+    baseline = args.controller in BASELINES
     if not baseline and not (Path(args.controller) / "manifest.json").is_file():
         parser.error(
-            f"--controller {args.controller}: not one of {envs.BASELINES} and not a run dir"
+            f"--controller {args.controller}: not one of {BASELINES} and not a run dir"
             " with a manifest.json"
         )
+    if not baseline and args.price_regime is not None:
+        parser.error(
+            f"--price-regime is for a baseline: run dir {args.controller} is scored at its"
+            " manifest's price_regime"
+        )
+    price_regime = "sim" if args.price_regime is None else args.price_regime
+    if not baseline:  # the regime the run dir is graded at, for its rows
+        config = json.loads((Path(args.controller) / "manifest.json").read_text())["config"]
+        price_regime = config.get("price_regime", "sim")
 
     rows = [
         {
@@ -454,7 +500,8 @@ def main(argv: list[str] | None = None, *, ledger_path: Path = ledger.LEDGER) ->
             "split": args.split,
             **s,
             "season_length": SEASON_LENGTH,
-            **_score(args.controller, s),
+            "price_regime": price_regime,
+            **_score(args.controller, s, price_regime=price_regime),
         }
         for s in scenarios.SPLITS[args.split]
     ]

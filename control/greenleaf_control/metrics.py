@@ -3,8 +3,8 @@
 This is a scorer file. It never imports the reward or env code (greenleaf_control.rewards,
 greenleaf_control.envs) or anything from gl_gym, whose conversion helpers load its reward module,
 so a reward bug can't hide inside the score. Every formula is written here from the model's units
-and PROTOCOL §1's prices and bounds; upstream's per-step info (gl_gym @2d3febb) is a cross-check in
-the tests, not shared code.
+and PROTOCOL §1's price regimes and bounds; upstream's per-step info (gl_gym @2d3febb) is a
+cross-check in the tests, not shared code.
 
 - Step t runs from states[t] to states[t + 1] under controls[t], and its indoor climate is read from
   states[t + 1]. states[0], the initial state, is not graded.
@@ -20,7 +20,16 @@ import numpy as np
 
 CONSTRAINTS = ("co2", "temp", "rh")
 # PROTOCOL §1: EUR/kg fresh fruit, dry matter per fresh matter, EUR/kWh heat and power, EUR/kg CO2.
+# PRICES is the sim regime, upstream's registered prices: the regime of every result before v3.
 PRICES = {"fruit": 1.6, "dmfm": 0.065, "heat": 0.09, "elec": 0.3, "co2": 0.3}
+# PROTOCOL §1's price regimes. agc2020 is AGC2's 2020 tariffs (Hemming et al. 2020, Sensors
+# 20(22):6430, §2): electricity 0.06 is the unweighted mean of AGC2's 0.08 on-peak (07:00-23:00)
+# and 0.04 off-peak tariffs, flat (not time-of-use); CO2 the tier up to 12 kg/m2; fruit and dmfm
+# are the simulator's. Written here, apart from envs.REWARD_PRICES.
+PRICE_REGIMES = {
+    "sim": PRICES,
+    "agc2020": {"fruit": 1.6, "dmfm": 0.065, "heat": 0.03, "elec": 0.06, "co2": 0.08},
+}
 # PROTOCOL §1: CO2 [ppm], air temperature [C], relative humidity [%].
 BOUNDS = {"co2": (300.0, 1600.0), "temp": (15.0, 34.0), "rh": (50.0, 85.0)}
 # Upstream's violation scales for its reward (paper_return), in CONSTRAINTS order.
