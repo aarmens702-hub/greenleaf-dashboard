@@ -2,9 +2,16 @@
 
 **Read this first when you pick the project up on any machine.** It's the shared memory: where things stand, what's next, what we learned, and how Aarmen likes to work. Update it at the end of each session.
 
-*Last updated: 2026-11-02 evening, Mac session (the final is done and the seal is spent; the interactive site is live on GitHub Pages; the README is revamped; everything is on `master` at 7f87ece).*
+*Last updated: 2026-11-03 morning, Mac session (the price-regime study is done: E8 decided, the 2013 seal spent and H1-H4 graded, all on `dev` at b9666d3; `master` is still bbb9feb; paper v5 (b71dec5) is on branch `aarmen/66-workshop-paper` in `.worktrees/66`, not yet on `dev`).*
 
 ## Where things are
+- **The price-regime study, 2026-11-02/03 (read this first).** Plan approved by Aarmen 2026-11-02 (issues #67 to #73, paper #66). Everything below is on `dev`; nothing is on `master` yet.
+  - #67 price regimes as a setting (PROTOCOL v3; `sim` and `agc2020`, the 2nd Autonomous Greenhouse Challenge's 2020 tariffs) `c933702`; #68 re-priced analysis `2242851` (exploratory: at agc2020 the default rules rank first and All off last on every 2012 split).
+  - #69 rule family and season length (validation, exploratory) `d4107ed`/`fe41ecd`: every sim-trained agent beats the best of 1,002 rule settings with at least its fruit and at most its Σ hours at sim (by 3.70 to 7.24 €/m²), and none does at agc2020; All off out-earns both rule controllers at sim at every season length from 60 to 300 days.
+  - **E8 (#70)** `33ed80e`: rb_tuned_agc2020 adopted (decision-7aab3274; like-for-like profit 12.84 vs rb_default 12.05); **ppo_agc adopted** (15.35 [15.26, 15.46] vs bar 12.84, Σ 243 h; it grows 16.9 kg/m² under heavy lighting, CO₂ above 1600 ppm 107 h) and residual_agc dropped on (a) (11.04 [10.99, 11.08]), decision-a5b2fbd3. Reported numbers and the reviewer's trajectory caveats are on #70.
+  - #71 to #73 `608eee1`, `3149abd`, `f61f022`: seal groups (2012 and 2013 are separate seals; PROTOCOL v4; scenarios.py changed, so registrations before f61f022 don't fingerprint-match current code), the 2013 final grades every season at both regimes, the 2012 readers stay on the 2012 final, and `python -m greenleaf_control.hypotheses` grades H1-H4. #74 `afe7064`: the validation report skips agc2020 registrations.
+  - **The 2013 final** (Aarmen's yes 2026-11-02 23:10 MST): final-registered-429132de (`5cc82c5`; H1-H4 posted on #71 before the run) → **final-result-7d2876de** (`b9666d3`). The 2013 seal is spent. Per split (results/analysis/final_2013/summary.md): H1 (the regime reverses PPO vs the default rules) verified ×3; H2 (residual_w05 beats rb_tuned at both regimes) verified ×3; H3 ppo_agc verified ×3, residual_agc fails (a) ×3; H4 residual_w05 verified ×3, lag_b100 fails (b) in Amsterdam and London. Only `random` had invalid seasons (7 of its 8 Abbotsford seasons, solver errors). The reviewer re-derived every number (SHIP IT); read H3 and H4 per arm (H3 holds for ppo_agc, not residual_agc), and ppo_agc's CO₂ hours are 87 to 103 h vs rb_tuned's 0 to 3. ppo_agc graded at sim loses 23.8 to 26.3 €/m².
+  - **Paper v5** (#66): branch `aarmen/66-workshop-paper`, `b71dec5`, all placeholders filled, vector Figure 2, Table 3 for 2013; main text ends on page 7 of 7. PDF in the session scratchpad (paper-draft-v5.pdf). Aarmen plans to rewrite much of it. Target: AAAI-27 PGAI4E full track, due 2026-11-20 AoE.
 - **Live, 2026-11-02 evening.** `master` is at 7f87ece (PR #57 merged at Aarmen's "just push it"). The site is at https://aarmens702-hub.github.io/greenleaf-dashboard/, built by `greenleaf_control.site_build` from the final's recorded replays and deployed by `.github/workflows/pages.yml` on every push to master (Pages build type: workflow).
   - Site: #58 site_build (`1d13dbd`), #59 compare any two controllers in any city plus the what-changed strips (`11c631a`), #60 the Results chart per city (`958ad6d`), #61 the Pages workflow (`f82ef84`), #63 the "Residual agent" names and the readout and caption clarifications (`3cfb4bb`).
   - README: #62 (`e8d8a6b`) leads with "teaching agents to grow tomatoes", the live demo, an animated replay and two stills captured from the site (`docs/media/site/`); the stale #28 captures are removed.
@@ -85,10 +92,11 @@
 - **Filed 2026-10-28:** #19, recording Modal runs (shipped). Aarmen chose the Mac over Modal for E2 (no payment method); Modal stays optional.
 
 ## To do, in order
-1. **The LinkedIn post and the LinkedIn project entry** (Aarmen posts them; drafts in the session scratchpad: linkedin-v6.txt and li-project.txt with four site screenshots). The X thread is posted.
-2. **The GitHub repo's About text** still describes the hackathon dashboard (and carries an em dash); it shows in link previews. Aarmen's call.
-3. **Follow-ups** (each its own issue): the two in-scale label overlaps in the validation trade-off (#53's review); the GreenLight-Gym paper citation in REPORT.md [1]; a fruit-growth guard if any later claim compares against plain PPO; the simulator's first-day dependence on season length (#51's review); the site's x-axis title reads "-day season" if a replay fails to load (#60's review).
-4. **Disk:** `uv cache clean`, and delete decided worktrees' `.venv`s (`uv sync` rebuilds them).
+1. **The paper (#66):** Aarmen reads and rewrites v5; ship it to `dev` when he's happy; strip LaTeX comments and clear PDF metadata before submitting (paper/README.md).
+2. **`/promote`** once Aarmen says go: `dev` has the price-regime study and the 2013 final; the README and site still show only the 2012 results.
+3. **The LinkedIn post and the LinkedIn project entry** (Aarmen posts them). The GitHub repo's About text still describes the hackathon dashboard.
+4. **Follow-ups** (each its own issue): the two in-scale label overlaps in the validation trade-off (#53's review); the GreenLight-Gym paper citation in REPORT.md [1]; the simulator's first-day dependence on season length (#51's review); the site's x-axis title reads "-day season" if a replay fails to load (#60's review); an agc2020 or 2013 report view if the site should show the new results.
+5. **Disk:** `uv cache clean`, and delete decided worktrees' `.venv`s (`uv sync` rebuilds them). Run dirs for E8 live in `.worktrees/70/control/runs/`, so keep that worktree like 22, 31, 33, 34, 35, 36 and 39.
 
 **Run the harness from a Claude Code session started inside this repo** (`cd ~/Desktop/greenleaf-dashboard && claude`). Its agents, hooks and skills load only there.
 
