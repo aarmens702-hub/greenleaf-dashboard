@@ -89,6 +89,12 @@ defaults on the issue and its scope note):
   seal) before or after it changes nothing, and a ledger whose only final-result is 2013's keeps
   the 2012 splits sealed.
 
+#74: E8's (#70) registrations are priced at agc2020, the validation report at sim. load_scores
+skips a registration any of whose arms' config names a price_regime other than sim (absent = sim):
+it prints one line `skipped <row>: ...` naming the regime, reads none of its files, and goes on to
+the next registration. An arm priced at sim by name is read as today, so a second rb_tuned arm at
+sim is still refused. NOTE_CALLS holds E8's decision-a5b2fbd3 dropping residual_agc.
+
 Offline: every ledger, run dir, parquet and output is under tmp_path; selection.RESULTS and
 evaluate.FINAL_RESULTS are patched to tmp_path in every test that loads (the real
 control/results/final is never read); every --out is under tmp_path. Nothing plays a season:
@@ -303,14 +309,24 @@ def _baseline(
     return out
 
 
-def _register(path: Path, *, issue: int, arms, seeds, dry: bool = False, **over) -> dict:
+def _register(
+    path: Path, *, issue: int, arms, seeds, dry: bool = False, configs: dict | None = None, **over
+) -> dict:
     """A registration on the tmp ledger: arms is ((name, method), ...); an rb_tuned arm's config
-    is {"trials": 2}, as tune_rb records it. over replaces any other field."""
+    is {"trials": 2}, as tune_rb records it, and configs {name: fields} adds fields to that arm's
+    config (#74: a price_regime). over replaces any other field."""
     kwargs = {
         "issue": issue,
         "hypothesis": "the arms differ in validation profit",
         "arms": [
-            {"name": n, "method": m, "config": {"trials": 2} if m == "rb_tuned" else {}}
+            {
+                "name": n,
+                "method": m,
+                "config": {
+                    **({"trials": 2} if m == "rb_tuned" else {}),
+                    **(configs or {}).get(n, {}),
+                },
+            }
             for n, m in arms
         ],
         "seeds": list(seeds),
@@ -753,6 +769,207 @@ def test_a_registration_with_no_result_is_skipped_and_none_of_its_files_read(
     assert e7["row_id"] not in _vals(scores["registered"])
     assert e7["row_id"] not in registrations
     assert done.resolve() not in reads and running.resolve() not in reads
+
+
+# --- #74: a registration priced at agc2020 is not the validation report's ----------------------
+
+# E8's (#70) arm configs, as its registration 1 records them; E8's registration 2 is _e8_rb's.
+E8_CONFIGS = {
+    "ppo_agc": {"price_regime": "agc2020"},
+    "residual_agc": {"penalty_weight": 0.5, "price_regime": "agc2020", "rb": "tuned"},
+}
+# The result numbers of _e8_rb's arm: unlike RB's paper_return (1, 2, 6), so its result row can't
+# pass check_ledger on the rb_tuned row's scores.
+E8_RB = _seasons((12, 13, 14), paper_return=(28, 29, 30))
+
+
+def _e8_rb(path: Path, root: Path, regime: str) -> dict:
+    """E8's registration 2 (#70) at regime: one arm rb_tuned_<regime> of method rb_tuned (config
+    {"trials": 2, "price_regime": regime}), E1's seed, timesteps, primary and guards; its run (a
+    dir with no selected.json), its result (E8_RB's numbers) and an adopted decision."""
+    name = f"rb_tuned_{regime}"
+    reg = _register(
+        path,
+        issue=70,
+        arms=((name, "rb_tuned"),),
+        seeds=(0,),
+        timesteps=0,
+        primary="paper_return",
+        guards=list(VIOL),
+        configs={name: {"price_regime": regime}},
+    )
+    _run(path, root, reg, name, 0, method="rb_tuned")
+    res = _result(path, reg, {name: [E8_RB]})
+    ledger.decide(result=res["row_id"], decision="adopted", note="E8 rb", path=path)
+    return reg
+
+
+def _e8_rl(path: Path, root: Path, configs: dict) -> tuple[dict, list[Path]]:
+    """E8's registration 1 (#70): arms ppo_agc (ppo; ALPHA's seeds 0 and 1 as seeds 300 and 301)
+    and residual_agc (residual; BRAVO's), configs per arm, each run with its selected.json; its
+    result and an adopted decision. Returns (the registration, its run dirs resolved)."""
+    reg = _register(
+        path,
+        issue=70,
+        arms=(("ppo_agc", "ppo"), ("residual_agc", "residual")),
+        seeds=(300, 301),
+        configs=configs,
+    )
+    tables = {
+        "ppo_agc": ("ppo", {300: ALPHA[0], 301: ALPHA[1]}),
+        "residual_agc": ("residual", {300: BRAVO[0], 301: BRAVO[1]}),
+    }
+    dirs = []
+    for arm, (method, by_seed) in tables.items():
+        runs = _arm(path, root, reg, arm, by_seed, method=method)
+        dirs += [Path(run["run_dir"]).resolve() for run in runs.values()]
+    res = _result(path, reg, {arm: list(by_seed.values()) for arm, (_, by_seed) in tables.items()})
+    note = "E8: adopt ppo_agc, drop residual_agc"
+    ledger.decide(result=res["row_id"], decision="adopted", note=note, path=path)
+    return reg, dirs
+
+
+def _load_spies(monkeypatch) -> tuple[list[str], list[Path]]:
+    """(registrations, reads): every row id selection._registration and every run dir (resolved)
+    selection._read is called with from now on; both still run."""
+    registrations, reads = [], []
+    real_registration, real_read = selection._registration, selection._read
+
+    def registration(row_id, ledger_path):
+        registrations.append(row_id)
+        return real_registration(row_id, ledger_path)
+
+    def read(method, run_dir):
+        reads.append(Path(run_dir).resolve())
+        return real_read(method, run_dir)
+
+    monkeypatch.setattr(selection, "_registration", registration)
+    monkeypatch.setattr(selection, "_read", read)
+    return registrations, reads
+
+
+def _skips(out: str, reg: dict) -> list[str]:
+    """The printed lines skipping reg: those starting `skipped <its row id>:`."""
+    return [line for line in out.splitlines() if line.startswith(f"skipped {reg['row_id']}:")]
+
+
+@pytest.mark.parametrize("before_e1", [False, True], ids=["after-e1", "before-e1"])
+def test_an_rb_tuned_arm_priced_at_agc2020_is_skipped_not_a_second_rb_tuned_arm(
+    before_e1, tmp_path, monkeypatch, capsys
+):
+    """Regression for #74. Since E8's rows landed, load_scores("validation") raised
+    "registered-50c6541d: a second rb_tuned arm; registered-b89a61b1's already annotates the
+    rb_tuned baseline row": E8's registration 2 (_e8_rb) is an rb_tuned arm priced at agc2020, and
+    the validation report is priced at sim. It is skipped, wherever it sits (after E1, as on dev's
+    ledger, or before it): one printed line `skipped <its row>: ...` naming agc2020, and
+    selection._registration never sees it. The rows are _world's (E1 and alpha at seed 0):
+    rb_tuned's 3 rows carry E1's registered, result and "adopted <id>" decision, never E8's, and
+    check_ledger checks E1's 4 pairs plus alpha's 3 = 7 (E8's result, on E8_RB's numbers, is not
+    checked)."""
+    report, results = _report(monkeypatch, tmp_path)
+    path = tmp_path / "ledger.jsonl"
+    if before_e1:
+        e8 = _e8_rb(path, tmp_path, "agc2020")
+    w = _world(path, tmp_path, results, seeds=(0,))
+    if not before_e1:
+        e8 = _e8_rb(path, tmp_path, "agc2020")
+    registrations, _ = _load_spies(monkeypatch)
+    capsys.readouterr()
+
+    try:
+        scores = report.load_scores("validation", ledger_path=path)
+    except ValueError as e:
+        pytest.fail(f"load_scores('validation') refused an rb_tuned arm priced at agc2020: {e}")
+
+    out = capsys.readouterr().out
+    assert len(_skips(out, e8)) == 1 and "agc2020" in _skips(out, e8)[0], out
+    assert list(dict.fromkeys(scores["label"])) == ["rb_tuned", _label("alpha", w["r"])]
+    rb = scores[scores["label"] == "rb_tuned"]
+    assert _vals(rb["registered"]) == [w["e1"]["row_id"]] * 3
+    assert _vals(rb["result"]) == [w["e1_result"]] * 3
+    assert _vals(rb["decision"]) == [f"adopted {w['e1_decision']}"] * 3
+    assert e8["row_id"] not in _vals(scores["registered"])
+    assert e8["row_id"] not in registrations
+    assert report.check_ledger(scores, ledger_path=path) == 7
+
+
+@pytest.mark.parametrize(
+    "configs",
+    [E8_CONFIGS, {"residual_agc": E8_CONFIGS["residual_agc"]}],
+    ids=["e8", "only-its-second-arm-at-agc2020"],
+)
+def test_an_rl_registration_priced_at_agc2020_has_no_rows_and_none_of_its_files_read(
+    configs, tmp_path, monkeypatch, capsys
+):
+    """#74: E8's registration 1 (_e8_rl: ppo_agc and residual_agc, a result and an adopted
+    decision, each run with a selected.json load_scores would read) is skipped when any of its
+    arms is priced at agc2020: both, as on dev's ledger, or only its second (its first has no
+    price_regime, so sim). Then one printed line `skipped <its row>: ...` names agc2020, no row
+    carries its id, selection._registration never sees it and selection._read never sees its run
+    dirs (it does see alpha's). The rows are _world's: rb_tuned, then alpha; check_ledger checks
+    E1's 4 pairs plus alpha's 3 = 7."""
+    report, results = _report(monkeypatch, tmp_path)
+    path = tmp_path / "ledger.jsonl"
+    w = _world(path, tmp_path, results, seeds=(0,))
+    e8, dirs = _e8_rl(path, tmp_path, configs)
+    registrations, reads = _load_spies(monkeypatch)
+    capsys.readouterr()
+
+    scores = report.load_scores("validation", ledger_path=path)
+
+    out = capsys.readouterr().out
+    assert list(dict.fromkeys(scores["label"])) == ["rb_tuned", _label("alpha", w["r"])]
+    assert e8["row_id"] not in _vals(scores["registered"])
+    assert len(_skips(out, e8)) == 1 and "agc2020" in _skips(out, e8)[0], out
+    assert e8["row_id"] not in registrations
+    assert w["dirs"]["alpha", 0].resolve() in reads
+    assert not set(dirs) & set(reads)
+    assert report.check_ledger(scores, ledger_path=path) == 7
+
+
+def test_an_arm_priced_at_sim_by_name_is_read_as_today(tmp_path, monkeypatch, capsys):
+    """#74 skips only a price_regime other than sim; an arm whose config says "sim" is read like
+    one with none:
+    - a second rb_tuned registration at sim (_e8_rb at "sim", after E1) is still refused, naming
+      it: "<its row>: a second rb_tuned arm";
+    - on _world's ledger (E1, alpha at seed 0), then E8's registration 1 at agc2020 (_e8_rl), then
+      #37's charlie (ppo, config {"price_regime": "sim"}, seed 0 at ALPHA[2]'s seasons): the
+      labels are rb_tuned, alpha, charlie (E8's skip doesn't stop the loop), charlie's 3 rows
+      carry its registration and profits (21, 22, 24), nothing prints `skipped <charlie's row>`,
+      and check_ledger checks E1's 4 pairs, alpha's 3 and charlie's 3 = 10."""
+    report, results = _report(monkeypatch, tmp_path)
+    sim_path, sim_root = tmp_path / "sim.jsonl", tmp_path / "sim"
+    _baseline(results, "rb_tuned", RB)
+    e1 = _register_e1(sim_path)
+    _rb_tuned_run(sim_path, sim_root, e1)
+    _result(sim_path, e1, {"rb_tuned": [RB]})
+    again = _e8_rb(sim_path, sim_root, "sim")
+    with pytest.raises(ValueError, match=f"{again['row_id']}: a second rb_tuned arm"):
+        report.load_scores("validation", ledger_path=sim_path)
+
+    path = tmp_path / "ledger.jsonl"
+    w = _world(path, tmp_path, results, seeds=(0,))
+    _e8_rl(path, tmp_path, E8_CONFIGS)
+    charlie = _register(
+        path,
+        issue=37,
+        arms=(("charlie", "ppo"),),
+        seeds=(0,),
+        configs={"charlie": {"price_regime": "sim"}},
+    )
+    _arm(path, tmp_path, charlie, "charlie", {0: ALPHA[2]})
+    _result(path, charlie, {"charlie": [ALPHA[2]]})
+    capsys.readouterr()
+
+    scores = report.load_scores("validation", ledger_path=path)
+
+    labels = ["rb_tuned", _label("alpha", w["r"]), _label("charlie", charlie)]
+    assert list(dict.fromkeys(scores["label"])) == labels
+    mine = scores[scores["label"] == labels[2]]
+    assert _vals(mine["registered"]) == [charlie["row_id"]] * 3
+    assert mine["profit_eur_m2"].tolist() == [21.0, 22.0, 24.0]
+    assert _skips(capsys.readouterr().out, charlie) == []
+    assert report.check_ledger(scores, ledger_path=path) == 10
 
 
 # --- summarize: like-for-like, gains, P(improvement), flags --------------------------------------
@@ -1443,6 +1660,16 @@ def test_note_calls_hold_34s_dropped_residual_w4():
     of the note; the real ledger isn't read here."""
     report = _module()
     assert hasattr(report, "NOTE_CALLS"), "report.NOTE_CALLS doesn't exist yet (#47)"
+    assert report.NOTE_CALLS.get(("decision-b159ac9a", "residual_w4")) == "dropped"
+
+
+def test_note_calls_hold_e8s_dropped_residual_agc():
+    """#74: E8's (#70) decision-a5b2fbd3 adopts its registration 1 (ppo_agc, residual_agc) and its
+    note drops residual_agc, so report.NOTE_CALLS maps (decision-a5b2fbd3, residual_agc) to
+    "dropped", and E4's residual_w4 call stays. Pinned from the issue's reading of the note; the
+    real ledger isn't read here."""
+    report = _module()
+    assert report.NOTE_CALLS.get(("decision-a5b2fbd3", "residual_agc")) == "dropped"
     assert report.NOTE_CALLS.get(("decision-b159ac9a", "residual_w4")) == "dropped"
 
 

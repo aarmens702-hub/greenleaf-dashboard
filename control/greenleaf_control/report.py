@@ -42,8 +42,12 @@ VIOL = tuple(f"viol_hours_{c}" for c in metrics.CONSTRAINTS)
 DETERMINISTIC = ("zero_controls", "rb_default", "rb_tuned")
 # A decision row calls a whole registration, but its note can call one arm otherwise; the figures
 # draw (decision row id, arm) -> that arm's own call, as media.TRADEOFF does. E4 (#34) has one
-# decision row, decision-b159ac9a, "adopted", and its note drops residual_w4.
-NOTE_CALLS = {("decision-b159ac9a", "residual_w4"): "dropped"}
+# decision row, decision-b159ac9a, "adopted", and its note drops residual_w4. E8 (#70)'s
+# decision-a5b2fbd3 is "adopted", and its note drops residual_agc.
+NOTE_CALLS = {
+    ("decision-b159ac9a", "residual_w4"): "dropped",
+    ("decision-a5b2fbd3", "residual_agc"): "dropped",
+}
 # A TEST split's footer, figure titles and summary.md line 1 say so (PROTOCOL §8)
 SCORED_ONCE = "2012 test weather, scored once"
 IDS = ("label", "arm", "issue", "registered", "result", "decision", "protocol", "run", "seed")
@@ -244,8 +248,9 @@ def load_scores(split: str, *, ledger_path: Path = ledger.LEDGER) -> pd.DataFram
     """One row per label x run x scenario: baselines in envs.BASELINES order, then each registration
     on [split] with a result row, in ledger order, arms in registration order, runs by seed,
     scenarios in scenarios.SPLITS[split] order. Plays nothing: a run without selected.json is
-    refused. A TEST split reads the final's seasons.parquet (_final_scores), once the ledger holds
-    the final-result row."""
+    refused. Validation is priced at sim: a registration any of whose arms names another
+    price_regime is skipped, its files unread (PROTOCOL §4). A TEST split reads the final's
+    seasons.parquet (_final_scores), once the ledger holds the final-result row."""
     if split in scenarios.TEST:
         return _frame(_final_scores(split, ledger.rows(path=ledger_path)))
     if split != "validation":
@@ -260,6 +265,14 @@ def load_scores(split: str, *, ledger_path: Path = ledger.LEDGER) -> pd.DataFram
         if reg["kind"] != "registered" or reg["scenarios"] != [split]:
             continue
         reg_id = reg["row_id"]
+        # PROTOCOL §4: no comparison mixes regimes; an arm that names no price_regime is sim.
+        priced = sorted({a["config"].get("price_regime", "sim") for a in reg["arms"]} - {"sim"})
+        if priced:
+            print(
+                f"skipped {reg_id}: priced at {', '.join(priced)}; the validation report is sim"
+                " (PROTOCOL §4)"
+            )
+            continue
         ids = _ids(reg, existing)
         if ids is None:
             print(f"skipped {reg_id}: no result row yet")

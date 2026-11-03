@@ -525,7 +525,8 @@ Paths are relative to `control/`. Scenario dicts are `{"location": str, "growth_
     `selection._read`'s `candidates[checkpoint]["per_scenario"]`. Refused: a run with no `selected.json` ("run
     selection first"), a stale one, an arm whose runs all crashed, two result rows on a registration, two decision rows
     on a result. A registration with no result row prints `skipped <row>: no result row yet`, and none of its files
-    are read.
+    are read. Validation is priced at `sim` (#74, PROTOCOL §4): a registration any of whose arms' config names another
+    `price_regime` prints `skipped <row>: priced at <regime>; ...`, and none of its files are read.
   - **Ids:** `label` = `<arm> #<issue>/<first 4 hex of the registered id>`; `decision` = `"<adopted|dropped> <decision
     row id>"` or null; `protocol` = the first 8 hex of the registration's `fingerprints["docs/PROTOCOL.md"]`; `crashed`
     = `ledger._arm_tally`'s count for the arm (null for a baseline).
@@ -566,8 +567,9 @@ Paths are relative to `control/`. Scenario dicts are `{"location": str, "growth_
   gets `viz`'s `title=` = `<viz's default title> · <split>, 2012 test weather, scored once`. Validation passes no
   `title=`, so `viz` draws its default (`viz.PER_SCENARIO_TITLE`, `PROFILES_TITLE`, `TRADEOFF_TITLE`).
   - **Status** of a label: its decision's word (`adopted` or `dropped`), unless a decision note calls its arm otherwise:
-    `report.NOTE_CALLS[(decision row id, arm)]` (E4's `decision-b159ac9a` drops `residual_w4`) overrides the row's
-    word. None for a baseline (rb_tuned's E1 fold included) or an undecided arm.
+    `report.NOTE_CALLS[(decision row id, arm)]` (E4's `decision-b159ac9a` drops `residual_w4`, E8's
+    `decision-a5b2fbd3` drops `residual_agc`) overrides the row's word. None for a baseline (rb_tuned's E1 fold
+    included) or an undecided arm.
   - `per_scenario.png`: `viz.per_scenario`, panels `profit [€/m²]` and `total violation hours [h]`, every label's raw
     runs × scenarios array, scenarios labelled `<location> day <start_day>`;
   - `profiles.png`: `viz.profiles`, every label but rb_tuned, panels `profit gain over rb_tuned's same season [€/m²]`
