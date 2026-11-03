@@ -1,0 +1,7 @@
+# pdfLaTeX build artifacts (see README.md, Build)
+*.aux
+*.log
+*.bbl
+*.blg
+*.out
+main.pdf
