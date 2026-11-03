@@ -9,7 +9,7 @@
   - Site: #58 site_build (`1d13dbd`), #59 compare any two controllers in any city plus the what-changed strips (`11c631a`), #60 the Results chart per city (`958ad6d`), #61 the Pages workflow (`f82ef84`), #63 the "Residual agent" names and the readout and caption clarifications (`3cfb4bb`).
   - README: #62 (`e8d8a6b`) leads with "teaching agents to grow tomatoes", the live demo, an animated replay and two stills captured from the site (`docs/media/site/`); the stale #28 captures are removed.
   - Checks on the final tree: the whole ladder, 2037 passed (17 min 25 s); check_locks clean; CI and the Pages run green on master.
-  - Public wording: "residual agent" and "constrained variant", not "co-pilot" (README, site, posts). REPORT.md, PRD.md, AGENTS.md, media.py and pyproject still say co-pilot.
+  - Public wording: "residual agent" and "constrained variant", not "co-pilot" (README, site, posts).
 - **The headline, 2026-11-02 (read this first).** The one-time final ran on the 2012 test weather and is recorded: final-registered-4d0a4ba9 (`8ceace3`) → **final-result-aee23915** (`fe3a993`). The seal is spent: `evaluate --final` and the ledger refuse any second final, and check_locks flags one.
   - Graded by #45's registered rule (a) profit CI above rb_tuned like-for-like, (b) Σ violation-hour IQMs at or below rb_tuned's, (c) 0 invalid and 0 solver failures:
     - `residual_w05` (E6, 10 seeds) passes on all three splits: gain over rb_tuned's same seasons 0.30 [0.25, 0.35], 0.40 [0.35, 0.44], 0.54 [0.47, 0.61] €/m², Σ 292.6 / 343.1 / 444.3 h vs 365.2 / 456.9 / 559.8.
@@ -87,9 +87,8 @@
 ## To do, in order
 1. **The LinkedIn post and the LinkedIn project entry** (Aarmen posts them; drafts in the session scratchpad: linkedin-v6.txt and li-project.txt with four site screenshots). The X thread is posted.
 2. **The GitHub repo's About text** still describes the hackathon dashboard (and carries an em dash); it shows in link previews. Aarmen's call.
-3. **Wording follow-up:** "co-pilot" to "residual agent" in REPORT.md, PRD.md, AGENTS.md, media.py's labels and pyproject's description.
-4. **Follow-ups** (each its own issue): the two in-scale label overlaps in the validation trade-off (#53's review); the GreenLight-Gym paper citation in REPORT.md [1]; a fruit-growth guard if any later claim compares against plain PPO; the simulator's first-day dependence on season length (#51's review); the site's x-axis title reads "-day season" if a replay fails to load (#60's review).
-5. **Disk:** `uv cache clean`, and delete decided worktrees' `.venv`s (`uv sync` rebuilds them).
+3. **Follow-ups** (each its own issue): the two in-scale label overlaps in the validation trade-off (#53's review); the GreenLight-Gym paper citation in REPORT.md [1]; a fruit-growth guard if any later claim compares against plain PPO; the simulator's first-day dependence on season length (#51's review); the site's x-axis title reads "-day season" if a replay fails to load (#60's review).
+4. **Disk:** `uv cache clean`, and delete decided worktrees' `.venv`s (`uv sync` rebuilds them).
 
 **Run the harness from a Claude Code session started inside this repo** (`cd ~/Desktop/greenleaf-dashboard && claude`). Its agents, hooks and skills load only there.
 

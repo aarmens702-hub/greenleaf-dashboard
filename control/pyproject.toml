@@ -1,7 +1,7 @@
 [project]
 name = "greenleaf-control"
 version = "0.1.0"
-description = "GreenLeaf 2.0: a reinforcement-learning co-pilot for a tomato greenhouse, on GreenLight-Gym"
+description = "GreenLeaf 2.0: a residual reinforcement-learning agent for a tomato greenhouse, on GreenLight-Gym"
 requires-python = ">=3.12,<3.13"
 license = "AGPL-3.0-or-later"
 dependencies = [

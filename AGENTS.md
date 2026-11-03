@@ -1,7 +1,7 @@
 # GreenLeaf
 
 Two projects in one repo:
-- **GreenLeaf 2.0** (`control/`, the active work): a reinforcement-learning co-pilot that runs a tomato greenhouse on top of the grower's own rules, built on Wageningen's GreenLight-Gym simulator.
+- **GreenLeaf 2.0** (`control/`, the active work): a residual reinforcement-learning agent that runs a tomato greenhouse on top of the grower's own rules, built on Wageningen's GreenLight-Gym simulator.
 - **The hackathon dashboard** (the repo root): the Streamlit app that placed 2nd at the RBC × BCCAI × SFU Beedie Agribusiness Analytics Hackathon (May 2026). Frozen, except its cleanup issue.
 
 We win on **believable numbers**:
